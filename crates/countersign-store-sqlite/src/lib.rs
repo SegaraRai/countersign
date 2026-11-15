@@ -190,6 +190,22 @@ impl Store for SqliteStore {
         row.map(|r| decode_request(r.get("body"))).transpose()
     }
 
+    async fn find_latest_by_subject(&self, subject: &SubjectRef) -> Result<Option<Request>, StoreError> {
+        let row = sqlx::query(
+            "SELECT body FROM requests
+              WHERE backend = ? AND subject_kind = ? AND subject_id = ?
+              ORDER BY created_at_ms DESC, id DESC
+              LIMIT 1",
+        )
+        .bind(subject.backend.as_str())
+        .bind(&subject.kind)
+        .bind(&subject.id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(other)?;
+        row.map(|r| decode_request(r.get("body"))).transpose()
+    }
+
     async fn list_requests(&self, filter: &RequestFilter) -> Result<Vec<Request>, StoreError> {
         let limit = filter.limit.map_or(-1, i64::from);
         let rows = sqlx::query(
@@ -254,6 +270,29 @@ impl Store for SqliteStore {
             .await
             .map_err(other)?;
         Ok(())
+    }
+
+    async fn mark_delivered(&self, id: EventId, channel: &ChannelName) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO outbox_deliveries (event_id, channel, delivered_at_ms) VALUES (?, ?, ?)
+             ON CONFLICT (event_id, channel) DO NOTHING",
+        )
+        .bind(id.to_string())
+        .bind(channel.as_str())
+        .bind(ms(Timestamp::now()))
+        .execute(&self.pool)
+        .await
+        .map_err(other)?;
+        Ok(())
+    }
+
+    async fn delivered_channels(&self, id: EventId) -> Result<Vec<ChannelName>, StoreError> {
+        let rows = sqlx::query("SELECT channel FROM outbox_deliveries WHERE event_id = ? ORDER BY channel")
+            .bind(id.to_string())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(other)?;
+        Ok(rows.iter().map(|r| ChannelName::new(r.get::<String, _>("channel"))).collect())
     }
 
     async fn fail_outbox(&self, id: EventId, retry_at: Timestamp, error: &str) -> Result<(), StoreError> {

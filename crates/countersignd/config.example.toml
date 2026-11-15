@@ -1,0 +1,46 @@
+# countersignd configuration. Validate with: countersignd --config <file> check
+# Secrets never go in this file; components read them from *_file paths or
+# environment variables. SIGHUP reloads [[approver]] and [[policy]].
+
+# Extra files with [[approver]] / [[policy]] tables, relative to this file.
+include = ["policies.d/*.toml"]
+
+[server]
+# Base URL of the web UI, used in links sent to channels.
+public_url = "https://countersign.example.ts.net"
+
+[store]
+path = "/var/lib/countersign/countersign.db"
+
+[engine]
+poll_interval = "5s"
+# What to do with pending subjects no policy matches: "ignore" or "deny".
+unmatched = "ignore"
+
+[backend.oct-main]
+type = "octelium"
+domain = "octelium.example.com"
+# octeliumctl = "/usr/local/bin/octeliumctl"
+# homedir = "/var/lib/countersign/octelium"
+# command_timeout = "30s"
+# Map Octelium identity providers to approver identities (self-approval checks).
+identity_providers = { pocket = "oidc:https://id.example.com" }
+
+[channel.log]
+type = "log"
+
+[[approver]]
+id = "alice"
+display_name = "Alice"
+groups = ["approvers"]
+# Same person in other systems; used to refuse self-approval.
+identities = ["oidc:https://id.example.com#00000000-0000-0000-0000-000000000000"]
+
+[[policy]]
+name = "elevated-agents"
+match = { backend = "oct-main", requester_group = "agents-elevated" }
+approvers = ["group:approvers"]
+max_ttl = "30m"
+default_ttl = "15m"
+pending_timeout = "10m"
+min_assurance = "fresh-auth"

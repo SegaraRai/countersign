@@ -62,7 +62,15 @@ async fn insert_get_and_one_open_request_per_subject() {
     let ev = r.withdraw(t(2)).unwrap();
     store.update_request(&r, v, &ev).await.unwrap();
     assert!(store.find_open_by_subject(&r.subject).await.unwrap().is_none());
+    assert_eq!(store.find_latest_by_subject(&r.subject).await.unwrap().map(|x| x.id), Some(r.id));
     store.insert_request(&dup, &dup_ev).await.unwrap();
+    assert_eq!(
+        store.find_latest_by_subject(&r.subject).await.unwrap().map(|x| x.id),
+        Some(dup.id),
+        "the newer request wins"
+    );
+    let other = SubjectRef { id: "nope".into(), ..r.subject.clone() };
+    assert!(store.find_latest_by_subject(&other).await.unwrap().is_none());
 }
 
 #[tokio::test]
@@ -123,6 +131,20 @@ async fn outbox_lease_retry_and_completion() {
     store.complete_outbox(retry[0].id).await.unwrap();
 
     assert_eq!(store.claim_outbox(10, lease, t(10_000)).await.unwrap(), []);
+}
+
+#[tokio::test]
+async fn per_channel_delivery_marks() {
+    let store = SqliteStore::in_memory().await.unwrap();
+    let (r, ev) = open_request("s1", t(0));
+    store.insert_request(&r, &ev).await.unwrap();
+    let item = store.claim_outbox(1, Duration::from_secs(30), t(0)).await.unwrap().remove(0);
+
+    assert_eq!(store.delivered_channels(item.id).await.unwrap(), Vec::<ChannelName>::new());
+    store.mark_delivered(item.id, &"push".into()).await.unwrap();
+    store.mark_delivered(item.id, &"push".into()).await.unwrap(); // idempotent
+    store.mark_delivered(item.id, &"chat".into()).await.unwrap();
+    assert_eq!(store.delivered_channels(item.id).await.unwrap(), [ChannelName::from("chat"), "push".into()]);
 }
 
 #[tokio::test]

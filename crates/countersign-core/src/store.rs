@@ -65,6 +65,10 @@ pub trait Store: Send + Sync {
     /// The open request for a subject, if any.
     async fn find_open_by_subject(&self, subject: &SubjectRef) -> Result<Option<Request>, StoreError>;
 
+    /// The most recently created request for a subject, open or not. Used to
+    /// avoid re-opening a subject that was already decided.
+    async fn find_latest_by_subject(&self, subject: &SubjectRef) -> Result<Option<Request>, StoreError>;
+
     async fn list_requests(&self, filter: &RequestFilter) -> Result<Vec<Request>, StoreError>;
 
     /// Lease up to `limit` due outbox items for `lease`. Leased items are not
@@ -75,6 +79,13 @@ pub trait Store: Send + Sync {
 
     /// Record a failed delivery and schedule the next attempt.
     async fn fail_outbox(&self, id: EventId, retry_at: Timestamp, error: &str) -> Result<(), StoreError>;
+
+    /// Record that `channel` has handled event `id`, so a retry caused by
+    /// another channel does not deliver it twice.
+    async fn mark_delivered(&self, id: EventId, channel: &ChannelName) -> Result<(), StoreError>;
+
+    /// Channels that have already handled event `id`.
+    async fn delivered_channels(&self, id: EventId) -> Result<Vec<ChannelName>, StoreError>;
 
     /// Remember a posted message so later events can update it.
     async fn save_message_ref(&self, request_id: RequestId, msg: &MessageRef) -> Result<(), StoreError>;

@@ -1,0 +1,174 @@
+//! Delivers outbox events to channels.
+//!
+//! - `requested`: every channel posts a message (once; the stored message
+//!   reference makes retries idempotent).
+//! - Later events: channels that can edit messages update theirs; channels
+//!   that cannot are only told about outcomes worth a new message.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use countersign_core::{Channel, ChannelError, DomainEvent, Notification, OutboxItem, Store, StoreError};
+use jiff::{SignedDuration, Timestamp};
+use tracing::{debug, warn};
+
+const BATCH: u32 = 32;
+const LEASE: Duration = Duration::from_secs(60);
+const MAX_ATTEMPTS: u32 = 12;
+
+pub struct Dispatcher {
+    store: Arc<dyn Store>,
+    channels: Vec<Arc<dyn Channel>>,
+    public_url: String,
+}
+
+impl std::fmt::Debug for Dispatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Dispatcher")
+            .field("channels", &self.channels.iter().map(|c| c.name().to_string()).collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Whether a channel that cannot edit messages should post about `ev`.
+fn worth_a_new_message(ev: &DomainEvent) -> bool {
+    matches!(
+        ev,
+        DomainEvent::Requested { .. }
+            | DomainEvent::Denied { .. }
+            | DomainEvent::Granted { .. }
+            | DomainEvent::GrantFailed { .. }
+            | DomainEvent::Expired { .. }
+            | DomainEvent::Revoked { .. }
+    )
+}
+
+/// Delay before attempt `attempts + 1`: 5s, 10s, 20s, … capped at 10 minutes.
+fn backoff(attempts: u32) -> SignedDuration {
+    let secs = 5u64.saturating_mul(1u64 << attempts.saturating_sub(1).min(7)).min(600);
+    SignedDuration::from_secs(i64::try_from(secs).unwrap_or(600))
+}
+
+impl Dispatcher {
+    pub fn new(store: Arc<dyn Store>, channels: Vec<Arc<dyn Channel>>, public_url: &str) -> Self {
+        Self { store, channels, public_url: public_url.trim_end_matches('/').to_owned() }
+    }
+
+    /// Deliver one batch of due events. Returns how many were handled.
+    pub async fn run_once(&self, now: Timestamp) -> Result<usize, StoreError> {
+        let items = self.store.claim_outbox(BATCH, LEASE, now).await?;
+        let n = items.len();
+        for item in items {
+            let retry = self.deliver(&item).await?;
+            if retry && item.attempts < MAX_ATTEMPTS {
+                let at = now.checked_add(backoff(item.attempts)).unwrap_or(now);
+                self.store.fail_outbox(item.id, at, "a channel failed temporarily").await?;
+            } else {
+                if retry {
+                    warn!(event = %item.id, kind = item.event.kind(), "giving up after {MAX_ATTEMPTS} attempts");
+                }
+                self.store.complete_outbox(item.id).await?;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Returns whether a retry is needed.
+    async fn deliver(&self, item: &OutboxItem) -> Result<bool, StoreError> {
+        let request_id = item.event.request_id();
+        let Some(request) = self.store.get_request(request_id).await? else {
+            warn!(request = %request_id, "outbox event for a missing request");
+            return Ok(false);
+        };
+        let refs = self.store.message_refs(request_id).await?;
+        let web_url = format!("{}/requests/{}", self.public_url, request_id);
+        let n = Notification { request: &request, event: &item.event, web_url: &web_url };
+        let is_new = matches!(item.event, DomainEvent::Requested { .. });
+        let done = self.store.delivered_channels(item.id).await?;
+
+        let mut retry = false;
+        for ch in &self.channels {
+            if done.contains(ch.name()) {
+                continue;
+            }
+            let existing = refs.iter().find(|m| &m.channel == ch.name());
+            let result = match existing {
+                // Already announced (this is a retry).
+                Some(_) if is_new => continue,
+                Some(m) if ch.capabilities().update => ch.update(m, n).await.map(|()| None),
+                _ if worth_a_new_message(&item.event) => ch.notify(n).await,
+                _ => continue,
+            };
+            match result {
+                Ok(msg) => {
+                    if let Some(msg) = msg {
+                        self.store.save_message_ref(request_id, &msg).await?;
+                    }
+                    self.store.mark_delivered(item.id, ch.name()).await?;
+                }
+                Err(e) if e.is_retryable() => {
+                    debug!(channel = %ch.name(), error = %e, "delivery failed; will retry");
+                    retry = true;
+                }
+                Err(e) => {
+                    // Permanent for this channel: do not retry it.
+                    warn!(channel = %ch.name(), event = item.event.kind(), error = %e, "delivery failed");
+                    self.store.mark_delivered(item.id, ch.name()).await?;
+                }
+            }
+        }
+        Ok(retry)
+    }
+}
+
+/// A channel that writes to the daemon log.
+#[derive(Debug)]
+pub struct LogChannel {
+    name: countersign_core::ChannelName,
+}
+
+impl LogChannel {
+    pub fn new(name: countersign_core::ChannelName) -> Self {
+        Self { name }
+    }
+}
+
+#[async_trait::async_trait]
+impl Channel for LogChannel {
+    fn name(&self) -> &countersign_core::ChannelName {
+        &self.name
+    }
+
+    fn capabilities(&self) -> countersign_core::ChannelCaps {
+        countersign_core::ChannelCaps::default()
+    }
+
+    async fn notify(&self, n: Notification<'_>) -> Result<Option<countersign_core::MessageRef>, ChannelError> {
+        let r = n.request;
+        tracing::info!(
+            channel = %self.name,
+            event = n.event.kind(),
+            request = %r.id,
+            requester = %r.facts.requester.id,
+            state = r.state.name(),
+            url = n.web_url,
+            "notification"
+        );
+        Ok(None)
+    }
+
+    async fn update(&self, _: &countersign_core::MessageRef, _: Notification<'_>) -> Result<(), ChannelError> {
+        Err(ChannelError::Unsupported)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backoff;
+
+    #[test]
+    fn backoff_grows_and_caps() {
+        let secs: Vec<i64> = (1..=10).map(|a| backoff(a).as_secs()).collect();
+        assert_eq!(secs, [5, 10, 20, 40, 80, 160, 320, 600, 600, 600]);
+    }
+}

@@ -59,7 +59,17 @@ min_assurance = "linked"       # chat buttons may approve directly
 | `countersign-backend-octelium` | approves/rejects pending Octelium sessions via `octeliumctl` |
 | `countersign-backend-exec` | planned |
 | `countersign-channel-ntfy`, `-webhook`, `-discord` | planned |
-| `countersignd` (daemon), `countersign` (CLI) | planned |
+| `countersignd` | daemon: config, engine (discover, decide, grant, expire), outbox delivery; web UI planned |
+| `countersign` (CLI) | planned |
+
+## Running
+
+```sh
+countersignd --config /etc/countersign/config.toml check
+countersignd --config /etc/countersign/config.toml run
+```
+
+See [`crates/countersignd/config.example.toml`](crates/countersignd/config.example.toml).
 
 ## License
 
