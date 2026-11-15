@@ -142,6 +142,9 @@ pub enum ChannelConfig {
     /// Posts to a Discord channel; decisions via buttons over the Gateway.
     #[cfg(feature = "channel-discord")]
     Discord(countersign_channel_discord::DiscordConfig),
+    /// Push notifications through an ntfy server, linking to the web UI.
+    #[cfg(feature = "channel-ntfy")]
+    Ntfy(countersign_channel_ntfy::NtfyConfig),
 }
 
 /// One file as written on disk.

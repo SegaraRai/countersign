@@ -1,0 +1,25 @@
+[package]
+name = "countersign-channel-ntfy"
+description = "ntfy channel for countersign: push notifications that link to the web UI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+countersign-core.workspace = true
+jiff.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "sync"] }
+toml.workspace = true
+
+[lints]
+workspace = true

@@ -44,6 +44,17 @@ identity_providers = { pocket = "oidc:https://id.example.com" }
 [channel.log]
 type = "log"
 
+# ntfy: push notifications with a button that opens the request in the web UI.
+# With details = true, requester, target and reason are sent to the ntfy
+# server; use a server you trust or set details = false.
+# [channel.phone]
+# type = "ntfy"
+# server = "https://ntfy.example.com"
+# topic = "countersign-ops"
+# token_file = "/etc/countersign/ntfy-token"  # optional; or COUNTERSIGN_NTFY_TOKEN
+# details = true
+# priority = 4                                # for new requests (1-5)
+
 # Discord: requests are posted with Approve/Deny buttons; presses arrive over
 # the bot's Gateway connection (outbound only). The bot needs View Channel,
 # Send Messages and Embed Links in the channel; no privileged intents.

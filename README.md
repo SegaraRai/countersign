@@ -60,7 +60,8 @@ min_assurance = "linked"       # chat buttons may approve directly
 | `countersign-backend-octelium` | approves/rejects pending Octelium sessions via `octeliumctl` |
 | `countersign-backend-exec` | planned |
 | `countersign-channel-discord` | posts requests with Approve/Deny buttons; receives presses over the Gateway (no inbound endpoint) |
-| `countersign-channel-ntfy`, `-webhook` | planned |
+| `countersign-channel-ntfy` | push notifications via an ntfy server, linking to the web UI (notify-only) |
+| `countersign-channel-webhook` | planned |
 | `countersignd` | daemon: config, engine (discover, decide, grant, expire), outbox delivery, web UI and JSON API |
 | `countersign` (CLI) | planned |
 
