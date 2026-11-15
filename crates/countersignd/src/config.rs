@@ -31,8 +31,6 @@ pub struct Config {
     pub store: StoreConfig,
     pub engine: EngineConfig,
     pub backends: BTreeMap<BackendName, BackendConfig>,
-    // Zero-sized values only until the first configurable channel lands.
-    #[allow(clippy::zero_sized_map_values)]
     pub channels: BTreeMap<ChannelName, ChannelConfig>,
     pub approvers: Vec<Approver>,
     pub policies: PolicySet,
@@ -141,6 +139,9 @@ pub enum BackendConfig {
 pub enum ChannelConfig {
     /// Writes events to the daemon log. Useful for testing.
     Log {},
+    /// Posts to a Discord channel; decisions via buttons over the Gateway.
+    #[cfg(feature = "channel-discord")]
+    Discord(countersign_channel_discord::DiscordConfig),
 }
 
 /// One file as written on disk.
@@ -159,7 +160,6 @@ struct MainFile {
     #[serde(default)]
     backend: BTreeMap<BackendName, BackendConfig>,
     #[serde(default)]
-    #[allow(clippy::zero_sized_map_values)]
     channel: BTreeMap<ChannelName, ChannelConfig>,
     #[serde(default)]
     approver: Vec<Approver>,

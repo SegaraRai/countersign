@@ -52,7 +52,7 @@ code { font-size: .9em; }
 <header>
   <a class="brand" href="/">countersign</a>
   {% if let Some(user) = user %}
-  <span class="muted">{{ user.name }}
+  <span class="muted"><a href="/link">Link chat account</a> · {{ user.name }}
     <form class="inline" method="post" action="/logout">
       <input type="hidden" name="csrf" value="{{ user.csrf }}">
       <button type="submit">Log out</button>

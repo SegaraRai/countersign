@@ -3,6 +3,7 @@
 pub mod config;
 pub mod dispatch;
 pub mod engine;
+pub mod link;
 pub mod web;
 
 use std::sync::Arc;
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use countersign_core::{AccessBackend, Channel, Store, StoreError};
 use countersign_store_sqlite::SqliteStore;
 
+#[cfg_attr(not(feature = "backend-octelium"), allow(unused_imports))]
 use crate::config::{BackendConfig, ChannelConfig, Config};
 use crate::dispatch::{Dispatcher, LogChannel};
 use crate::engine::{Engine, Rules};
@@ -24,6 +26,8 @@ pub enum BuildError {
     Auth(#[from] countersign_core::AuthError),
     #[error("session key: {0}")]
     SessionKey(String),
+    #[error("channel {name}: {source}")]
+    Channel { name: String, source: countersign_core::ChannelError },
 }
 
 /// Instantiate the configured authenticator, if any.
@@ -77,30 +81,46 @@ pub fn build_backends(config: &Config) -> Result<Vec<Arc<dyn AccessBackend>>, Bu
         .collect()
 }
 
-/// Instantiate the configured channels.
-pub fn build_channels(config: &Config) -> Vec<Arc<dyn Channel>> {
+/// Instantiate the configured channels. Reads secrets; does not connect.
+pub fn build_channels(config: &Config) -> Result<Vec<Arc<dyn Channel>>, BuildError> {
     config
         .channels
         .iter()
-        .map(|(name, cc)| match cc {
-            ChannelConfig::Log {} => Arc::new(LogChannel::new(name.clone())) as Arc<dyn Channel>,
+        .map(|(name, cc)| -> Result<Arc<dyn Channel>, BuildError> {
+            Ok(match cc {
+                ChannelConfig::Log {} => Arc::new(LogChannel::new(name.clone())),
+                #[cfg(feature = "channel-discord")]
+                ChannelConfig::Discord(c) => Arc::new(
+                    countersign_channel_discord::DiscordChannel::new(name.clone(), c.clone())
+                        .map_err(|source| BuildError::Channel { name: name.to_string(), source })?,
+                ),
+            })
         })
         .collect()
 }
 
 /// Everything the daemon runs.
-#[derive(Debug)]
 pub struct Daemon {
     pub engine: Arc<Engine>,
     pub dispatcher: Arc<Dispatcher>,
     pub web: web::AppState,
+    /// Channels whose [`Channel::run`] should be kept running.
+    pub interactive: Vec<Arc<dyn Channel>>,
+    pub sink: Arc<link::DaemonSink>,
+}
+
+impl std::fmt::Debug for Daemon {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let interactive: Vec<_> = self.interactive.iter().map(|c| c.name().to_string()).collect();
+        f.debug_struct("Daemon").field("web", &self.web).field("interactive", &interactive).finish_non_exhaustive()
+    }
 }
 
 impl Daemon {
     pub async fn build(config: &Config) -> Result<Self, BuildError> {
         let url = format!("sqlite://{}", config.store.path.display());
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&url).await?);
-        let mut daemon = Self::with_parts(config, store, build_backends(config)?, build_channels(config))?;
+        let mut daemon = Self::with_parts(config, store, build_backends(config)?, build_channels(config)?)?;
         daemon.web.auth = build_authenticator(config)?;
         daemon.web.key = session_key(config)?;
         Ok(daemon)
@@ -113,10 +133,14 @@ impl Daemon {
         channels: Vec<Arc<dyn Channel>>,
     ) -> Result<Self, BuildError> {
         let engine = Arc::new(Engine::new(Arc::clone(&store), backends, rules_from(config)));
+        let interactive = channels.iter().filter(|c| c.capabilities().interactive).cloned().collect();
         let dispatcher = Arc::new(Dispatcher::new(store, channels, &config.server.public_url));
+        let codes = Arc::new(link::LinkCodes::default());
+        let sink = Arc::new(link::DaemonSink { engine: Arc::clone(&engine), codes: Arc::clone(&codes) });
         let web = web::AppState {
             engine: Arc::clone(&engine),
             auth: None,
+            links: codes,
             key: axum_extra::extract::cookie::Key::generate(),
             settings: Arc::new(web::WebSettings {
                 secure_cookies: config.server.public_url.starts_with("https://"),
@@ -124,6 +148,6 @@ impl Daemon {
                 fresh_auth_window: config.server.fresh_auth_window,
             }),
         };
-        Ok(Self { engine, dispatcher, web })
+        Ok(Self { engine, dispatcher, web, interactive, sink })
     }
 }

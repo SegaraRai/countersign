@@ -1,10 +1,13 @@
 //! Where requests are announced and, for interactive channels, decided.
 //!
-//! The outbound half (notify/update) is this trait. The inbound half — HTTP
-//! endpoints that receive button presses — is web-framework specific and lives
-//! in each channel crate; it must verify the platform's signature, resolve the
-//! external user to a linked [`ApproverId`], and hand the daemon an
-//! [`ActionIntent`].
+//! Outbound, channels post and edit messages ([`Channel::notify`],
+//! [`Channel::update`]). Inbound, interactive channels run a long-lived task
+//! ([`Channel::run`]) that receives button presses over a connection the
+//! channel itself opens (e.g. the Discord Gateway), authenticates the sender
+//! by the platform's own means, resolves them to a linked approver through
+//! the [`ActionSink`], and submits an [`ActionIntent`].
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -98,6 +101,20 @@ impl ChannelError {
     }
 }
 
+/// What an interactive channel can ask of the daemon.
+#[async_trait]
+pub trait ActionSink: Send + Sync {
+    /// The approver linked to an external account on this channel, if any.
+    async fn resolve_account(&self, channel: &ChannelName, external_id: &str) -> Result<Option<ApproverId>, String>;
+
+    /// Redeem a one-time code issued in the web UI, linking `external_id` on
+    /// `channel` to the approver who requested the code.
+    async fn link_account(&self, channel: &ChannelName, external_id: &str, code: &str) -> Result<ApproverId, String>;
+
+    /// Record a decision. Errors are human-readable reasons.
+    async fn submit(&self, intent: ActionIntent) -> Result<Request, String>;
+}
+
 #[async_trait]
 pub trait Channel: Send + Sync {
     fn name(&self) -> &ChannelName;
@@ -109,4 +126,12 @@ pub trait Channel: Send + Sync {
 
     /// Rewrite an earlier message to reflect the request's new state.
     async fn update(&self, msg: &MessageRef, n: Notification<'_>) -> Result<(), ChannelError>;
+
+    /// Receive actions until the connection ends for good. Only called when
+    /// [`ChannelCaps::interactive`] is set; the daemon restarts it with a
+    /// delay if it returns an error.
+    async fn run(&self, sink: Arc<dyn ActionSink>) -> Result<(), ChannelError> {
+        let _ = sink;
+        Ok(())
+    }
 }

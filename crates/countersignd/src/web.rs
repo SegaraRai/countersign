@@ -31,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::engine::{Engine, EngineError};
+use crate::link::LinkCodes;
 
 const SESSION_COOKIE: &str = "cs_session";
 const LOGIN_COOKIE: &str = "cs_login";
@@ -50,6 +51,7 @@ pub struct WebSettings {
 pub struct AppState {
     pub engine: Arc<Engine>,
     pub auth: Option<Arc<dyn Authenticator>>,
+    pub links: Arc<LinkCodes>,
     pub key: Key,
     pub settings: Arc<WebSettings>,
 }
@@ -75,6 +77,7 @@ pub fn router(state: AppState) -> Router {
         .route("/login", get(login))
         .route("/auth/callback", get(callback))
         .route("/logout", post(logout))
+        .route("/link", get(link_page).post(link_issue))
         .route("/api/me", get(api_me))
         .route("/api/requests", get(api_list))
         .route("/api/requests/{id}", get(api_get))
@@ -343,6 +346,15 @@ struct RequestPage {
 }
 
 #[derive(Template)]
+#[template(path = "link.html")]
+struct LinkPage {
+    user: Option<UserView>,
+    csrf: String,
+    code: Option<String>,
+    expires: Option<String>,
+}
+
+#[derive(Template)]
 #[template(path = "message.html")]
 struct MessagePage {
     user: Option<UserView>,
@@ -572,6 +584,45 @@ async fn revoke_form(
             request_page(&state, &session, id, Some(msg), status).await
         }
     }
+}
+
+// ------------------------------------------------------------------ chat account linking
+
+async fn link_page(State(state): State<AppState>, jar: PrivateCookieJar) -> Response {
+    let Some(session) = current_session(&state, &jar, Timestamp::now()) else {
+        return Redirect::to(&login_url("/link", false)).into_response();
+    };
+    render(&LinkPage { user: Some(session.view()), csrf: session.data.csrf.clone(), code: None, expires: None })
+}
+
+async fn link_issue(State(state): State<AppState>, jar: PrivateCookieJar, Form(form): Form<CsrfForm>) -> Response {
+    let now = Timestamp::now();
+    let Some(session) = current_session(&state, &jar, now) else {
+        return message(
+            StatusCode::UNAUTHORIZED,
+            None,
+            "Signed out",
+            "Your session has ended. Sign in and try again.",
+            None,
+        );
+    };
+    if !same(&form.csrf, &session.data.csrf) {
+        return message(
+            StatusCode::FORBIDDEN,
+            Some(session.view()),
+            "Forbidden",
+            "The form was not valid. Reload the page and try again.",
+            None,
+        );
+    }
+    let (code, expires) = state.links.issue(&session.approver.id, now);
+    info!(approver = %session.approver.id, "chat link code issued");
+    render(&LinkPage {
+        user: Some(session.view()),
+        csrf: session.data.csrf.clone(),
+        code: Some(code),
+        expires: Some(fmt_time(expires)),
+    })
 }
 
 // ------------------------------------------------------------------ login

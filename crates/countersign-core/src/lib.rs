@@ -30,7 +30,9 @@ mod time;
 pub use assurance::Assurance;
 pub use auth::{AuthError, Authenticator, LoginStart, VerifiedLogin};
 pub use backend::{AccessBackend, BackendCaps, BackendError, GrantHandle};
-pub use channel::{ActionIntent, ApproveMode, Channel, ChannelCaps, ChannelError, MessageRef, Notification};
+pub use channel::{
+    ActionIntent, ActionSink, ApproveMode, Channel, ChannelCaps, ChannelError, MessageRef, Notification,
+};
 pub use event::DomainEvent;
 pub use id::{ApproverId, BackendName, ChannelName, EventId, PolicyName, RequestId};
 pub use policy::{ApproverSelector, Matcher, Policy, PolicyError, PolicySet, Requirements};

@@ -9,8 +9,9 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode, header};
 use countersign_core::{
-    AccessBackend, AuthError, Authenticator, BackendCaps, BackendError, BackendName, GrantHandle, LoginStart,
-    PendingSubject, RequestState, Requester, Store, SubjectFacts, SubjectRef, VerifiedLogin,
+    AccessBackend, ActionIntent, ActionSink, ApproverId, Assurance, AuthError, Authenticator, BackendCaps,
+    BackendError, BackendName, ChannelName, GrantHandle, LoginStart, PendingSubject, RequestState, Requester, Store,
+    SubjectFacts, SubjectRef, Verdict, VerifiedLogin,
 };
 use countersign_store_sqlite::SqliteStore;
 use countersignd::Daemon;
@@ -412,4 +413,67 @@ async fn cookies_are_hardened_and_headers_set() {
     assert!(csp.contains("frame-ancestors 'none'"));
     let p = s.browser.get("/healthz").await;
     assert_eq!(p.body, "ok");
+}
+
+fn link_code(body: &str) -> String {
+    let start = body.find("user-select: all\">").expect("code shown") + "user-select: all\">".len();
+    body[start..].split('<').next().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn chat_accounts_link_with_one_time_codes_and_decide_at_linked_assurance() {
+    let mut s = setup("linked").await;
+    let id: countersign_core::RequestId = s.request_id().await.parse().unwrap();
+    let sink: Arc<dyn ActionSink> = s.daemon.sink.clone();
+    let discord = ChannelName::new("discord");
+
+    let p = s.browser.get("/link").await;
+    assert_eq!(p.location.as_deref(), Some("/login?next=/link"));
+
+    s.browser.login("oidc:idp%23bob", None, "/link").await;
+    let csrf = s.browser.csrf().await;
+    assert!(s.browser.get("/link").await.body.contains("Get a code"));
+    assert_eq!(s.browser.post_form("/link", "csrf=nope").await.status, StatusCode::FORBIDDEN);
+    let p = s.browser.post_form("/link", &format!("csrf={csrf}")).await;
+    assert_eq!(p.status, StatusCode::OK);
+    let code = link_code(&p.body);
+    assert_eq!(code.len(), 11, "{code}");
+
+    assert_eq!(sink.resolve_account(&discord, "42").await, Ok(None));
+    assert!(sink.link_account(&discord, "42", "WRONG-CODE").await.is_err());
+    assert_eq!(sink.link_account(&discord, "42", &code.to_lowercase()).await, Ok(ApproverId::new("bob")));
+    assert!(sink.link_account(&discord, "43", &code).await.is_err(), "codes are single-use");
+    assert_eq!(sink.resolve_account(&discord, "42").await, Ok(Some(ApproverId::new("bob"))));
+    assert_eq!(sink.resolve_account(&ChannelName::new("other"), "42").await, Ok(None), "links are per channel");
+
+    let intent = ActionIntent {
+        request_id: id,
+        verdict: Verdict::Approve,
+        approver: ApproverId::new("bob"),
+        assurance: Assurance::Linked,
+        via: discord,
+        comment: None,
+    };
+    let r = sink.submit(intent).await.unwrap();
+    assert!(matches!(r.state, RequestState::Active { .. }), "{:?}", r.state);
+    assert_eq!(*s.backend.state.lock().unwrap(), "active");
+}
+
+#[tokio::test]
+async fn chat_approvals_are_refused_when_the_policy_needs_more_than_linked() {
+    let s = setup("web").await;
+    let id: countersign_core::RequestId = s.request_id().await.parse().unwrap();
+    let sink: Arc<dyn ActionSink> = s.daemon.sink.clone();
+    let mut intent = ActionIntent {
+        request_id: id,
+        verdict: Verdict::Approve,
+        approver: ApproverId::new("bob"),
+        assurance: Assurance::Linked,
+        via: ChannelName::new("discord"),
+        comment: None,
+    };
+    let err = sink.submit(intent.clone()).await.unwrap_err();
+    assert!(err.contains("assurance"), "{err}");
+    intent.verdict = Verdict::Deny;
+    assert_eq!(sink.submit(intent).await.unwrap().state, RequestState::Denied, "denials are always accepted");
 }

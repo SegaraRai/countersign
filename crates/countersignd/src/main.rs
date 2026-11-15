@@ -29,6 +29,8 @@ enum Command {
 }
 
 const DISPATCH_INTERVAL: Duration = Duration::from_secs(1);
+const RECEIVER_MIN_BACKOFF: Duration = Duration::from_secs(5);
+const RECEIVER_MAX_BACKOFF: Duration = Duration::from_secs(300);
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -110,6 +112,22 @@ async fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Er
         }
     });
 
+    let receivers: Vec<_> = daemon
+        .interactive
+        .iter()
+        .map(|channel| {
+            let channel = Arc::clone(channel);
+            let sink: Arc<dyn countersign_core::ActionSink> = daemon.sink.clone();
+            let mut stop = stop_rx.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    () = receive(channel, sink) => {}
+                    _ = stop.changed() => {}
+                }
+            })
+        })
+        .collect();
+
     let listener = tokio::net::TcpListener::bind(config.server.listen).await?;
     info!(listen = %config.server.listen, url = %config.server.public_url, "web UI listening");
     let app = countersignd::web::router(daemon.web.clone());
@@ -127,7 +145,27 @@ async fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Er
     info!("shutting down");
     let _ = stop_tx.send(true);
     let _ = tokio::join!(ticker, delivery, server);
+    for r in receivers {
+        let _ = r.await;
+    }
     Ok(())
+}
+
+/// Keep an interactive channel's receiver running, backing off on failure.
+async fn receive(channel: Arc<dyn countersign_core::Channel>, sink: Arc<dyn countersign_core::ActionSink>) {
+    let mut delay = RECEIVER_MIN_BACKOFF;
+    loop {
+        let started = tokio::time::Instant::now();
+        match channel.run(Arc::clone(&sink)).await {
+            Ok(()) => return,
+            Err(e) => warn!(channel = %channel.name(), error = %e, retry_in = ?delay, "channel receiver stopped"),
+        }
+        if started.elapsed() > RECEIVER_MAX_BACKOFF {
+            delay = RECEIVER_MIN_BACKOFF;
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(RECEIVER_MAX_BACKOFF);
+    }
 }
 
 /// Wait for SIGINT/SIGTERM. On Unix, SIGHUP reloads policies and approvers.

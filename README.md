@@ -24,7 +24,8 @@ AccessBackend ◀─▶│ request state machine · policy · events   │◀─
 - **Backends** hold the actual access. countersign re-reads facts from the
   backend before acting and never trusts what the requester claims.
 - **Channels** announce requests. Interactive channels can carry decisions back;
-  every inbound action is signature-verified and tied to a linked approver.
+  every inbound action is authenticated by the platform and tied to an approver
+  through an account link made with a one-time code from the web UI.
 - **Assurance**: each channel declares the strongest assurance it can vouch for
   (`linked` < `web` < `fresh-auth`). Policies set the minimum for approval. If a
   channel cannot meet it, its approve button becomes a link to the web UI, where
@@ -58,7 +59,8 @@ min_assurance = "linked"       # chat buttons may approve directly
 | `countersign-auth-oidc` | OpenID Connect login (code flow + PKCE) for the web UI |
 | `countersign-backend-octelium` | approves/rejects pending Octelium sessions via `octeliumctl` |
 | `countersign-backend-exec` | planned |
-| `countersign-channel-ntfy`, `-webhook`, `-discord` | planned |
+| `countersign-channel-discord` | posts requests with Approve/Deny buttons; receives presses over the Gateway (no inbound endpoint) |
+| `countersign-channel-ntfy`, `-webhook` | planned |
 | `countersignd` | daemon: config, engine (discover, decide, grant, expire), outbox delivery, web UI and JSON API |
 | `countersign` (CLI) | planned |
 
