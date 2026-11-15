@@ -58,7 +58,15 @@ fn caps() -> ChannelCaps {
 
 fn render(r: &Request) -> render::View {
     let event = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
-    view(Notification { request: r, event: &event, web_url: "https://cs.example/requests/x" }, caps())
+    view(
+        Notification {
+            request: r,
+            event_id: countersign_core::EventId::new(),
+            event: &event,
+            web_url: "https://cs.example/requests/x",
+        },
+        caps(),
+    )
 }
 
 /// `(label, style, custom_id, url)` of each button.

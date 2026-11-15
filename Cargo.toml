@@ -14,6 +14,7 @@ countersign-auth-oidc = { path = "crates/countersign-auth-oidc" }
 countersign-backend-octelium = { path = "crates/countersign-backend-octelium" }
 countersign-channel-discord = { path = "crates/countersign-channel-discord" }
 countersign-channel-ntfy = { path = "crates/countersign-channel-ntfy" }
+countersign-channel-webhook = { path = "crates/countersign-channel-webhook" }
 countersign-core = { path = "crates/countersign-core" }
 countersign-store-sqlite = { path = "crates/countersign-store-sqlite" }
 

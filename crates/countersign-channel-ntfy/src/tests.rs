@@ -52,7 +52,10 @@ const URL: &str = "https://cs.example/requests/x";
 fn new_requests_carry_details_and_a_review_button() {
     let r = request();
     let ev = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
-    let p = publish(&config(true), Notification { request: &r, event: &ev, web_url: URL });
+    let p = publish(
+        &config(true),
+        Notification { request: &r, event_id: countersign_core::EventId::new(), event: &ev, web_url: URL },
+    );
     assert_eq!(p.topic, "cs-ops");
     assert_eq!(p.title, "Access request: agent-7");
     assert_eq!(p.priority, 4);
@@ -70,7 +73,10 @@ fn new_requests_carry_details_and_a_review_button() {
 fn without_details_nothing_about_the_request_leaves() {
     let mut r = request();
     let ev = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
-    let p = publish(&config(false), Notification { request: &r, event: &ev, web_url: URL });
+    let p = publish(
+        &config(false),
+        Notification { request: &r, event_id: countersign_core::EventId::new(), event: &ev, web_url: URL },
+    );
     let json = serde_json::to_string(&p).unwrap();
     for secret in ["agent-7", "db-prod", "rotate", "\"ops\""] {
         assert!(!json.contains(secret), "{secret} leaked: {json}");
@@ -79,7 +85,10 @@ fn without_details_nothing_about_the_request_leaves() {
 
     r.state = RequestState::Failed { error: "boom db-prod".into() };
     let ev = DomainEvent::GrantFailed { request_id: r.id, error: "boom db-prod".into(), at: Timestamp::UNIX_EPOCH };
-    let p = publish(&config(false), Notification { request: &r, event: &ev, web_url: "relative/x" });
+    let p = publish(
+        &config(false),
+        Notification { request: &r, event_id: countersign_core::EventId::new(), event: &ev, web_url: "relative/x" },
+    );
     assert!(!serde_json::to_string(&p).unwrap().contains("db-prod"));
     assert_eq!(p.click, None, "non-http links are dropped");
     assert_eq!(p.actions, []);
@@ -91,7 +100,10 @@ fn outcomes_say_what_happened() {
     let until = Timestamp::from_second(3600).unwrap();
     r.state = RequestState::Active { until };
     let ev = DomainEvent::Granted { request_id: r.id, until, at: Timestamp::UNIX_EPOCH };
-    let p = publish(&config(true), Notification { request: &r, event: &ev, web_url: URL });
+    let p = publish(
+        &config(true),
+        Notification { request: &r, event_id: countersign_core::EventId::new(), event: &ev, web_url: URL },
+    );
     assert_eq!(p.title, "Access granted: agent-7");
     assert!(p.message.ends_with("Active until 1970-01-01 01:00 UTC"), "{}", p.message);
     assert_eq!(p.priority, 3);
@@ -156,7 +168,12 @@ async fn publishes_json_with_bearer_token() {
     assert!(!format!("{ch:?}").contains("tk_test"), "token is not in Debug output");
     let r = request();
     let ev = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
-    assert_eq!(ch.notify(Notification { request: &r, event: &ev, web_url: URL }).await.unwrap(), None);
+    assert_eq!(
+        ch.notify(Notification { request: &r, event_id: countersign_core::EventId::new(), event: &ev, web_url: URL })
+            .await
+            .unwrap(),
+        None
+    );
 
     {
         let c = seen.lock().unwrap();
@@ -171,7 +188,7 @@ async fn publishes_json_with_bearer_token() {
 async fn http_failures_map_to_retryable_or_permanent_errors() {
     let r = request();
     let ev = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
-    let n = Notification { request: &r, event: &ev, web_url: URL };
+    let n = Notification { request: &r, event_id: countersign_core::EventId::new(), event: &ev, web_url: URL };
 
     let (url, _) = server(StatusCode::TOO_MANY_REQUESTS).await;
     let e = channel(&url, None).notify(n).await.unwrap_err();

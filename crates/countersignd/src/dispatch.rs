@@ -82,7 +82,7 @@ impl Dispatcher {
         };
         let refs = self.store.message_refs(request_id).await?;
         let web_url = format!("{}/requests/{}", self.public_url, request_id);
-        let n = Notification { request: &request, event: &item.event, web_url: &web_url };
+        let n = Notification { request: &request, event_id: item.id, event: &item.event, web_url: &web_url };
         let is_new = matches!(item.event, DomainEvent::Requested { .. });
         let done = self.store.delivered_channels(item.id).await?;
 

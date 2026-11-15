@@ -590,6 +590,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "countersign-channel-webhook"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "countersign-core",
+ "hmac 0.12.1",
+ "jiff",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "countersign-core"
 version = "0.1.0"
 dependencies = [
@@ -628,6 +646,7 @@ dependencies = [
  "countersign-backend-octelium",
  "countersign-channel-discord",
  "countersign-channel-ntfy",
+ "countersign-channel-webhook",
  "countersign-core",
  "countersign-store-sqlite",
  "http-body-util",

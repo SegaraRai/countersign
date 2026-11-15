@@ -145,6 +145,9 @@ pub enum ChannelConfig {
     /// Push notifications through an ntfy server, linking to the web UI.
     #[cfg(feature = "channel-ntfy")]
     Ntfy(countersign_channel_ntfy::NtfyConfig),
+    /// Signed JSON events (Standard Webhooks), sent to a URL.
+    #[cfg(feature = "channel-webhook")]
+    Webhook(countersign_channel_webhook::WebhookConfig),
 }
 
 /// One file as written on disk.

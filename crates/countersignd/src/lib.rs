@@ -99,6 +99,11 @@ pub fn build_channels(config: &Config) -> Result<Vec<Arc<dyn Channel>>, BuildErr
                     countersign_channel_ntfy::NtfyChannel::new(name.clone(), c.clone())
                         .map_err(|source| BuildError::Channel { name: name.to_string(), source })?,
                 ),
+                #[cfg(feature = "channel-webhook")]
+                ChannelConfig::Webhook(c) => Arc::new(
+                    countersign_channel_webhook::WebhookChannel::new(name.clone(), c)
+                        .map_err(|source| BuildError::Channel { name: name.to_string(), source })?,
+                ),
             })
         })
         .collect()

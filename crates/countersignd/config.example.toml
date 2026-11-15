@@ -55,6 +55,15 @@ type = "log"
 # details = true
 # priority = 4                                # for new requests (1-5)
 
+# Webhook: signed JSON events (Standard Webhooks headers webhook-id,
+# webhook-timestamp, webhook-signature) for new requests and outcomes.
+# webhook-id is stable across retries; deduplicate on it.
+# [channel.automation]
+# type = "webhook"
+# url = "https://hooks.example.com/countersign"
+# secret_file = "/etc/countersign/webhook-secret"    # "whsec_<base64>" or raw bytes (>= 16)
+# bearer_token_file = "/etc/countersign/hook-token"  # optional
+
 # Discord: requests are posted with Approve/Deny buttons; presses arrive over
 # the bot's Gateway connection (outbound only). The bot needs View Channel,
 # Send Messages and Embed Links in the channel; no privileged intents.

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::assurance::Assurance;
 use crate::event::DomainEvent;
-use crate::id::{ApproverId, ChannelName, RequestId};
+use crate::id::{ApproverId, ChannelName, EventId, RequestId};
 use crate::request::{Request, Verdict};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +64,9 @@ pub struct MessageRef {
 pub struct Notification<'a> {
     /// Current snapshot of the request.
     pub request: &'a Request,
+    /// Outbox identity of the event: the same across delivery retries, so
+    /// receivers can use it to drop duplicates.
+    pub event_id: EventId,
     /// The event that triggered this notification.
     pub event: &'a DomainEvent,
     /// Absolute URL of the request's page in the web UI.

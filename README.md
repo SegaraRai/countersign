@@ -61,7 +61,7 @@ min_assurance = "linked"       # chat buttons may approve directly
 | `countersign-backend-exec` | planned |
 | `countersign-channel-discord` | posts requests with Approve/Deny buttons; receives presses over the Gateway (no inbound endpoint) |
 | `countersign-channel-ntfy` | push notifications via an ntfy server, linking to the web UI (notify-only) |
-| `countersign-channel-webhook` | planned |
+| `countersign-channel-webhook` | signed JSON events ([Standard Webhooks](https://www.standardwebhooks.com/)) to any URL (notify-only) |
 | `countersignd` | daemon: config, engine (discover, decide, grant, expire), outbox delivery, web UI and JSON API |
 | `countersign` (CLI) | planned |
 
