@@ -54,7 +54,7 @@ min_assurance = "linked"       # chat buttons may approve directly
 | crate | status |
 |---|---|
 | `countersign-core` | types, state machine, policy, traits |
-| `countersign-store-sqlite` | planned |
+| `countersign-store-sqlite` | SQLite store with transactional outbox |
 | `countersign-auth-oidc` | planned |
 | `countersign-backend-octelium`, `countersign-backend-exec` | planned |
 | `countersign-channel-ntfy`, `-webhook`, `-discord` | planned |

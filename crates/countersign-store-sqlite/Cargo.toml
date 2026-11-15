@@ -1,0 +1,21 @@
+[package]
+name = "countersign-store-sqlite"
+description = "SQLite store for countersign"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+countersign-core.workspace = true
+jiff.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true
