@@ -110,10 +110,23 @@ async fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Er
         }
     });
 
+    let listener = tokio::net::TcpListener::bind(config.server.listen).await?;
+    info!(listen = %config.server.listen, url = %config.server.public_url, "web UI listening");
+    let app = countersignd::web::router(daemon.web.clone());
+    let mut stop = stop_rx.clone();
+    let server = tokio::spawn(async move {
+        let shutdown = async move {
+            let _ = stop.changed().await;
+        };
+        if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown).await {
+            error!(error = %e, "web server failed");
+        }
+    });
+
     wait_for_shutdown(&path, &config, &daemon).await;
     info!("shutting down");
     let _ = stop_tx.send(true);
-    let _ = tokio::join!(ticker, delivery);
+    let _ = tokio::join!(ticker, delivery, server);
     Ok(())
 }
 

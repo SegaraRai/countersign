@@ -8,11 +8,13 @@
 //! - [`Channel`]: where requests are announced and, if interactive, decided
 //!   (ntfy, webhooks, Discord, Slack, ...).
 //! - [`Store`]: durable state plus the event outbox.
+//! - [`Authenticator`]: logs approvers in to the web UI.
 //!
 //! It deliberately has no network, database, or web-framework dependencies so
 //! that the rules can be tested in isolation.
 
 pub mod assurance;
+pub mod auth;
 pub mod backend;
 pub mod channel;
 pub mod event;
@@ -26,6 +28,7 @@ pub mod subject;
 mod time;
 
 pub use assurance::Assurance;
+pub use auth::{AuthError, Authenticator, LoginStart, VerifiedLogin};
 pub use backend::{AccessBackend, BackendCaps, BackendError, GrantHandle};
 pub use channel::{ActionIntent, ApproveMode, Channel, ChannelCaps, ChannelError, MessageRef, Notification};
 pub use event::DomainEvent;

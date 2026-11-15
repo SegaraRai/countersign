@@ -3,6 +3,7 @@
 pub mod config;
 pub mod dispatch;
 pub mod engine;
+pub mod web;
 
 use std::sync::Arc;
 
@@ -19,6 +20,36 @@ pub enum BuildError {
     Store(#[from] StoreError),
     #[error("backend {name}: {source}")]
     Backend { name: String, source: countersign_core::BackendError },
+    #[error("auth: {0}")]
+    Auth(#[from] countersign_core::AuthError),
+    #[error("session key: {0}")]
+    SessionKey(String),
+}
+
+/// Instantiate the configured authenticator, if any.
+pub fn build_authenticator(config: &Config) -> Result<Option<Arc<dyn countersign_core::Authenticator>>, BuildError> {
+    #[cfg(feature = "auth-oidc")]
+    if let Some(oidc) = &config.auth.oidc {
+        let callback = format!("{}/auth/callback", config.server.public_url.trim_end_matches('/'));
+        let a = countersign_auth_oidc::OidcAuthenticator::new(oidc.clone(), &callback)?;
+        return Ok(Some(Arc::new(a)));
+    }
+    let _ = config;
+    Ok(None)
+}
+
+/// The cookie key: from `session_key_file`, or random (sessions end on restart).
+pub fn session_key(config: &Config) -> Result<axum_extra::extract::cookie::Key, BuildError> {
+    use axum_extra::extract::cookie::Key;
+    let Some(path) = &config.server.session_key_file else {
+        tracing::warn!("server.session_key_file is not set; using a random key (web sessions end on restart)");
+        return Ok(Key::generate());
+    };
+    let bytes = std::fs::read(path).map_err(|e| BuildError::SessionKey(format!("{}: {e}", path.display())))?;
+    if bytes.len() < 32 {
+        return Err(BuildError::SessionKey(format!("{} must hold at least 32 bytes", path.display())));
+    }
+    Ok(Key::derive_from(&bytes))
 }
 
 /// Policies and approvers from a configuration, as engine rules.
@@ -62,13 +93,17 @@ pub fn build_channels(config: &Config) -> Vec<Arc<dyn Channel>> {
 pub struct Daemon {
     pub engine: Arc<Engine>,
     pub dispatcher: Arc<Dispatcher>,
+    pub web: web::AppState,
 }
 
 impl Daemon {
     pub async fn build(config: &Config) -> Result<Self, BuildError> {
         let url = format!("sqlite://{}", config.store.path.display());
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&url).await?);
-        Self::with_parts(config, store, build_backends(config)?, build_channels(config))
+        let mut daemon = Self::with_parts(config, store, build_backends(config)?, build_channels(config))?;
+        daemon.web.auth = build_authenticator(config)?;
+        daemon.web.key = session_key(config)?;
+        Ok(daemon)
     }
 
     pub fn with_parts(
@@ -79,6 +114,16 @@ impl Daemon {
     ) -> Result<Self, BuildError> {
         let engine = Arc::new(Engine::new(Arc::clone(&store), backends, rules_from(config)));
         let dispatcher = Arc::new(Dispatcher::new(store, channels, &config.server.public_url));
-        Ok(Self { engine, dispatcher })
+        let web = web::AppState {
+            engine: Arc::clone(&engine),
+            auth: None,
+            key: axum_extra::extract::cookie::Key::generate(),
+            settings: Arc::new(web::WebSettings {
+                secure_cookies: config.server.public_url.starts_with("https://"),
+                session_ttl: config.server.session_ttl,
+                fresh_auth_window: config.server.fresh_auth_window,
+            }),
+        };
+        Ok(Self { engine, dispatcher, web })
     }
 }

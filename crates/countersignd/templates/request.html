@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}{{ r.requester }} · countersign{% endblock %}
+{% block content %}
+<p><a href="/">&larr; All requests</a></p>
+{% if let Some(e) = error %}<div class="flash flash-error">{{ e }}</div>{% endif %}
+
+<div class="card">
+  <h1>{{ r.requester }} <span class="state state-{{ r.state }}">{{ r.state }}</span></h1>
+  <dl>
+    {% if let Some(d) = r.display_name %}<dt>Name</dt><dd>{{ d }}</dd>{% endif %}
+    <dt>Groups</dt><dd>{% if r.groups.is_empty() %}<span class="muted">none</span>{% else %}{{ r.groups }}{% endif %}</dd>
+    {% if let Some(t) = r.target %}<dt>Target</dt><dd>{{ t }}</dd>{% endif %}
+    {% if let Some(reason) = r.reason %}<dt>Reason</dt><dd>{{ reason }} <span class="muted">(from the requester, unverified)</span></dd>{% endif %}
+    <dt>Subject</dt><dd><code>{{ r.subject }}</code></dd>
+    {% for (k, v) in r.attributes %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}
+    <dt>Policy</dt><dd>{{ r.policy }}</dd>
+    <dt>Grant length</dt><dd>{{ r.ttl }}</dd>
+    <dt>Needs</dt><dd>{{ r.quorum }} approval(s) at <code>{{ r.min_assurance }}</code></dd>
+    <dt>Created</dt><dd>{{ r.created }}</dd>
+    {% if let Some(u) = r.pending_until %}<dt>Decide by</dt><dd>{{ u }}</dd>{% endif %}
+    {% if let Some(u) = r.active_until %}<dt>Access until</dt><dd>{{ u }}</dd>{% endif %}
+    {% if let Some(e) = r.failure %}<dt>Error</dt><dd>{{ e }}</dd>{% endif %}
+  </dl>
+</div>
+
+{% if !r.decisions.is_empty() %}
+<div class="card">
+  <h2>Decisions</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Approver</th><th>Verdict</th><th>Assurance</th><th>Via</th><th>At</th></tr></thead>
+    <tbody>
+    {% for d in r.decisions %}
+    <tr><td>{{ d.approver }}</td><td>{{ d.verdict }}</td><td><code>{{ d.assurance }}</code></td><td>{{ d.via }}</td><td class="muted">{{ d.at }}</td></tr>
+    {% if let Some(c) = d.comment %}<tr><td></td><td colspan="4" class="muted">{{ c }}</td></tr>{% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+{% if can_decide %}
+<div class="card">
+  <h2>Decide</h2>
+  {% if approve_needs_reauth %}
+  <p class="muted">Approving needs a fresh sign-in. You will be asked to authenticate again and brought back here.</p>
+  {% else if let Some(until) = fresh_until %}
+  <p class="muted">Freshly signed in: you can approve until {{ until }}.</p>
+  {% endif %}
+  <form method="post" action="/requests/{{ r.id }}/decision">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label for="comment" class="muted">Comment (optional)</label><br>
+    <input type="text" id="comment" name="comment" maxlength="500">
+    <div class="actions">
+      <button class="approve" type="submit" name="verdict" value="approve">{% if approve_needs_reauth %}Sign in again to approve{% else %}Approve{% endif %}</button>
+      <button class="deny" type="submit" name="verdict" value="deny">Deny</button>
+    </div>
+  </form>
+</div>
+{% else if can_revoke %}
+<div class="card">
+  <form method="post" action="/requests/{{ r.id }}/revoke">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button class="deny" type="submit">Revoke access now</button>
+  </form>
+</div>
+{% else if let Some(why) = cannot_decide %}
+<p class="muted">{{ why }}</p>
+{% endif %}
+{% endblock %}

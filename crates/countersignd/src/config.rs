@@ -6,6 +6,7 @@
 //! variables.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub server: ServerConfig,
+    pub auth: AuthConfig,
     pub store: StoreConfig,
     pub engine: EngineConfig,
     pub backends: BTreeMap<BackendName, BackendConfig>,
@@ -39,8 +41,44 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    /// Base URL of the web UI, used in links sent to channels.
+    /// Base URL of the web UI, used in links sent to channels and as the
+    /// base of the login callback URL.
     pub public_url: String,
+    /// Address the web UI listens on. Keep it private (loopback, tailnet).
+    #[serde(default = "default_listen")]
+    pub listen: SocketAddr,
+    /// File with at least 32 bytes of secret key material for session
+    /// cookies. Without it a random key is used and sessions end on restart.
+    #[serde(default)]
+    pub session_key_file: Option<PathBuf>,
+    /// How long a web login lasts.
+    #[serde(default = "default_session_ttl", with = "humantime_serde")]
+    pub session_ttl: Duration,
+    /// How recent the identity-provider authentication must be for a
+    /// decision to count as `fresh-auth`.
+    #[serde(default = "default_fresh_window", with = "humantime_serde")]
+    pub fresh_auth_window: Duration,
+}
+
+fn default_listen() -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], 8080))
+}
+
+fn default_session_ttl() -> Duration {
+    Duration::from_secs(12 * 3600)
+}
+
+fn default_fresh_window() -> Duration {
+    Duration::from_secs(5 * 60)
+}
+
+/// How approvers log in to the web UI.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfig {
+    #[cfg(feature = "auth-oidc")]
+    #[serde(default)]
+    pub oidc: Option<countersign_auth_oidc::OidcConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -113,6 +151,8 @@ struct MainFile {
     include: Vec<String>,
     server: ServerConfig,
     #[serde(default)]
+    auth: AuthConfig,
+    #[serde(default)]
     store: StoreConfig,
     #[serde(default)]
     engine: EngineConfig,
@@ -153,6 +193,7 @@ impl Config {
         }
         let config = Self {
             server: main.server,
+            auth: main.auth,
             store: main.store,
             engine: main.engine,
             backends: main.backend,
@@ -173,6 +214,7 @@ impl Config {
         }
         let config = Self {
             server: main.server,
+            auth: main.auth,
             store: main.store,
             engine: main.engine,
             backends: main.backend,
@@ -189,6 +231,12 @@ impl Config {
 
         if !(self.server.public_url.starts_with("https://") || self.server.public_url.starts_with("http://")) {
             errors.push(format!("server.public_url must be an http(s) URL, got {:?}", self.server.public_url));
+        }
+        if self.server.fresh_auth_window.is_zero() || self.server.fresh_auth_window > Duration::from_secs(3600) {
+            errors.push("server.fresh_auth_window must be between 1s and 1h".into());
+        }
+        if self.server.session_ttl < Duration::from_secs(60) {
+            errors.push("server.session_ttl must be at least 1m".into());
         }
         if self.engine.poll_interval < Duration::from_secs(1) {
             errors.push("engine.poll_interval must be at least 1s".into());

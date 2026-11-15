@@ -55,11 +55,11 @@ min_assurance = "linked"       # chat buttons may approve directly
 |---|---|
 | `countersign-core` | types, state machine, policy, traits |
 | `countersign-store-sqlite` | SQLite store with transactional outbox |
-| `countersign-auth-oidc` | planned |
+| `countersign-auth-oidc` | OpenID Connect login (code flow + PKCE) for the web UI |
 | `countersign-backend-octelium` | approves/rejects pending Octelium sessions via `octeliumctl` |
 | `countersign-backend-exec` | planned |
 | `countersign-channel-ntfy`, `-webhook`, `-discord` | planned |
-| `countersignd` | daemon: config, engine (discover, decide, grant, expire), outbox delivery; web UI planned |
+| `countersignd` | daemon: config, engine (discover, decide, grant, expire), outbox delivery, web UI and JSON API |
 | `countersign` (CLI) | planned |
 
 ## Running

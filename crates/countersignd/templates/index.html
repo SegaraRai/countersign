@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Requests</h1>
+{% if open.is_empty() %}
+<p class="muted">Nothing is waiting for a decision.</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Requester</th><th>Policy</th><th>State</th><th>Created</th></tr></thead>
+  <tbody>
+  {% for r in open %}
+  <tr>
+    <td><a href="/requests/{{ r.id }}">{{ r.requester }}</a>{% if let Some(t) = r.target %} <span class="muted">({{ t }})</span>{% endif %}</td>
+    <td>{{ r.policy }}</td>
+    <td><span class="state state-{{ r.state }}">{{ r.state }}</span></td>
+    <td class="muted">{{ r.created }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+<h2>Recent</h2>
+{% if recent.is_empty() %}
+<p class="muted">No closed requests yet.</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Requester</th><th>Policy</th><th>State</th><th>Updated</th></tr></thead>
+  <tbody>
+  {% for r in recent %}
+  <tr>
+    <td><a href="/requests/{{ r.id }}">{{ r.requester }}</a></td>
+    <td>{{ r.policy }}</td>
+    <td><span class="state state-{{ r.state }}">{{ r.state }}</span></td>
+    <td class="muted">{{ r.updated }}</td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}
