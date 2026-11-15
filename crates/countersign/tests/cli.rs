@@ -35,7 +35,7 @@ fn facts() -> SubjectFacts {
         target: Some("db-prod".into()),
         requested_ttl: None,
         reason: Some("rotate keys".into()),
-        attributes: BTreeMap::new(),
+        attributes: BTreeMap::from([("session_type".to_owned(), "CLIENT".to_owned())]),
     }
 }
 
@@ -150,6 +150,7 @@ async fn lists_and_shows_requests_without_terminal_escapes() {
     let out = s.run(Command::Show { id: s.id.clone(), json: false }).await.unwrap();
     assert!(out.contains("reason        rotate keys"), "{out}");
     assert!(out.contains("policy        agents"), "{out}");
+    assert!(out.lines().all(|l| l.contains(' ')), "every key is separated from its value: {out}");
     assert!(!out.contains('\u{1b}'));
 
     assert!(matches!(s.run(Command::Show { id: "nope".into(), json: false }).await, Err(CliError::Usage(_))));

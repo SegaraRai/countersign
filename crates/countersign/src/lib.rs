@@ -239,7 +239,8 @@ pub fn details(r: &Request) -> String {
     let f = &r.facts;
     let mut s = String::new();
     let mut kv = |k: &str, v: &str| {
-        let _ = writeln!(s, "{k:<14}{v}");
+        // Keys longer than the column still get a separating space.
+        let _ = writeln!(s, "{k:<13} {v}");
     };
     kv("id", &r.id.to_string());
     kv("state", r.state.name());
