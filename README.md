@@ -56,7 +56,8 @@ min_assurance = "linked"       # chat buttons may approve directly
 | `countersign-core` | types, state machine, policy, traits |
 | `countersign-store-sqlite` | SQLite store with transactional outbox |
 | `countersign-auth-oidc` | planned |
-| `countersign-backend-octelium`, `countersign-backend-exec` | planned |
+| `countersign-backend-octelium` | approves/rejects pending Octelium sessions via `octeliumctl` |
+| `countersign-backend-exec` | planned |
 | `countersign-channel-ntfy`, `-webhook`, `-discord` | planned |
 | `countersignd` (daemon), `countersign` (CLI) | planned |
 
