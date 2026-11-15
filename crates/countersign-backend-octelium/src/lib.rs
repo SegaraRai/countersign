@@ -7,6 +7,10 @@
 //! The `octeliumctl` login used here needs permission to get/list sessions
 //! and users and to update/delete sessions — nothing else.
 //!
+//! An Octelium session ends for good after the user's `clientDuration`. With
+//! `auth_token_file` set, the backend logs in again with that token when
+//! `octeliumctl` reports `Unauthenticated`, and retries the command once.
+//!
 //! [Octelium]: https://octelium.com
 
 mod model;
@@ -54,6 +58,22 @@ pub struct OcteliumConfig {
     /// `<sub>` from identity provider `pocket` into `oidc:https://id.example.com#<sub>`.
     #[serde(default)]
     pub identity_providers: BTreeMap<String, String>,
+    /// Authentication token used to log in again when the current Octelium
+    /// session has ended. Without it, an expired login needs a manual
+    /// `octeliumctl login`.
+    #[serde(default)]
+    pub auth_token_file: Option<PathBuf>,
+}
+
+/// Minimum time between failed login attempts.
+const RELOGIN_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Serializes logins so concurrent failures trigger one login.
+#[derive(Debug, Default)]
+struct Relogin {
+    /// Incremented after each successful login.
+    generation: u64,
+    last_failure: Option<std::time::Instant>,
 }
 
 fn default_program() -> PathBuf {
@@ -70,6 +90,7 @@ pub struct OcteliumBackend<R = ProcessRunner> {
     name: BackendName,
     config: OcteliumConfig,
     runner: R,
+    relogin: tokio::sync::Mutex<Relogin>,
 }
 
 impl OcteliumBackend<ProcessRunner> {
@@ -84,11 +105,59 @@ impl<R: Runner> OcteliumBackend<R> {
         if !is_valid_domain(&config.domain) {
             return Err(other(format!("invalid Octelium domain {:?}", config.domain)));
         }
-        Ok(Self { name, config, runner })
+        Ok(Self { name, config, runner, relogin: tokio::sync::Mutex::default() })
+    }
+
+    /// Run a command, logging in again and retrying once if the Octelium
+    /// session has ended.
+    async fn ctl(&self, cmd: &[&str], positional: Option<&str>) -> Result<Vec<u8>, BackendError> {
+        if self.config.auth_token_file.is_none() {
+            return self.ctl_once(cmd, positional).await.map_err(|(e, _)| e);
+        }
+        let generation = self.relogin.lock().await.generation;
+        match self.ctl_once(cmd, positional).await {
+            Ok(out) => Ok(out),
+            Err((_, true)) if self.login(generation).await? => self.ctl_once(cmd, positional).await.map_err(|(e, _)| e),
+            Err((e, _)) => Err(e),
+        }
+    }
+
+    /// Log in with the configured token unless another call already did so
+    /// since `seen`. Returns whether a retry is worthwhile.
+    async fn login(&self, seen: u64) -> Result<bool, BackendError> {
+        let Some(token_file) = &self.config.auth_token_file else { return Ok(false) };
+        let mut state = self.relogin.lock().await;
+        if state.generation != seen {
+            return Ok(true);
+        }
+        if state.last_failure.is_some_and(|t| t.elapsed() < RELOGIN_BACKOFF) {
+            return Err(other("Octelium login expired and the last login attempt failed".to_owned()));
+        }
+        tracing::info!(backend = %self.name, "Octelium session ended; logging in again");
+        // `login` silently does nothing while the dead session is still
+        // stored, so clear it first. Failure here is not fatal.
+        if let Err((e, _)) = self.ctl_once(&["logout"], None).await {
+            tracing::warn!(backend = %self.name, error = %e, "octeliumctl logout failed");
+        }
+        let token_file = token_file.display().to_string();
+        match self.ctl_once(&["login", "--auth-token-file", &token_file], None).await {
+            Ok(_) => {
+                state.generation += 1;
+                state.last_failure = None;
+                tracing::info!(backend = %self.name, "logged in to Octelium");
+                Ok(true)
+            }
+            Err((e, _)) => {
+                state.last_failure = Some(std::time::Instant::now());
+                tracing::error!(backend = %self.name, error = %e, "Octelium login failed");
+                Err(e)
+            }
+        }
     }
 
     /// Run `octeliumctl <args…> --domain <d> [--homedir <h>] [-- <positional>]`.
-    async fn ctl(&self, cmd: &[&str], positional: Option<&str>) -> Result<Vec<u8>, BackendError> {
+    /// On failure, also reports whether the login was rejected.
+    async fn ctl_once(&self, cmd: &[&str], positional: Option<&str>) -> Result<Vec<u8>, (BackendError, bool)> {
         let mut argv: Vec<String> = cmd.iter().map(|s| (*s).to_owned()).collect();
         argv.extend(["--domain".to_owned(), self.config.domain.clone()]);
         if let Some(h) = &self.config.homedir {
@@ -98,10 +167,16 @@ impl<R: Runner> OcteliumBackend<R> {
             argv.extend(["--".to_owned(), p.to_owned()]);
         }
         let out = self.runner.run(&argv).await.map_err(|e| match e {
-            RunError::Timeout(_) => BackendError::Unavailable(e.to_string()),
-            RunError::Spawn(_) => other(e.to_string()),
+            RunError::Timeout(_) => (BackendError::Unavailable(e.to_string()), false),
+            RunError::Spawn(_) => (other(e.to_string()), false),
         })?;
-        if out.success { Ok(out.stdout) } else { Err(classify(&failure_text(&out))) }
+        if out.success {
+            Ok(out.stdout)
+        } else {
+            let text = failure_text(&out);
+            let unauthenticated = text.to_ascii_lowercase().contains("unauthenticated");
+            Err((classify(&text), unauthenticated))
+        }
     }
 
     async fn get_json<T: DeserializeOwned>(&self, args: &[&str], name: Option<&str>) -> Result<T, BackendError> {

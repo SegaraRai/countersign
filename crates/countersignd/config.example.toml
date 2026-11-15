@@ -28,7 +28,7 @@ client_secret_file = "/etc/countersign/oidc-client-secret"
 path = "/var/lib/countersign/countersign.db"
 
 [engine]
-poll_interval = "5s"
+poll_interval = "15s"
 # What to do with pending subjects no policy matches: "ignore" or "deny".
 unmatched = "ignore"
 
@@ -38,6 +38,8 @@ domain = "octelium.example.com"
 # octeliumctl = "/usr/local/bin/octeliumctl"
 # homedir = "/var/lib/countersign/octelium"
 # command_timeout = "30s"
+# Log in again with this token when the Octelium session ends (clientDuration).
+# auth_token_file = "/etc/countersign/octelium-token"
 # Map Octelium identity providers to approver identities (self-approval checks).
 identity_providers = { pocket = "oidc:https://id.example.com" }
 

@@ -46,6 +46,7 @@ fn config() -> OcteliumConfig {
         homedir: None,
         command_timeout: Duration::from_secs(5),
         identity_providers: BTreeMap::from([("pocket".to_owned(), "oidc:https://id.example.com".to_owned())]),
+        auth_token_file: None,
     }
 }
 
@@ -282,4 +283,57 @@ fn config_parses_with_defaults_and_rejects_bad_domain() {
     assert_eq!(c.command_timeout, Duration::from_secs(30));
     let c = OcteliumConfig { domain: "--evil".into(), ..c };
     assert!(OcteliumBackend::with_runner("oct".into(), c, FakeRunner::default()).is_err());
+}
+
+fn unauthenticated() -> CmdOutput {
+    CmdOutput {
+        success: false,
+        stdout: b"gRPC error Unauthenticated: Octelium: Unauthenticated\n".to_vec(),
+        ..Default::default()
+    }
+}
+
+fn ok() -> CmdOutput {
+    CmdOutput { success: true, ..Default::default() }
+}
+
+fn backend_with_token(r: FakeRunner) -> OcteliumBackend<FakeRunner> {
+    let c = OcteliumConfig { auth_token_file: Some("/etc/cs/token".into()), ..config() };
+    OcteliumBackend::with_runner("oct".into(), c, r).unwrap()
+}
+
+#[tokio::test]
+async fn logs_in_again_when_the_session_has_ended() {
+    let delete = format!("delete session {D} -- s1");
+    let login = format!("login --auth-token-file /etc/cs/token {D}");
+    let logout = format!("logout {D}");
+    let r = FakeRunner::default().on(&delete, unauthenticated()).on(&delete, ok()).on(&logout, ok()).on(&login, ok());
+    let b = backend_with_token(r);
+    let grant = GrantHandle { subject: subject("s1"), backend_ref: None, expires_at: None };
+    b.revoke(&grant).await.unwrap();
+    assert_eq!(b.runner.calls(), [delete.clone(), logout, login, delete]);
+}
+
+#[tokio::test]
+async fn without_a_token_an_ended_session_is_reported() {
+    let delete = format!("delete session {D} -- s1");
+    let b = backend(FakeRunner::default().on(&delete, unauthenticated()));
+    let grant = GrantHandle { subject: subject("s1"), backend_ref: None, expires_at: None };
+    let e = b.revoke(&grant).await.unwrap_err();
+    assert!(e.to_string().contains("Unauthenticated"), "{e}");
+    assert_eq!(b.runner.calls(), [delete]);
+}
+
+#[tokio::test]
+async fn a_failed_login_is_not_retried_immediately() {
+    let get = format!("get session -o json {D} -- s1");
+    let login = format!("login --auth-token-file /etc/cs/token {D}");
+    let logout = format!("logout {D}");
+    let r =
+        FakeRunner::default().on(&get, unauthenticated()).on(&logout, unauthenticated()).on(&login, unauthenticated());
+    let b = backend_with_token(r);
+    assert!(b.verify(&subject("s1")).await.is_err());
+    let e = b.verify(&subject("s1")).await.unwrap_err();
+    assert!(e.to_string().contains("last login attempt failed"), "{e}");
+    assert_eq!(b.runner.calls(), [get.clone(), logout, login, get]);
 }

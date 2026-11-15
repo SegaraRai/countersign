@@ -49,6 +49,8 @@ impl Runner for ProcessRunner {
     async fn run(&self, args: &[String]) -> Result<CmdOutput, RunError> {
         let mut cmd = tokio::process::Command::new(&self.program);
         cmd.args(args.iter().map(OsString::from))
+            // One OS thread is plenty for a single request and saves CPU.
+            .env("GOMAXPROCS", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

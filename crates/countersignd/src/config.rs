@@ -124,7 +124,7 @@ impl Default for EngineConfig {
 }
 
 fn default_poll() -> Duration {
-    Duration::from_secs(5)
+    Duration::from_secs(15)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
