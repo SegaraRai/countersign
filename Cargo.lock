@@ -666,6 +666,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "countersign-sudo"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "countersign-core",
+ "countersign-store-sqlite",
+ "countersignd",
+ "humantime-serde",
+ "jiff",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "countersignd"
 version = "0.1.0"
 dependencies = [

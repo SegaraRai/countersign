@@ -1,7 +1,8 @@
 # Design: approving `sudo` on target hosts
 
-Status: countersign side implemented (intake API, `host` backend, grant
-modes); the host helper and PAM setup are not built yet.
+Status: implemented — countersign side (intake API, `host` backend, grant
+modes) and the host helper (`countersign-sudo`, with PAM, sudoers and config
+examples in `crates/countersign-sudo/contrib/`). Not yet tried on a real host.
 
 ## Goal
 
@@ -63,7 +64,7 @@ Prepended to the `auth` section of `/etc/pam.d/sudo` and `/etc/pam.d/sudo-i`:
 ```pam
 # The agent: countersign decides, and nothing else is tried.
 auth [success=ignore default=1] pam_succeed_if.so quiet user = agent
-auth [success=done default=die]  pam_exec.so quiet /usr/local/libexec/countersign-sudo
+auth [success=done default=die]  pam_exec.so quiet stdout seteuid /usr/local/libexec/countersign-sudo
 # Everyone else falls through to the normal stack.
 @include common-auth
 ```
@@ -72,14 +73,19 @@ For any user other than the agent, `pam_succeed_if` fails, `default=1` skips
 the `pam_exec` line, and authentication proceeds as before. The helper is
 never run for them, so countersign's availability cannot affect them.
 
+`seteuid` runs the helper with root as its real uid too, so the calling user
+cannot signal or inspect it; `stdout` shows its messages (the approval link,
+the outcome) to the user.
+
 ### Helper (`countersign-sudo`)
 
 A small static Rust binary run by `pam_exec` as root. It:
 
 1. Checks `PAM_TYPE=auth` and `PAM_SERVICE` is `sudo` or `sudo-i`.
 2. Reads the invoking `sudo` process (`$PPID`): `/proc/$PPID/exe` must be a
-   known sudo binary; `cmdline` gives the argv as typed; `cwd` the working
-   directory. The process is setuid root, so the agent cannot alter it.
+   known sudo binary; its real uid must be `PAM_USER`'s; `cmdline` gives the
+   argv as typed; `cwd` the working directory. The process is setuid root, so
+   the agent cannot alter it.
 3. Reads an optional reason from `COUNTERSIGN_REASON` in
    `/proc/$PPID/environ`. Displayed, never trusted.
 4. Sends the request with the host key from

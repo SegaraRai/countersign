@@ -1,0 +1,21 @@
+# /etc/countersign/sudo.toml (root:root 0644)
+
+# countersign's intake listener, reached over the tailnet.
+server = "http://100.64.0.10:8443"
+
+# This host's key (root:root 0600). Create it on this host:
+#   (umask 077; openssl rand -hex 32 > /etc/countersign/host.key)
+#   printf 'key_sha256 = "%s"\n' "$(tr -d '[:space:]' < /etc/countersign/host.key | sha256sum | cut -d' ' -f1)"
+# and put the printed key_sha256 line under this host in countersign's
+# configuration. The key itself never leaves this host. (Where the
+# countersign CLI is installed, `countersign keygen --format host <file>`
+# does both steps.)
+key_file = "/etc/countersign/host.key"
+
+# Give up (and withdraw the request) after this long without a decision.
+# Keep it at or below the policy's pending_timeout.
+timeout = "5m"
+
+# Programs accepted as the calling sudo (the helper refuses to run for
+# anything else). The defaults cover sudo and sudo-rs on Debian and Ubuntu.
+# sudo_binaries = ["/usr/bin/sudo", "/usr/lib/cargo/bin/sudo"]

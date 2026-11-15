@@ -1,0 +1,8 @@
+# /etc/sudoers.d/countersign — install with: visudo -cf <file> && install -m 0440 <file> /etc/sudoers.d/countersign
+#
+# The account must authenticate for every sudo (no NOPASSWD, no cached
+# timestamp), so every sudo reaches PAM and countersign. Approval windows
+# are tracked by countersign, which can scope them to a command pattern.
+
+agent   ALL=(ALL:ALL) ALL
+Defaults:agent timestamp_timeout=0

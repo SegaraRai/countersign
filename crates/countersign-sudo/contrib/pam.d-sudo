@@ -1,0 +1,20 @@
+# Put these two lines at the top of /etc/pam.d/sudo and /etc/pam.d/sudo-i,
+# before "@include common-auth". Replace "agent" with the account whose sudo
+# needs approval.
+#
+# - For "agent", countersign decides and nothing else is tried: approved
+#   means authenticated; anything else (denied, timeout, Ctrl-C, countersign
+#   unreachable) fails.
+# - For every other user, pam_succeed_if fails, "default=1" skips the
+#   pam_exec line, and authentication continues as before. The helper never
+#   runs for them, so countersign being down cannot lock them out.
+#
+# pam_exec options: "seteuid" runs the helper as root (not only with root's
+# effective uid), so the calling user cannot signal or inspect it; "stdout"
+# shows its messages (the approval link, the outcome) to the user; "quiet"
+# omits pam_exec's own failure message.
+#
+# Keep a root shell open while changing PAM, and test from another session.
+
+auth [success=ignore default=1] pam_succeed_if.so quiet user = agent
+auth [success=done default=die]  pam_exec.so quiet stdout seteuid /usr/local/libexec/countersign-sudo
