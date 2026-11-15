@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use countersign_core::{ApproveMode, ChannelCaps, Notification, Request, RequestState, Verdict};
+use countersign_core::{ApproveMode, ChannelCaps, GrantMode, Notification, Request, RequestState, Verdict};
 use twilight_model::channel::message::Component;
 use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle};
 use twilight_model::channel::message::embed::{Embed, EmbedField, EmbedFooter};
@@ -47,7 +47,11 @@ fn embed(n: Notification<'_>) -> Embed {
     if let Some(target) = &facts.target {
         field("Target", code(target), true);
     }
-    field("Duration", duration(r.requirements.ttl), true);
+    if let Some(runas) = facts.attributes.get("runas") {
+        field("Run as", code(runas), true);
+    }
+    let window = if r.requirements.grant == GrantMode::Window { " (window)" } else { "" };
+    field("Duration", format!("{}{window}", duration(r.requirements.ttl)), true);
     field("Policy", code(r.requirements.policy.as_str()), true);
     field(
         "Approvals",
@@ -84,7 +88,7 @@ fn embed(n: Notification<'_>) -> Embed {
     Embed {
         author: None,
         color: Some(color(&r.state)),
-        description: facts.reason.as_deref().map(|reason| format!("**Reason**\n{}", code_block(reason))),
+        description: description(facts),
         fields,
         flags: None,
         footer: Some(EmbedFooter { icon_url: None, proxy_icon_url: None, text: format!("countersign · {}", r.id) }),
@@ -190,6 +194,18 @@ pub(crate) fn code(s: &str) -> String {
 }
 
 /// Untrusted multi-line text as a code block.
+/// The command (if the backend reports one) and the requester's reason.
+fn description(facts: &countersign_core::SubjectFacts) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(command) = facts.attributes.get("command") {
+        parts.push(format!("**Command**\n{}", code_block(command)));
+    }
+    if let Some(reason) = &facts.reason {
+        parts.push(format!("**Reason**\n{}", code_block(reason)));
+    }
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
 pub(crate) fn code_block(s: &str) -> String {
     let cleaned = s.replace('`', "ˋ");
     format!("```\n{}\n```", truncate(cleaned.trim(), 1000))

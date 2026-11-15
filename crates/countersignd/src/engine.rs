@@ -4,6 +4,8 @@
 //! - [`Engine::tick`], run periodically, discovers pending subjects, sweeps
 //!   timeouts, and retries grants that could not be applied yet.
 //! - [`Engine::decide`] / [`Engine::revoke`], run when an approver acts.
+//! - [`Engine::submit`], run when a subject is pushed to countersign (e.g. a
+//!   `sudo` invocation waiting for approval).
 //!
 //! Every method takes `now` so tests control time.
 
@@ -11,10 +13,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
 use countersign_core::{
-    AccessBackend, ActionIntent, Approver, ApproverId, BackendError, BackendName, DomainEvent, PendingSubject,
-    PolicySet, Request, RequestFilter, RequestId, RequestState, Store, StoreError, TransitionError,
+    AccessBackend, ActionIntent, Approver, ApproverId, BackendError, BackendName, DomainEvent, GrantMode,
+    PendingSubject, PolicySet, Request, RequestFilter, RequestId, RequestState, Store, StoreError, TransitionError,
 };
 use jiff::Timestamp;
+use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
 use crate::config::Unmatched;
@@ -54,6 +57,20 @@ pub struct Engine {
     rules: RwLock<Arc<Rules>>,
     /// Unmatched subjects already logged, to avoid repeating the warning.
     unmatched_seen: std::sync::Mutex<BTreeSet<String>>,
+    /// Bumped whenever a request is stored, so waiters can re-check.
+    changes: watch::Sender<u64>,
+}
+
+/// Outcome of [`Engine::submit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Submitted {
+    /// A new request waits for approval.
+    Opened(Request),
+    /// An active window approved the subject; this is the window request,
+    /// with the use recorded.
+    Covered(Request),
+    /// No policy matches; nothing was stored.
+    Unmatched,
 }
 
 impl std::fmt::Debug for Engine {
@@ -78,7 +95,17 @@ impl Engine {
             backends: backends.into_iter().map(|b| (b.name().clone(), b)).collect(),
             rules: RwLock::new(Arc::new(rules)),
             unmatched_seen: std::sync::Mutex::default(),
+            changes: watch::Sender::new(0),
         }
+    }
+
+    /// A receiver that changes whenever any request is stored.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
+    }
+
+    fn changed(&self) {
+        self.changes.send_modify(|v| *v = v.wrapping_add(1));
     }
 
     pub fn store(&self) -> &Arc<dyn Store> {
@@ -141,6 +168,7 @@ impl Engine {
                         let (request, events) = Request::open(p, reqs, now);
                         match self.store.insert_request(&request, &events).await {
                             Ok(()) => {
+                                self.changed();
                                 info!(request = %request.id, subject = %request.subject.id, policy = %request.requirements.policy, "opened request");
                                 report.opened += 1;
                             }
@@ -253,6 +281,73 @@ impl Engine {
         Err(EngineError::Busy)
     }
 
+    /// Take a subject pushed by its backend: approve it under an active
+    /// window of the same policy, or open a request for it.
+    pub async fn submit(&self, p: PendingSubject, now: Timestamp) -> Result<Submitted, EngineError> {
+        self.backend(&p.subject.backend)?;
+        let rules = self.rules();
+        let Some(policy) = rules.policies.find(&p) else {
+            info!(subject = %p.subject.id, requester = %p.facts.requester.id, "no policy matches; refusing");
+            return Ok(Submitted::Unmatched);
+        };
+
+        if policy.grant == GrantMode::Window {
+            for _ in 0..CONFLICT_RETRIES {
+                let open = self.store.list_requests(&RequestFilter { open_only: true, limit: None }).await?;
+                let Some(mut window) =
+                    open.into_iter().find(|r| r.requirements.policy == policy.name && r.window_covers(&p, now))
+                else {
+                    break;
+                };
+                let v = window.version;
+                window.record_use(&p, now)?;
+                if self.save(&window, v, &[]).await? {
+                    info!(request = %window.id, subject = %p.subject.id, "approved under an active window");
+                    return Ok(Submitted::Covered(window));
+                }
+            }
+        }
+
+        let reqs = policy.requirements_for(&p);
+        let (request, events) = Request::open(p, reqs, now);
+        self.store.insert_request(&request, &events).await?;
+        self.changed();
+        info!(request = %request.id, subject = %request.subject.id, policy = %request.requirements.policy, "opened request");
+        Ok(Submitted::Opened(request))
+    }
+
+    /// The requester has picked up an approval. A single-use approval ends
+    /// here; a window stays open until its time is up.
+    pub async fn collect(&self, request_id: RequestId, now: Timestamp) -> Result<Request, EngineError> {
+        for _ in 0..CONFLICT_RETRIES {
+            let mut r = self.store.get_request(request_id).await?.ok_or(EngineError::UnknownRequest(request_id))?;
+            if r.requirements.grant != GrantMode::Once || !matches!(r.state, RequestState::Active { .. }) {
+                return Ok(r);
+            }
+            let v = r.version;
+            let events = r.end(now)?;
+            if self.save(&r, v, &events).await? {
+                info!(request = %r.id, "single-use approval collected");
+                return Ok(r);
+            }
+        }
+        Err(EngineError::Busy)
+    }
+
+    /// The requester gave up waiting.
+    pub async fn withdraw(&self, request_id: RequestId, now: Timestamp) -> Result<Request, EngineError> {
+        for _ in 0..CONFLICT_RETRIES {
+            let mut r = self.store.get_request(request_id).await?.ok_or(EngineError::UnknownRequest(request_id))?;
+            let v = r.version;
+            let events = r.withdraw(now)?;
+            if self.save(&r, v, &events).await? {
+                info!(request = %r.id, "withdrawn by the requester");
+                return Ok(r);
+            }
+        }
+        Err(EngineError::Busy)
+    }
+
     /// End an active grant early. The approver must be eligible for the request.
     pub async fn revoke(
         &self,
@@ -353,7 +448,10 @@ impl Engine {
     /// Persist a transition. Returns `false` if another writer got there first.
     async fn save(&self, r: &Request, expected: u64, events: &[DomainEvent]) -> Result<bool, EngineError> {
         match self.store.update_request(r, expected, events).await {
-            Ok(()) => Ok(true),
+            Ok(()) => {
+                self.changed();
+                Ok(true)
+            }
             Err(StoreError::Conflict(_)) => Ok(false),
             Err(e) => Err(e.into()),
         }

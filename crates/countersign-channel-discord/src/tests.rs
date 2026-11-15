@@ -48,6 +48,7 @@ fn request(min_assurance: Assurance, reason: Option<&str>) -> Request {
         ttl: Duration::from_secs(5400),
         pending_timeout: Duration::from_secs(600),
         allow_self_approval: false,
+        grant: countersign_core::GrantMode::Once,
     };
     Request::open(pending, reqs, Timestamp::UNIX_EPOCH).0
 }
@@ -310,4 +311,19 @@ async fn presses_from_elsewhere_are_ignored() {
 #[test]
 fn foreign_components_and_commands_are_not_ours() {
     assert_eq!(interact::action(&button_press("other:thing", CHANNEL, Some(GUILD))), None);
+}
+
+#[test]
+fn commands_are_shown_above_the_reason_and_cannot_escape_the_code_block() {
+    let mut r = request(Assurance::Linked, Some("upgrade"));
+    r.facts.attributes.insert("command".into(), "apt install ```@everyone".into());
+    r.facts.attributes.insert("runas".into(), "root".into());
+    r.requirements.grant = countersign_core::GrantMode::Window;
+    let e = &render(&r).embeds[0];
+    let d = e.description.as_deref().unwrap();
+    assert!(d.starts_with("**Command**\n```\napt install ˋˋˋ@everyone\n```"), "{d}");
+    assert!(d.contains("**Reason**"), "{d}");
+    let field = |n: &str| e.fields.iter().find(|f| f.name == n).map(|f| f.value.clone());
+    assert_eq!(field("Run as").as_deref(), Some("`root`"));
+    assert!(field("Duration").unwrap().ends_with("(window)"));
 }

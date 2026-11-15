@@ -201,6 +201,9 @@ pub fn publish(config: &NtfyConfig, n: Notification<'_>) -> Publish {
         if let Some(t) = &f.target {
             let _ = writeln!(message, "Target: {}", clean(t, 200));
         }
+        if let Some(c) = f.attributes.get("command") {
+            let _ = writeln!(message, "Command: {}", clean(c, 1000));
+        }
         let _ = writeln!(message, "Policy: {}", clean(r.requirements.policy.as_str(), 80));
         let _ = writeln!(message, "Duration: {}", duration(r.requirements.ttl));
         if let Some(reason) = &f.reason {

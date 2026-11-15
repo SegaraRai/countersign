@@ -52,6 +52,31 @@ pub struct Policy {
     /// Let the requester approve their own request. Off by default.
     #[serde(default)]
     pub allow_self_approval: bool,
+    /// What an approval covers. Only meaningful for backends whose subjects
+    /// are submitted to countersign (such as `sudo` invocations).
+    #[serde(default)]
+    pub grant: GrantMode,
+}
+
+/// What an approval covers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GrantMode {
+    /// The one subject that was approved.
+    #[default]
+    Once,
+    /// While active, later submissions from the same requester and target
+    /// that match the same policy are approved without asking again.
+    Window,
+}
+
+impl GrantMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Once => "once",
+            Self::Window => "window",
+        }
+    }
 }
 
 fn one() -> u8 {
@@ -180,6 +205,8 @@ pub struct Requirements {
     #[serde(with = "humantime_serde")]
     pub pending_timeout: Duration,
     pub allow_self_approval: bool,
+    #[serde(default)]
+    pub grant: GrantMode,
 }
 
 impl Requirements {
@@ -206,6 +233,7 @@ impl Policy {
             ttl: self.resolve_ttl(p.facts.requested_ttl),
             pending_timeout: self.pending_timeout,
             allow_self_approval: self.allow_self_approval,
+            grant: self.grant,
         }
     }
 

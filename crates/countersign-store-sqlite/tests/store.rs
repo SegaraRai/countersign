@@ -37,6 +37,7 @@ fn open_request(subject_id: &str, now: Timestamp) -> (Request, Vec<countersign_c
         ttl: Duration::from_secs(600),
         pending_timeout: Duration::from_secs(300),
         allow_self_approval: false,
+        grant: countersign_core::GrantMode::Once,
     };
     Request::open(pending, reqs, now)
 }

@@ -242,5 +242,12 @@ fn keygen_writes_usable_secrets_and_refuses_to_overwrite() {
     keygen(&wh, KeyFormat::Whsec, false).unwrap();
     let w = std::fs::read_to_string(&wh).unwrap();
     assert!(w.starts_with("whsec_") && w.trim().len() == 6 + 44, "{w}");
+
+    let host = dir.join("host.key");
+    let _ = std::fs::remove_file(&host);
+    let line = keygen(&host, KeyFormat::Host, false).unwrap().unwrap();
+    let key = std::fs::read_to_string(&host).unwrap();
+    assert_eq!(line, format!("key_sha256 = \"{}\"", countersignd::intake::key_sha256(&key)));
+    assert!(!line.contains(key.trim()), "the key itself is not printed");
     let _ = std::fs::remove_dir_all(dir);
 }

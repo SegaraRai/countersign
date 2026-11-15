@@ -14,7 +14,7 @@
 //! Every successful transition bumps [`Request::version`] (for optimistic
 //! concurrency in the store) and returns the events to put in the outbox.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ use crate::assurance::Assurance;
 use crate::backend::GrantHandle;
 use crate::event::DomainEvent;
 use crate::id::{ApproverId, ChannelName, RequestId};
-use crate::policy::Requirements;
+use crate::policy::{GrantMode, Requirements};
 use crate::principal::Approver;
 use crate::subject::{PendingSubject, SubjectFacts, SubjectRef};
 use crate::time;
@@ -108,6 +108,18 @@ pub enum TransitionError {
     InsufficientAssurance { required: Assurance, presented: Assurance },
     #[error("approver has already decided")]
     AlreadyDecided,
+    #[error("the approval does not cover other subjects")]
+    NotAWindow,
+}
+
+/// A subject approved under an active [`GrantMode::Window`] request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Use {
+    pub subject: SubjectRef,
+    pub at: Timestamp,
+    /// The new subject's attributes (e.g. the command that was run).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attributes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +132,9 @@ pub struct Request {
     pub decisions: Vec<Decision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<GrantHandle>,
+    /// Subjects approved under this request while it was an active window.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uses: Vec<Use>,
     pub created_at: Timestamp,
     /// Decisions are refused after this instant.
     pub pending_until: Timestamp,
@@ -140,6 +155,7 @@ impl Request {
             state: RequestState::Pending,
             decisions: Vec::new(),
             grant: None,
+            uses: Vec::new(),
             created_at: now,
             pending_until,
             updated_at: now,
@@ -260,6 +276,40 @@ impl Request {
         Ok(vec![DomainEvent::Revoked { request_id: self.id, by, at: now }])
     }
 
+    /// Whether this request, as an active window, covers `pending`: same
+    /// backend, kind, requester and target. The caller checks that the same
+    /// policy matches.
+    pub fn window_covers(&self, pending: &PendingSubject, now: Timestamp) -> bool {
+        let RequestState::Active { until } = self.state else { return false };
+        self.requirements.grant == GrantMode::Window
+            && now < until
+            && self.subject.backend == pending.subject.backend
+            && self.subject.kind == pending.subject.kind
+            && self.facts.requester.id == pending.facts.requester.id
+            && self.facts.target.is_some()
+            && self.facts.target == pending.facts.target
+    }
+
+    /// Record a subject approved under this active window. Emits no events.
+    pub fn record_use(&mut self, pending: &PendingSubject, now: Timestamp) -> Result<(), TransitionError> {
+        self.require(|s| matches!(s, RequestState::Active { .. }), "use")?;
+        if !self.window_covers(pending, now) {
+            return Err(TransitionError::NotAWindow);
+        }
+        self.uses.push(Use { subject: pending.subject.clone(), at: now, attributes: pending.facts.attributes.clone() });
+        self.touch(now);
+        Ok(())
+    }
+
+    /// End an active grant now, e.g. once a single-use approval has been
+    /// collected.
+    pub fn end(&mut self, now: Timestamp) -> Result<Vec<DomainEvent>, TransitionError> {
+        self.require(|s| matches!(s, RequestState::Active { .. }), "end")?;
+        self.state = RequestState::Ended;
+        self.touch(now);
+        Ok(vec![DomainEvent::Ended { request_id: self.id, at: now }])
+    }
+
     /// End an active grant whose time is up. Returns no events if not due.
     pub fn end_if_elapsed(&mut self, now: Timestamp) -> Result<Vec<DomainEvent>, TransitionError> {
         let RequestState::Active { until } = self.state else {
@@ -330,6 +380,7 @@ mod tests {
             ttl: Duration::from_secs(600),
             pending_timeout: Duration::from_secs(300),
             allow_self_approval: false,
+            grant: GrantMode::Once,
         };
         let (r, ev) = Request::open(pending, reqs, t(0));
         assert_eq!(ev.len(), 1);
@@ -473,5 +524,66 @@ mod tests {
         let s = serde_json::to_string(&r).unwrap();
         let back: Request = serde_json::from_str(&s).unwrap();
         assert_eq!(back, r);
+    }
+
+    fn active(mode: GrantMode) -> Request {
+        let mut r = open(1, Assurance::Linked);
+        r.requirements.grant = mode;
+        r.decide(&approver("bob", &["ops"], &[]), Verdict::Approve, Assurance::Linked, web(), None, t(1)).unwrap();
+        r.grant_succeeded(GrantHandle { subject: r.subject.clone(), backend_ref: None, expires_at: None }, t(2))
+            .unwrap();
+        r
+    }
+
+    fn another(id: &str, requester: &str, target: &str) -> PendingSubject {
+        let mut p = PendingSubject {
+            subject: SubjectRef { backend: "oct".into(), kind: "session".into(), id: id.into() },
+            facts: open(1, Assurance::Linked).facts,
+            observed_at: t(0),
+        };
+        p.facts.requester.id = requester.into();
+        p.facts.target = Some(target.into());
+        p.facts.attributes.insert("command".into(), "apt upgrade".into());
+        p
+    }
+
+    #[test]
+    fn window_covers_same_requester_and_target_until_it_ends() {
+        let mut r = active(GrantMode::Window);
+        let same = another("s2", "alice-agent", "host-1");
+        assert!(r.window_covers(&same, t(100)));
+        assert!(!r.window_covers(&another("s3", "bob-agent", "host-1"), t(100)));
+        assert!(!r.window_covers(&another("s4", "alice-agent", "host-2"), t(100)));
+        assert!(!r.window_covers(&same, t(602)), "not after the window ends");
+
+        r.record_use(&same, t(100)).unwrap();
+        assert_eq!(r.uses.len(), 1);
+        assert_eq!(r.uses[0].attributes["command"], "apt upgrade");
+        let back: Request = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
+        assert_eq!(back, r);
+
+        r.revoke(None, t(200)).unwrap();
+        assert!(!r.window_covers(&same, t(201)));
+        assert!(r.record_use(&same, t(201)).is_err());
+    }
+
+    #[test]
+    fn single_use_approvals_cover_nothing_else_and_end_on_collection() {
+        let mut r = active(GrantMode::Once);
+        let same = another("s2", "alice-agent", "host-1");
+        assert!(!r.window_covers(&same, t(100)));
+        assert_eq!(r.record_use(&same, t(100)), Err(TransitionError::NotAWindow));
+        assert_eq!(r.end(t(3)).unwrap().len(), 1);
+        assert_eq!(r.state, RequestState::Ended);
+        assert!(r.end(t(4)).is_err());
+    }
+
+    #[test]
+    fn requests_stored_before_windows_existed_still_load() {
+        let mut v = serde_json::to_value(open(1, Assurance::Linked)).unwrap();
+        v["requirements"].as_object_mut().unwrap().remove("grant");
+        let r: Request = serde_json::from_value(v).unwrap();
+        assert_eq!(r.requirements.grant, GrantMode::Once);
+        assert_eq!(r.uses, []);
     }
 }

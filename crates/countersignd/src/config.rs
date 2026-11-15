@@ -34,6 +34,8 @@ pub struct Config {
     pub channels: BTreeMap<ChannelName, ChannelConfig>,
     pub approvers: Vec<Approver>,
     pub policies: PolicySet,
+    /// Where hosts submit subjects (needed by `host` backends).
+    pub intake: Option<crate::intake::IntakeConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -130,6 +132,8 @@ fn default_poll() -> Duration {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum BackendConfig {
+    /// Hosts that submit `sudo` invocations through the intake API.
+    Host(crate::intake::HostBackendConfig),
     #[cfg(feature = "backend-octelium")]
     Octelium(countersign_backend_octelium::OcteliumConfig),
     /// Any program speaking the exec JSON protocol.
@@ -174,6 +178,8 @@ struct MainFile {
     approver: Vec<Approver>,
     #[serde(default)]
     policy: Vec<Policy>,
+    #[serde(default)]
+    intake: Option<crate::intake::IntakeConfig>,
 }
 
 /// An included file: only approvers and policies.
@@ -209,6 +215,7 @@ impl Config {
             channels: main.channel,
             approvers,
             policies: PolicySet { policies },
+            intake: main.intake,
         };
         config.validate()?;
         Ok(config)
@@ -230,6 +237,7 @@ impl Config {
             channels: main.channel,
             approvers: main.approver,
             policies: PolicySet { policies: main.policy },
+            intake: main.intake,
         };
         config.validate()?;
         Ok(config)
@@ -280,7 +288,34 @@ impl Config {
             }
         }
 
+        let mut keys = BTreeSet::new();
+        for (name, b) in &self.backends {
+            if let BackendConfig::Host(h) = b {
+                errors.extend(h.problems(name));
+                for host in &h.hosts {
+                    if !keys.insert(&host.key_sha256) {
+                        errors.push(format!("backend {name}: host {}: key_sha256 is used by another host", host.name));
+                    }
+                }
+                if self.intake.is_none() {
+                    errors.push(format!("backend {name}: host backends need an [intake] section"));
+                }
+            }
+        }
+
         if errors.is_empty() { Ok(()) } else { Err(ConfigError::Invalid(errors)) }
+    }
+
+    /// The `host` backends, by name.
+    pub fn host_backends(&self) -> BTreeMap<BackendName, crate::intake::HostBackendConfig> {
+        self.backends
+            .iter()
+            .filter_map(|(n, b)| match b {
+                BackendConfig::Host(h) => Some((n.clone(), h.clone())),
+                #[allow(unreachable_patterns)]
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn approver_map(&self) -> BTreeMap<ApproverId, Approver> {

@@ -14,7 +14,7 @@
     <dt>Subject</dt><dd><code>{{ r.subject }}</code></dd>
     {% for (k, v) in r.attributes %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}
     <dt>Policy</dt><dd>{{ r.policy }}</dd>
-    <dt>Grant length</dt><dd>{{ r.ttl }}</dd>
+    <dt>Grant length</dt><dd>{{ r.ttl }}{% if r.window %} <span class="muted">(window: later matching requests from the same requester and target are approved without asking)</span>{% endif %}</dd>
     <dt>Needs</dt><dd>{{ r.quorum }} approval(s) at <code>{{ r.min_assurance }}</code></dd>
     <dt>Created</dt><dd>{{ r.created }}</dd>
     {% if let Some(u) = r.pending_until %}<dt>Decide by</dt><dd>{{ u }}</dd>{% endif %}
@@ -33,6 +33,22 @@
     {% for d in r.decisions %}
     <tr><td>{{ d.approver }}</td><td>{{ d.verdict }}</td><td><code>{{ d.assurance }}</code></td><td>{{ d.via }}</td><td class="muted">{{ d.at }}</td></tr>
     {% if let Some(c) = d.comment %}<tr><td></td><td colspan="4" class="muted">{{ c }}</td></tr>{% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+{% endif %}
+
+{% if !r.uses.is_empty() %}
+<div class="card">
+  <h2>Approved under this window</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>At</th><th>Command</th><th>Directory</th></tr></thead>
+    <tbody>
+    {% for u in r.uses %}
+    <tr><td class="muted">{{ u.at }}</td><td><code>{{ u.command }}</code></td><td>{% if let Some(c) = u.cwd %}{{ c }}{% endif %}</td></tr>
     {% endfor %}
     </tbody>
   </table>

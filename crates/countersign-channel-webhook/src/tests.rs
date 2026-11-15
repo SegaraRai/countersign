@@ -91,6 +91,7 @@ fn request() -> Request {
         ttl: Duration::from_secs(1800),
         pending_timeout: Duration::from_secs(600),
         allow_self_approval: false,
+        grant: countersign_core::GrantMode::Once,
     };
     Request::open(pending, reqs, Timestamp::UNIX_EPOCH).0
 }

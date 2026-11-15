@@ -230,6 +230,13 @@ struct DecisionView {
 }
 
 #[derive(Debug)]
+struct UseView {
+    at: String,
+    command: String,
+    cwd: Option<String>,
+}
+
+#[derive(Debug)]
 struct RequestView {
     id: String,
     state: &'static str,
@@ -242,6 +249,7 @@ struct RequestView {
     attributes: Vec<(String, String)>,
     policy: String,
     ttl: String,
+    window: bool,
     quorum: u8,
     min_assurance: String,
     created: String,
@@ -249,6 +257,7 @@ struct RequestView {
     active_until: Option<String>,
     failure: Option<String>,
     decisions: Vec<DecisionView>,
+    uses: Vec<UseView>,
 }
 
 fn fmt_time(t: Timestamp) -> String {
@@ -292,6 +301,7 @@ fn request_view(r: &Request) -> RequestView {
         attributes: f.attributes.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
         policy: r.requirements.policy.to_string(),
         ttl: fmt_duration(r.requirements.ttl),
+        window: r.requirements.grant == countersign_core::GrantMode::Window,
         quorum: r.requirements.quorum,
         min_assurance: r.requirements.min_assurance.to_string(),
         created: fmt_time(r.created_at),
@@ -317,6 +327,15 @@ fn request_view(r: &Request) -> RequestView {
                 via: d.via.to_string(),
                 at: fmt_time(d.at),
                 comment: d.comment.clone(),
+            })
+            .collect(),
+        uses: r
+            .uses
+            .iter()
+            .map(|u| UseView {
+                at: fmt_time(u.at),
+                command: u.attributes.get("command").cloned().unwrap_or_else(|| u.subject.id.clone()),
+                cwd: u.attributes.get("cwd").cloned(),
             })
             .collect(),
     }

@@ -46,13 +46,32 @@ identity_providers = { pocket = "oidc:https://id.example.com" }
 # Exec: any program speaking countersign's JSON protocol (see the
 # countersign-backend-exec crate docs). Runs without a shell and with a
 # cleared environment; only `env` (and a default PATH) is passed.
-# [backend.sudo]
+# [backend.helper]
 # type = "exec"
-# command = ["/usr/local/lib/countersign/sudo-helper"]
+# command = ["/usr/local/lib/countersign/helper"]
 # env = { HELPER_MODE = "prod" }
 # timeout = "30s"
 # revoke = true          # the helper implements `revoke`
 # native_expiry = false  # countersign calls `revoke` when the TTL ends
+
+# Host: target hosts submit `sudo` invocations through the intake API and
+# wait for the outcome (see docs/design/sudo-approval.md). Needs [intake].
+# [backend.sudo]
+# type = "host"
+# # OS users whose sudo goes through countersign, with their requester groups.
+# users = { agent = ["agents"] }
+#
+# [[backend.sudo.host]]
+# name = "web-1"
+# # `countersign keygen --format host /etc/countersign/host.key` on the host
+# # prints this line; the key file stays on the host.
+# key_sha256 = "<64 hex digits>"
+# allowed_ips = ["100.64.0.21"]   # optional
+
+# Intake API for hosts. Plain HTTP: bind it to a private (tailnet) address only.
+# [intake]
+# listen = "100.64.0.10:8443"
+# max_pending_per_host = 10
 
 [channel.log]
 type = "log"
@@ -105,3 +124,24 @@ max_ttl = "30m"
 default_ttl = "15m"
 pending_timeout = "10m"
 min_assurance = "fresh-auth"
+
+# sudo on target hosts: package management opens a 15-minute window; anything
+# else needs one approval per command. Approving a command approves root on
+# that host while it runs.
+# [[policy]]
+# name = "sudo-packages"
+# match = { backend = "sudo", requester_group = "agents", attributes = { command = "apt *" } }
+# grant = "window"
+# max_ttl = "15m"
+# pending_timeout = "5m"
+# approvers = ["group:approvers"]
+# min_assurance = "linked"
+#
+# [[policy]]
+# name = "sudo"
+# match = { backend = "sudo", requester_group = "agents" }
+# grant = "once"
+# max_ttl = "1m"          # time for the host to pick up the answer
+# pending_timeout = "5m"
+# approvers = ["group:approvers"]
+# min_assurance = "linked"

@@ -32,7 +32,10 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<(), CliError> {
     if let Command::Keygen { path, format, force } = &cli.command {
-        return keygen(path, *format, *force);
+        if let Some(line) = keygen(path, *format, *force)? {
+            println!("{line}");
+        }
+        return Ok(());
     }
     let config = Config::load(&cli.config).map_err(|e| CliError::Usage(e.to_string()))?;
     let path = &config.store.path;
@@ -40,7 +43,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         return Err(CliError::Usage(format!("no database at {} (has countersignd run?)", path.display())));
     }
     let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&format!("sqlite://{}", path.display())).await?);
-    let backends = countersignd::build_backends(&config).map_err(|e| CliError::Usage(e.to_string()))?;
+    let backends = countersignd::build_backends(&config, &store).map_err(|e| CliError::Usage(e.to_string()))?;
     let ctx = Context { config, store, backends };
     let mut out = std::io::stdout().lock();
     execute(cli.command, ctx, &mut out).await

@@ -64,7 +64,9 @@ pub enum Command {
     /// Remove a chat account link.
     Unlink { channel: String, external_id: String },
     /// Write a new random secret to a file (mode 0600), e.g. for
-    /// `server.session_key_file` or a webhook `secret_file`.
+    /// `server.session_key_file`, a webhook `secret_file`, or a host key
+    /// (`--format host` also prints the `key_sha256` line for the
+    /// configuration).
     Keygen {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = KeyFormat::Hex)]
@@ -81,6 +83,8 @@ pub enum KeyFormat {
     Hex,
     /// `whsec_<base64>` (Standard Webhooks, 256 bits).
     Whsec,
+    /// A host key for the intake API (64 hex characters).
+    Host,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -172,7 +176,11 @@ pub async fn execute(cmd: Command, ctx: Context, out: &mut dyn Write) -> Result<
             }
             writeln!(out, "unlinked {external_id} on {channel}")?;
         }
-        Command::Keygen { path, format, force } => keygen(&path, format, force)?,
+        Command::Keygen { path, format, force } => {
+            if let Some(line) = keygen(&path, format, force)? {
+                writeln!(out, "{line}")?;
+            }
+        }
     }
     Ok(())
 }
@@ -270,9 +278,10 @@ pub fn details(r: &Request) -> String {
     kv(
         "needs",
         &format!(
-            "{} approval(s) at {}, ttl {}s{}",
+            "{} approval(s) at {}, {} for {}s{}",
             q.quorum,
             q.min_assurance,
+            q.grant.as_str(),
             q.ttl.as_secs(),
             if q.allow_self_approval { ", self-approval allowed" } else { "" }
         ),
@@ -289,6 +298,10 @@ pub fn details(r: &Request) -> String {
             &format!("{verdict} by {} via {} ({}) at {}{comment}", d.approver, d.via, d.assurance, short_time(d.at)),
         );
     }
+    for u in &r.uses {
+        let what = u.attributes.get("command").map_or_else(|| clean(&u.subject.id), |c| clean(c));
+        kv("used", &format!("{} {what}", short_time(u.at)));
+    }
     s
 }
 
@@ -300,11 +313,12 @@ fn random_bytes() -> [u8; 32] {
     out
 }
 
-/// Write a new secret, readable only by the owner.
-pub fn keygen(path: &Path, format: KeyFormat, force: bool) -> Result<(), CliError> {
+/// Write a new secret, readable only by the owner. For a host key, returns
+/// the configuration line holding its hash.
+pub fn keygen(path: &Path, format: KeyFormat, force: bool) -> Result<Option<String>, CliError> {
     let bytes = random_bytes();
     let text = match format {
-        KeyFormat::Hex => bytes.iter().fold(String::new(), |mut s, b| {
+        KeyFormat::Hex | KeyFormat::Host => bytes.iter().fold(String::new(), |mut s, b| {
             let _ = write!(s, "{b:02x}");
             s
         }),
@@ -335,5 +349,5 @@ pub fn keygen(path: &Path, format: KeyFormat, force: bool) -> Result<(), CliErro
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
     writeln!(file, "{text}")?;
-    Ok(())
+    Ok((format == KeyFormat::Host).then(|| format!("key_sha256 = \"{}\"", countersignd::intake::key_sha256(&text))))
 }

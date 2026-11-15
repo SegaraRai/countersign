@@ -3,6 +3,7 @@
 pub mod config;
 pub mod dispatch;
 pub mod engine;
+pub mod intake;
 pub mod link;
 pub mod web;
 
@@ -11,7 +12,6 @@ use std::sync::Arc;
 use countersign_core::{AccessBackend, Channel, Store, StoreError};
 use countersign_store_sqlite::SqliteStore;
 
-#[cfg_attr(not(any(feature = "backend-octelium", feature = "backend-exec")), allow(unused_imports))]
 use crate::config::{BackendConfig, ChannelConfig, Config};
 use crate::dispatch::{Dispatcher, LogChannel};
 use crate::engine::{Engine, Rules};
@@ -61,13 +61,15 @@ pub fn rules_from(config: &Config) -> Rules {
     Rules { policies: config.policies.clone(), approvers: config.approver_map(), unmatched: config.engine.unmatched }
 }
 
-/// Instantiate the configured backends.
-pub fn build_backends(config: &Config) -> Result<Vec<Arc<dyn AccessBackend>>, BuildError> {
+/// Instantiate the configured backends. `host` backends keep their record
+/// in `store`.
+pub fn build_backends(config: &Config, store: &Arc<dyn Store>) -> Result<Vec<Arc<dyn AccessBackend>>, BuildError> {
     config
         .backends
         .iter()
         .map(|(name, bc)| -> Result<Arc<dyn AccessBackend>, BuildError> {
             match bc {
+                BackendConfig::Host(_) => Ok(Arc::new(intake::HostBackend::new(name.clone(), Arc::clone(store)))),
                 #[cfg(feature = "backend-octelium")]
                 BackendConfig::Octelium(c) => {
                     countersign_backend_octelium::OcteliumBackend::new(name.clone(), c.clone())
@@ -121,6 +123,8 @@ pub struct Daemon {
     /// Channels whose [`Channel::run`] should be kept running.
     pub interactive: Vec<Arc<dyn Channel>>,
     pub sink: Arc<link::DaemonSink>,
+    /// The API for hosts, if `[intake]` is configured.
+    pub intake: Option<intake::IntakeState>,
 }
 
 impl std::fmt::Debug for Daemon {
@@ -134,7 +138,8 @@ impl Daemon {
     pub async fn build(config: &Config) -> Result<Self, BuildError> {
         let url = format!("sqlite://{}", config.store.path.display());
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&url).await?);
-        let mut daemon = Self::with_parts(config, store, build_backends(config)?, build_channels(config)?)?;
+        let backends = build_backends(config, &store)?;
+        let mut daemon = Self::with_parts(config, store, backends, build_channels(config)?)?;
         daemon.web.auth = build_authenticator(config)?;
         daemon.web.key = session_key(config)?;
         Ok(daemon)
@@ -162,6 +167,9 @@ impl Daemon {
                 fresh_auth_window: config.server.fresh_auth_window,
             }),
         };
-        Ok(Self { engine, dispatcher, web, interactive, sink })
+        let intake = config.intake.as_ref().map(|i| {
+            intake::IntakeState::new(Arc::clone(&engine), &config.host_backends(), i, &config.server.public_url)
+        });
+        Ok(Self { engine, dispatcher, web, interactive, sink, intake })
     }
 }

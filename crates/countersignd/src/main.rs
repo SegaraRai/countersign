@@ -143,10 +143,31 @@ async fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Er
         }
     });
 
+    let intake = match (&config.intake, daemon.intake.clone()) {
+        (Some(ic), Some(state)) => {
+            let listener = tokio::net::TcpListener::bind(ic.listen).await?;
+            info!(listen = %ic.listen, "intake API listening");
+            let app = countersignd::intake::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
+            let mut stop = stop_rx.clone();
+            Some(tokio::spawn(async move {
+                let shutdown = async move {
+                    let _ = stop.changed().await;
+                };
+                if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown).await {
+                    error!(error = %e, "intake server failed");
+                }
+            }))
+        }
+        _ => None,
+    };
+
     wait_for_shutdown(&path, &config, &daemon).await;
     info!("shutting down");
     let _ = stop_tx.send(true);
     let _ = tokio::join!(ticker, delivery, server);
+    if let Some(i) = intake {
+        let _ = i.await;
+    }
     for r in receivers {
         let _ = r.await;
     }
@@ -203,9 +224,10 @@ fn reload(path: &std::path::Path, running: &Config, daemon: &Daemon) {
                 || new.store != running.store
                 || new.engine.poll_interval != running.engine.poll_interval
                 || new.backends != running.backends
+                || new.intake != running.intake
                 || new.channels != running.channels
             {
-                warn!("server, store, engine timing, backend and channel changes take effect after a restart");
+                warn!("server, store, engine timing, backend, intake and channel changes take effect after a restart");
             }
             daemon.engine.set_rules(rules_from(&new));
             info!(policies = new.policies.policies.len(), approvers = new.approvers.len(), "configuration reloaded");
