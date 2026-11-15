@@ -63,7 +63,7 @@ min_assurance = "linked"       # chat buttons may approve directly
 | `countersign-channel-ntfy` | push notifications via an ntfy server, linking to the web UI (notify-only) |
 | `countersign-channel-webhook` | signed JSON events ([Standard Webhooks](https://www.standardwebhooks.com/)) to any URL (notify-only) |
 | `countersignd` | daemon: config, engine (discover, decide, grant, expire), outbox delivery, web UI and JSON API |
-| `countersign` (CLI) | planned |
+| `countersign` (CLI) | host-side administration: list/show requests, deny/revoke, manage account links, generate secrets (no approve) |
 
 ## Running
 
@@ -71,6 +71,22 @@ min_assurance = "linked"       # chat buttons may approve directly
 countersignd --config /etc/countersign/config.toml check
 countersignd --config /etc/countersign/config.toml run
 ```
+
+On the same host, `countersign` reads the daemon's configuration and database:
+
+```sh
+countersign requests                  # open requests (--all, --json)
+countersign show <id>
+countersign deny <id> --as alice      # recorded as alice, via "cli"
+countersign revoke <id> --as alice
+countersign links                     # chat accounts linked to approvers
+countersign unlink discord 123456789012345678
+countersign keygen /etc/countersign/session.key            # 256-bit hex
+countersign keygen /etc/countersign/webhook-secret --format whsec
+```
+
+Approving is intentionally not possible from the CLI; it goes through the web
+UI or a chat channel, where the policy's assurance level is enforced.
 
 See [`crates/countersignd/config.example.toml`](crates/countersignd/config.example.toml).
 

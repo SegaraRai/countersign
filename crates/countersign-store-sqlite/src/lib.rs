@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use countersign_core::{
-    ApproverId, ChannelName, DomainEvent, EventId, MessageRef, OutboxItem, Request, RequestFilter, RequestId, Store,
-    StoreError, SubjectRef,
+    AccountLink, ApproverId, ChannelName, DomainEvent, EventId, MessageRef, OutboxItem, Request, RequestFilter,
+    RequestId, Store, StoreError, SubjectRef,
 };
 use jiff::Timestamp;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -365,6 +365,35 @@ impl Store for SqliteStore {
             .await
             .map_err(other)?;
         Ok(row.map(|r| ApproverId::new(r.get::<String, _>("approver_id"))))
+    }
+
+    async fn list_account_links(&self) -> Result<Vec<AccountLink>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT channel, external_id, approver_id, linked_at_ms FROM account_links ORDER BY channel, external_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(other)?;
+        rows.iter()
+            .map(|r| {
+                Ok(AccountLink {
+                    channel: ChannelName::new(r.get::<String, _>("channel")),
+                    external_id: r.get("external_id"),
+                    approver: ApproverId::new(r.get::<String, _>("approver_id")),
+                    linked_at: Timestamp::from_millisecond(r.get("linked_at_ms")).map_err(other)?,
+                })
+            })
+            .collect()
+    }
+
+    async fn unlink_account(&self, channel: &ChannelName, external_id: &str) -> Result<bool, StoreError> {
+        let done = sqlx::query("DELETE FROM account_links WHERE channel = ? AND external_id = ?")
+            .bind(channel.as_str())
+            .bind(external_id)
+            .execute(&self.pool)
+            .await
+            .map_err(other)?;
+        Ok(done.rows_affected() > 0)
     }
 }
 

@@ -37,6 +37,15 @@ pub struct RequestFilter {
     pub limit: Option<u32>,
 }
 
+/// A chat account linked to an approver.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountLink {
+    pub channel: ChannelName,
+    pub external_id: String,
+    pub approver: ApproverId,
+    pub linked_at: Timestamp,
+}
+
 /// An outbox entry claimed for delivery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboxItem {
@@ -102,4 +111,10 @@ pub trait Store: Send + Sync {
 
     async fn resolve_account(&self, channel: &ChannelName, external_id: &str)
     -> Result<Option<ApproverId>, StoreError>;
+
+    /// All account links, ordered by channel and external id.
+    async fn list_account_links(&self) -> Result<Vec<AccountLink>, StoreError>;
+
+    /// Remove a link. Returns whether one existed.
+    async fn unlink_account(&self, channel: &ChannelName, external_id: &str) -> Result<bool, StoreError>;
 }

@@ -202,6 +202,16 @@ async fn message_refs_and_account_links() {
     assert_eq!(store.resolve_account(&"slack".into(), "123").await.unwrap(), None, "links are per channel");
     store.link_account(&discord, "123", &"carol".into()).await.unwrap();
     assert_eq!(store.resolve_account(&discord, "123").await.unwrap(), Some("carol".into()));
+
+    store.link_account(&"slack".into(), "U1", &"bob".into()).await.unwrap();
+    let links = store.list_account_links().await.unwrap();
+    let summary: Vec<_> =
+        links.iter().map(|l| (l.channel.as_str(), l.external_id.as_str(), l.approver.as_str())).collect();
+    assert_eq!(summary, [("discord", "123", "carol"), ("slack", "U1", "bob")]);
+    assert!(store.unlink_account(&discord, "123").await.unwrap());
+    assert!(!store.unlink_account(&discord, "123").await.unwrap(), "already gone");
+    assert_eq!(store.resolve_account(&discord, "123").await.unwrap(), None);
+    assert_eq!(store.list_account_links().await.unwrap().len(), 1);
 }
 
 #[tokio::test]

@@ -38,5 +38,5 @@ pub use id::{ApproverId, BackendName, ChannelName, EventId, PolicyName, RequestI
 pub use policy::{ApproverSelector, Matcher, Policy, PolicyError, PolicySet, Requirements};
 pub use principal::{Approver, Requester};
 pub use request::{Decision, Request, RequestState, TransitionError, Verdict};
-pub use store::{OutboxItem, RequestFilter, Store, StoreError};
+pub use store::{AccountLink, OutboxItem, RequestFilter, Store, StoreError};
 pub use subject::{PendingSubject, SubjectFacts, SubjectRef};
