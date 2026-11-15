@@ -11,7 +11,7 @@ use std::sync::Arc;
 use countersign_core::{AccessBackend, Channel, Store, StoreError};
 use countersign_store_sqlite::SqliteStore;
 
-#[cfg_attr(not(feature = "backend-octelium"), allow(unused_imports))]
+#[cfg_attr(not(any(feature = "backend-octelium", feature = "backend-exec")), allow(unused_imports))]
 use crate::config::{BackendConfig, ChannelConfig, Config};
 use crate::dispatch::{Dispatcher, LogChannel};
 use crate::engine::{Engine, Rules};
@@ -74,6 +74,10 @@ pub fn build_backends(config: &Config) -> Result<Vec<Arc<dyn AccessBackend>>, Bu
                         .map(|b| Arc::new(b) as Arc<dyn AccessBackend>)
                         .map_err(|source| BuildError::Backend { name: name.to_string(), source })
                 }
+                #[cfg(feature = "backend-exec")]
+                BackendConfig::Exec(c) => countersign_backend_exec::ExecBackend::new(name.clone(), c)
+                    .map(|b| Arc::new(b) as Arc<dyn AccessBackend>)
+                    .map_err(|source| BuildError::Backend { name: name.to_string(), source }),
                 #[allow(unreachable_patterns)]
                 _ => unreachable!("backend type {name} not compiled in"),
             }

@@ -58,7 +58,7 @@ min_assurance = "linked"       # chat buttons may approve directly
 | `countersign-store-sqlite` | SQLite store with transactional outbox |
 | `countersign-auth-oidc` | OpenID Connect login (code flow + PKCE) for the web UI |
 | `countersign-backend-octelium` | approves/rejects pending Octelium sessions via `octeliumctl` |
-| `countersign-backend-exec` | planned |
+| `countersign-backend-exec` | delegates to any program speaking a small JSON protocol over stdin/stdout |
 | `countersign-channel-discord` | posts requests with Approve/Deny buttons; receives presses over the Gateway (no inbound endpoint) |
 | `countersign-channel-ntfy` | push notifications via an ntfy server, linking to the web UI (notify-only) |
 | `countersign-channel-webhook` | signed JSON events ([Standard Webhooks](https://www.standardwebhooks.com/)) to any URL (notify-only) |

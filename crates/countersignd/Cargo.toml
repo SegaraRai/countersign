@@ -8,8 +8,9 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-default = ["backend-octelium", "auth-oidc", "channel-discord", "channel-ntfy", "channel-webhook"]
+default = ["backend-octelium", "backend-exec", "auth-oidc", "channel-discord", "channel-ntfy", "channel-webhook"]
 backend-octelium = ["dep:countersign-backend-octelium"]
+backend-exec = ["dep:countersign-backend-exec"]
 auth-oidc = ["dep:countersign-auth-oidc"]
 channel-discord = ["dep:countersign-channel-discord"]
 channel-ntfy = ["dep:countersign-channel-ntfy"]
@@ -22,6 +23,7 @@ axum.workspace = true
 axum-extra.workspace = true
 clap.workspace = true
 countersign-auth-oidc = { workspace = true, optional = true }
+countersign-backend-exec = { workspace = true, optional = true }
 countersign-backend-octelium = { workspace = true, optional = true }
 countersign-channel-discord = { workspace = true, optional = true }
 countersign-channel-ntfy = { workspace = true, optional = true }

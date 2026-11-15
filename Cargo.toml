@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 countersign-auth-oidc = { path = "crates/countersign-auth-oidc" }
+countersign-backend-exec = { path = "crates/countersign-backend-exec" }
 countersign-backend-octelium = { path = "crates/countersign-backend-octelium" }
 countersign-channel-discord = { path = "crates/countersign-channel-discord" }
 countersign-channel-ntfy = { path = "crates/countersign-channel-ntfy" }

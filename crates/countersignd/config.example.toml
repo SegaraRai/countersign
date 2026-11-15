@@ -41,6 +41,17 @@ domain = "octelium.example.com"
 # Map Octelium identity providers to approver identities (self-approval checks).
 identity_providers = { pocket = "oidc:https://id.example.com" }
 
+# Exec: any program speaking countersign's JSON protocol (see the
+# countersign-backend-exec crate docs). Runs without a shell and with a
+# cleared environment; only `env` (and a default PATH) is passed.
+# [backend.sudo]
+# type = "exec"
+# command = ["/usr/local/lib/countersign/sudo-helper"]
+# env = { HELPER_MODE = "prod" }
+# timeout = "30s"
+# revoke = true          # the helper implements `revoke`
+# native_expiry = false  # countersign calls `revoke` when the TTL ends
+
 [channel.log]
 type = "log"
 

@@ -132,6 +132,9 @@ fn default_poll() -> Duration {
 pub enum BackendConfig {
     #[cfg(feature = "backend-octelium")]
     Octelium(countersign_backend_octelium::OcteliumConfig),
+    /// Any program speaking the exec JSON protocol.
+    #[cfg(feature = "backend-exec")]
+    Exec(countersign_backend_exec::ExecConfig),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
