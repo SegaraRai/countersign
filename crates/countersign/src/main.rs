@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
-use countersign::{CliError, Command, Context, execute, host_key, keygen};
+use countersign::{CliError, Command, Context, execute, host_key, keygen, signing_key};
 use countersign_core::Store;
 use countersign_store_sqlite::SqliteStore;
 use countersignd::config::Config;
@@ -36,6 +36,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Command::Keygen { path, format, force } => return keygen(path, *format, *force),
         Command::HostKey { path, force } => {
             println!("{}", host_key(path, *force)?);
+            return Ok(());
+        }
+        Command::SigningKey { path, public, force } => {
+            println!("{}", signing_key(path, *public, *force)?);
             return Ok(());
         }
         _ => {}
