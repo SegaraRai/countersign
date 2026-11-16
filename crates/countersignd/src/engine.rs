@@ -325,7 +325,7 @@ impl Engine {
                 return Ok(r);
             }
             let v = r.version;
-            let events = r.end(now)?;
+            let events = r.collect(now)?;
             if self.save(&r, v, &events).await? {
                 info!(request = %r.id, "single-use approval collected");
                 return Ok(r);

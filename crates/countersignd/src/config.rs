@@ -60,6 +60,22 @@ pub struct ServerConfig {
     pub fresh_auth_window: Duration,
 }
 
+/// Whether `ip` is reachable only from a private network (loopback, RFC 1918,
+/// CGNAT/tailnet, link-local, IPv6 unique-local). The unspecified address
+/// (all interfaces) is not.
+pub fn is_private(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || (a == 100 && (64..128).contains(&b))
+        }
+        std::net::IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            v6.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+    }
+}
+
 fn default_listen() -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], 8080))
 }
@@ -518,5 +534,25 @@ public_url = \"http://localhost\"
         assert!(!wildcard("*.toml", "a.toml.bak"));
         assert!(wildcard("10-*.toml", "10-x.toml"));
         assert!(!wildcard("a*a", "a"));
+    }
+
+    #[test]
+    fn private_addresses() {
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "100.64.0.10",
+            "100.127.255.1",
+            "::1",
+            "fd7a:115c:a1e0::1",
+            "fe80::1",
+        ] {
+            assert!(is_private(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["0.0.0.0", "::", "8.8.8.8", "100.128.0.1", "2001:db8::1"] {
+            assert!(!is_private(ip.parse().unwrap()), "{ip}");
+        }
     }
 }

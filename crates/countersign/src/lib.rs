@@ -198,9 +198,10 @@ fn short_time(t: Timestamp) -> String {
     t.strftime("%Y-%m-%d %H:%M:%SZ").to_string()
 }
 
-/// Untrusted text for a terminal: no control characters (escape sequences).
+/// Untrusted text for a terminal: control and other hidden characters
+/// (escape sequences, bidirectional overrides) are written out.
 fn clean(s: &str) -> String {
-    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+    countersign_core::text::escape(s)
 }
 
 fn render_table(header: &[&str], rows: &[Vec<String>]) -> String {

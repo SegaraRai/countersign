@@ -36,9 +36,14 @@ impl LinkCodes {
 
     /// A fresh code for `approver`, replacing any earlier one. Shown as
     /// `XXXXX-XXXXX`; dashes, spaces and case are ignored when redeeming.
+    ///
+    /// # Panics
+    ///
+    /// If the operating system cannot provide random numbers.
     pub fn issue(&self, approver: &ApproverId, now: Timestamp) -> (String, Timestamp) {
-        let bytes = uuid::Uuid::new_v4().into_bytes();
-        let raw: String = bytes.iter().take(CODE_LEN).map(|b| char::from(ALPHABET[usize::from(b & 31)])).collect();
+        let mut bytes = [0u8; CODE_LEN];
+        getrandom::getrandom(&mut bytes).expect("the operating system's random number generator failed");
+        let raw: String = bytes.iter().map(|b| char::from(ALPHABET[usize::from(b & 31)])).collect();
         let expires =
             now.saturating_add(SignedDuration::from_secs(CODE_TTL.as_secs().cast_signed())).unwrap_or(Timestamp::MAX);
         let mut codes = self.lock();

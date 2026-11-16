@@ -49,13 +49,17 @@ both `sudo` and `sudo-rs`. Both read `/etc/pam.d/sudo` (and `sudo-i` for
 
 ```sudoers
 # The agent must authenticate for every sudo, so every sudo reaches PAM.
-agent   ALL=(ALL) ALL
+agent   ALL=(ALL) NOSETENV: ALL
 Defaults:agent timestamp_timeout=0
 # sudo -n (and sudo without a terminal) only reaches PAM with this.
 Defaults:agent noninteractive_auth
 ```
 
 A `NOPASSWD` entry for the agent would skip PAM entirely and must not exist.
+`NOSETENV` matters: a rule for `ALL` commands implies `SETENV`, which lets the
+caller set any variable on the command line (`sudo LD_PRELOAD=… id`) or keep
+its environment (`-E`), bypassing sudo's environment checks. An approved
+command could then run anything.
 Windows are tracked by countersign, not by sudo's timestamp, because sudo's
 timestamp cannot be scoped to a command pattern.
 
@@ -107,9 +111,18 @@ A small static Rust binary run by `pam_exec` as root. It:
 Configuration: `/etc/countersign/sudo.toml` (server URL, key file, timeout).
 
 The argv is shown as typed, e.g. `sudo -u postgres psql`. The helper parses
-sudo's common options (`-u`, `-g`, `-i`, `-s`, `-E`, `--`) to report
-`runas` and the command separately; anything it does not understand is sent
-as raw argv and only matches policies that do not look at the command.
+sudo's options that do not change what runs (`-u`, `-n`, `-H`, `--`, ...) to
+report `runas` and the command separately. Anything else is sent as the raw
+arguments, which only match policies that do not look at the command: unknown
+options, and on purpose `-E`/`--preserve-env` (the caller's environment can
+make any command do anything), `-D`/`--chdir`, `-R`/`--chroot`, `-g` and
+leading `VAR=value` assignments. With `-s` or `-i` the command runs through a
+shell (for `-s`, the one the caller's `SHELL` names), so it is shown as
+`(shell) <command>` or `(login shell) <command>`.
+
+Command patterns in policies are globs over the command as shown. Write them
+for exact commands or arguments the command cannot abuse: `apt *` also
+matches `apt -o APT::Update::Pre-Invoke::=sh …`.
 
 ## countersign side
 
@@ -188,6 +201,17 @@ DELETE /intake/v1/requests/{id}          withdraw: 204, or 409 if no longer pend
 
 A host can only read or withdraw its own requests. Each host has a cap on
 pending requests (e.g. 10) to bound spam from a misbehaving agent.
+
+A single-use approval ends when the host first reads it as `approved`; later
+reads still say `approved`, so a lost answer can be asked for again. If its
+time (`max_ttl`) runs out before the host reads it, it was never used and
+reads as `expired`.
+
+Commands longer than 3000 characters (as shown) are refused, so chat
+channels can always show the whole command. Control characters and
+invisible or text-reordering Unicode characters (zero-width characters,
+bidirectional overrides) are written out as escapes before anything is
+stored or shown.
 
 Long polls wait on an in-process notification fired when the engine changes
 a request, so approvals reach the host immediately.

@@ -319,6 +319,37 @@ async fn commands_are_quoted_and_control_characters_neutralized() {
     assert!(!command.contains('\u{1b}'));
 }
 
+#[tokio::test]
+async fn commands_cannot_hide_what_they_are() {
+    let s = setup().await;
+    // A right-to-left override shows the text after it reversed, i.e. as
+    // something other than what runs; a zero-width space is not seen at all.
+    let (_, v) = s.submit(WEB1, "agent", &["echo", "\u{202e}rm -rf /", "x\u{200b}y"]).await;
+    let r = s.request(&id_of(&v)).await;
+    assert_eq!(r.facts.attributes["command"], r"echo '\u{202e}rm -rf /' 'x\u{200b}y'");
+
+    // Commands too long to show in full are not offered for approval at all.
+    let long = "a".repeat(countersignd::intake::MAX_COMMAND_CHARS);
+    let (status, v) = s.submit(WEB1, "agent", &["echo", &long]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+    let (status, v) = s.submit(WEB1, "agent", &["echo", &long[5..]]).await;
+    assert_eq!(status, StatusCode::CREATED, "exactly the limit: {v}");
+}
+
+#[tokio::test]
+async fn a_single_use_approval_that_runs_out_before_collection_is_not_approved() {
+    let s = setup().await;
+    let (_, v) = s.submit(WEB1, "agent", &["reboot"]).await;
+    let id = id_of(&v);
+    s.decide(&id, Verdict::Approve).await;
+    // The host only asks after the approval's time is up.
+    let later = Timestamp::now() + jiff::SignedDuration::from_mins(5);
+    s.daemon.engine.advance_open(later).await.unwrap();
+    let r = s.request(&id).await;
+    assert_eq!((r.state, r.collected_at), (RequestState::Ended, None));
+    assert_eq!(s.status(WEB1, &id, 0).await.1["state"], "expired");
+}
+
 #[test]
 fn configuration_mistakes_are_reported() {
     let ok = config();

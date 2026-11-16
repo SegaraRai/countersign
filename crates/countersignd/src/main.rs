@@ -132,6 +132,9 @@ async fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Er
 
     let listener = tokio::net::TcpListener::bind(config.server.listen).await?;
     info!(listen = %config.server.listen, url = %config.server.public_url, "web UI listening");
+    if !countersignd::config::is_private(config.server.listen.ip()) {
+        warn!(listen = %config.server.listen, "the web UI listens on a public or every address; keep it private and put it behind a proxy");
+    }
     let app = countersignd::web::router(daemon.web.clone());
     let mut stop = stop_rx.clone();
     let server = tokio::spawn(async move {
@@ -147,6 +150,9 @@ async fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Er
         (Some(ic), Some(state)) => {
             let listener = tokio::net::TcpListener::bind(ic.listen).await?;
             info!(listen = %ic.listen, "intake API listening");
+            if !countersignd::config::is_private(ic.listen.ip()) {
+                warn!(listen = %ic.listen, "the intake API (plain HTTP) listens on a public or every address; bind it to a private (tailnet) address");
+            }
             let app = countersignd::intake::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
             let mut stop = stop_rx.clone();
             Some(tokio::spawn(async move {

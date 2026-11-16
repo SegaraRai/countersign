@@ -135,6 +135,11 @@ pub struct Request {
     /// Subjects approved under this request while it was an active window.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uses: Vec<Use>,
+    /// When the requester picked up a single-use approval (see
+    /// [`Request::collect`]). A single-use approval that ended without being
+    /// collected was never used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collected_at: Option<Timestamp>,
     pub created_at: Timestamp,
     /// Decisions are refused after this instant.
     pub pending_until: Timestamp,
@@ -156,6 +161,7 @@ impl Request {
             decisions: Vec::new(),
             grant: None,
             uses: Vec::new(),
+            collected_at: None,
             created_at: now,
             pending_until,
             updated_at: now,
@@ -301,10 +307,14 @@ impl Request {
         Ok(())
     }
 
-    /// End an active grant now, e.g. once a single-use approval has been
-    /// collected.
-    pub fn end(&mut self, now: Timestamp) -> Result<Vec<DomainEvent>, TransitionError> {
-        self.require(|s| matches!(s, RequestState::Active { .. }), "end")?;
+    /// The requester picked up an active single-use approval: it is used,
+    /// and ends now.
+    pub fn collect(&mut self, now: Timestamp) -> Result<Vec<DomainEvent>, TransitionError> {
+        self.require(|s| matches!(s, RequestState::Active { .. }), "collect")?;
+        if self.requirements.grant != GrantMode::Once {
+            return Err(TransitionError::InvalidState { state: "a window", action: "collect" });
+        }
+        self.collected_at = Some(now);
         self.state = RequestState::Ended;
         self.touch(now);
         Ok(vec![DomainEvent::Ended { request_id: self.id, at: now }])
@@ -573,9 +583,19 @@ mod tests {
         let same = another("s2", "alice-agent", "host-1");
         assert!(!r.window_covers(&same, t(100)));
         assert_eq!(r.record_use(&same, t(100)), Err(TransitionError::NotAWindow));
-        assert_eq!(r.end(t(3)).unwrap().len(), 1);
+        assert_eq!(r.collected_at, None);
+        assert_eq!(r.collect(t(3)).unwrap().len(), 1);
         assert_eq!(r.state, RequestState::Ended);
-        assert!(r.end(t(4)).is_err());
+        assert_eq!(r.collected_at, Some(t(3)));
+        assert!(r.collect(t(4)).is_err());
+
+        // Running out before collection leaves it uncollected.
+        let mut r = active(GrantMode::Once);
+        let RequestState::Active { until } = r.state else { panic!() };
+        r.end_if_elapsed(until).unwrap();
+        assert_eq!((r.state.clone(), r.collected_at), (RequestState::Ended, None));
+        // A window is never collected.
+        assert!(active(GrantMode::Window).collect(t(3)).is_err());
     }
 
     #[test]

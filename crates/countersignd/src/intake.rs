@@ -42,6 +42,9 @@ const RECHECK: Duration = Duration::from_secs(2);
 const MAX_ARGV_BYTES: usize = 8 * 1024;
 const MAX_FIELD: usize = 1024;
 const MAX_REASON: usize = 500;
+/// The longest command (as shown) approvers are asked about. Chat
+/// channels can show this much in full.
+pub const MAX_COMMAND_CHARS: usize = 3000;
 
 /// `[intake]`: where hosts reach countersign.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -332,8 +335,11 @@ fn host_state(r: &Request) -> &'static str {
     match &r.state {
         RequestState::Pending | RequestState::Approved => "pending",
         RequestState::Active { .. } => "approved",
-        // A collected single-use approval stays approved for its requester.
-        RequestState::Ended if r.requirements.grant == GrantMode::Once => "approved",
+        // A collected single-use approval stays approved for its requester
+        // (who may ask again if the first answer was lost). One that ran out
+        // before it was collected was never used and must not be.
+        RequestState::Ended if r.collected_at.is_some() => "approved",
+        RequestState::Ended if r.requirements.grant == GrantMode::Once => "expired",
         RequestState::Ended => "ended",
         RequestState::Denied | RequestState::Failed { .. } => "denied",
         RequestState::Expired => "expired",
@@ -374,8 +380,9 @@ pub struct SubmitBody {
     pub reason: Option<String>,
 }
 
-/// Replace control characters so values cannot disturb terminals or logs,
-/// and cap the length.
+/// Write out control and other hidden characters (see
+/// [`countersign_core::text`]) so values cannot disturb terminals or logs or
+/// look different from what they are, and cap the length.
 fn clean(s: &str, max: usize) -> String {
     let mut out = String::new();
     for c in s.chars() {
@@ -383,7 +390,7 @@ fn clean(s: &str, max: usize) -> String {
             out.push('…');
             break;
         }
-        if c.is_control() {
+        if countersign_core::text::is_hidden(c) {
             out.extend(c.escape_default());
         } else {
             out.push(c);
@@ -415,12 +422,16 @@ fn pending_subject(id: &HostIdentity, groups: &[String], body: SubmitBody) -> Re
         return Err(bad("invalid runas"));
     }
     let argv: Vec<String> = body.argv.iter().map(|a| clean(a, MAX_ARGV_BYTES)).collect();
+    let command = shell_join(&argv);
+    if command.chars().count() > MAX_COMMAND_CHARS {
+        return Err(bad("the command is too long to show to approvers"));
+    }
 
     let mut attributes = BTreeMap::from([
         ("host".to_owned(), id.host.clone()),
         ("user".to_owned(), body.user.clone()),
         ("runas".to_owned(), runas),
-        ("command".to_owned(), shell_join(&argv)),
+        ("command".to_owned(), command),
     ]);
     if let Some(cwd) = body.cwd.filter(|s| !s.is_empty()) {
         attributes.insert("cwd".to_owned(), clean(&cwd, MAX_FIELD));

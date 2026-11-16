@@ -80,6 +80,8 @@ fn say(message: &str) {
 /// nobody reads and no controlling terminal, so this is the only way to
 /// reach the user. Reopening runs as root, so only pipes and terminals are
 /// accepted: a caller could point its stderr at a file it cannot write.
+/// A terminal is opened with `O_NOCTTY`, so it never becomes the helper's
+/// controlling terminal (whose signals would then reach the helper).
 #[cfg(unix)]
 fn open_caller_stderr(pid: u32) -> Option<std::fs::File> {
     use std::os::unix::fs::FileTypeExt as _;
@@ -91,7 +93,8 @@ fn open_caller_stderr(pid: u32) -> Option<std::fs::File> {
     if !(kind.is_fifo() || terminal) {
         return None;
     }
-    std::fs::OpenOptions::new().append(true).open(&link).ok()
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new().append(true).custom_flags(libc::O_NOCTTY).open(&link).ok()
 }
 
 /// Resolve when the first of several futures does.

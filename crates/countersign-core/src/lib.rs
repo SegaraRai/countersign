@@ -26,6 +26,7 @@ pub mod principal;
 pub mod request;
 pub mod store;
 pub mod subject;
+pub mod text;
 mod time;
 
 pub use assurance::Assurance;

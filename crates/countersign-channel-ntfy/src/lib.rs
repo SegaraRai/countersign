@@ -245,7 +245,7 @@ pub fn publish(config: &NtfyConfig, n: Notification<'_>) -> Publish {
 
 /// Untrusted text on one line, bounded.
 fn clean(s: &str, max: usize) -> String {
-    let one_line: String = s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let one_line: String = s.chars().map(|c| if countersign_core::text::is_hidden(c) { ' ' } else { c }).collect();
     let t = one_line.trim();
     match t.char_indices().nth(max) {
         Some((i, _)) => format!("{}…", &t[..i]),

@@ -48,6 +48,13 @@ pub struct ProcessRunner {
 impl Runner for ProcessRunner {
     async fn run(&self, args: &[String]) -> Result<CmdOutput, RunError> {
         let mut cmd = tokio::process::Command::new(&self.program);
+        // The daemon's own secrets (bot tokens, client secrets) may be in its
+        // environment; octeliumctl has no use for them.
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("COUNTERSIGN_") {
+                cmd.env_remove(key);
+            }
+        }
         cmd.args(args.iter().map(OsString::from))
             // One OS thread is plenty for a single request and saves CPU.
             .env("GOMAXPROCS", "1")

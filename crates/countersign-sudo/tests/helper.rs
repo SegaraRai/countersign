@@ -40,15 +40,14 @@ fn parses_common_sudo_command_lines() {
         parsed(&["sudo", "--user=www", "--", "ls", "-l"]),
         Parsed { runas: Some("www".into()), command: cmd(&["ls", "-l"]) }
     );
-    assert_eq!(parsed(&["sudo", "--user", "www", "-E", "env"]).command, cmd(&["env"]));
-    assert_eq!(parsed(&["sudo", "-D", "/srv", "make"]).command, cmd(&["make"]));
+    assert_eq!(parsed(&["sudo", "--user", "www", "-H", "env"]).command, cmd(&["env"]));
     assert_eq!(parsed(&["sudo", "-i"]).command, cmd(&["(login shell)"]));
     assert_eq!(
         parsed(&["sudo", "-iu", "deploy"]),
         Parsed { runas: Some("deploy".into()), command: cmd(&["(login shell)"]) }
     );
     assert_eq!(parsed(&["sudo", "-s"]).command, cmd(&["(shell)"]));
-    assert_eq!(parsed(&["sudo", "-i", "whoami"]).command, cmd(&["whoami"]));
+    assert_eq!(parsed(&["sudo", "-i", "whoami"]).command, cmd(&["(login shell)", "whoami"]));
     assert_eq!(parsed(&["sudo", "-v"]).command, cmd(&["(validate)"]));
     assert_eq!(parsed(&["sudo", "-l"]).command, cmd(&["(list privileges)"]));
     assert_eq!(parsed(&["sudo", "-e", "/etc/hosts"]).command, cmd(&["sudoedit", "/etc/hosts"]));
@@ -59,6 +58,37 @@ fn parses_common_sudo_command_lines() {
 fn unknown_options_send_the_raw_arguments() {
     // Unrecognised syntax must not be mistaken for an innocuous command.
     assert_eq!(parsed(&["sudo", "-X", "apt", "upgrade"]).command, cmd(&["-X", "apt", "upgrade"]));
+}
+
+/// Command lines whose command looks harmless but is not what runs, or not
+/// how approvers would assume, never come out as the bare command, so they
+/// cannot match a policy written for it.
+#[test]
+fn options_that_change_what_runs_are_not_hidden() {
+    for argv in [
+        &["sudo", "-E", "id"][..],
+        &["sudo", "--preserve-env", "id"],
+        &["sudo", "--preserve-env=LD_PRELOAD", "id"],
+        &["sudo", "-D", "/tmp", "id"],
+        &["sudo", "--chdir=/tmp", "id"],
+        &["sudo", "-R", "/tmp/root", "id"],
+        &["sudo", "--chroot", "/tmp/root", "id"],
+        &["sudo", "-g", "disk", "id"],
+        &["sudo", "-nE", "id"],
+        &["sudo", "LD_PRELOAD=/tmp/x.so", "id"],
+        &["sudo", "-u", "root", "PATH=/tmp", "id"],
+    ] {
+        let p = parsed(argv);
+        assert_eq!(p.command, args(argv)[1..], "{argv:?}");
+        assert_ne!(p.command, cmd(&["id"]), "{argv:?}");
+    }
+    // A shell runs the command (with -s, whichever the caller's SHELL names).
+    assert_eq!(parsed(&["sudo", "-s", "id"]).command, cmd(&["(shell)", "id"]));
+    assert_eq!(parsed(&["sudo", "--shell", "id"]).command, cmd(&["(shell)", "id"]));
+    assert_eq!(parsed(&["sudo", "-u", "root", "-i", "id"]).command, cmd(&["(login shell)", "id"]));
+    // An argument that merely contains '=' after the command is fine.
+    assert_eq!(parsed(&["sudo", "env", "A=1"]).command, cmd(&["env", "A=1"]));
+    assert_eq!(parsed(&["sudo", "./a=b"]).command, cmd(&["./a=b"]));
     assert_eq!(parsed(&["sudo", "--frobnicate", "apt"]).command, cmd(&["--frobnicate", "apt"]));
     assert_eq!(parsed(&["sudo", "-u"]).command, cmd(&["-u"]));
     assert_eq!(parsed(&["sudo"]).command, Vec::<String>::new());

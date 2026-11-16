@@ -22,6 +22,7 @@ use axum::routing::{get, post};
 use axum::{Form, Json, Router};
 use axum_extra::extract::PrivateCookieJar;
 use axum_extra::extract::cookie::{Cookie, Key, SameSite};
+use countersign_core::text::escape;
 use countersign_core::{
     ActionIntent, Approver, Assurance, Authenticator, Request, RequestFilter, RequestId, RequestState, TransitionError,
     Verdict,
@@ -278,8 +279,8 @@ fn fmt_duration(d: Duration) -> String {
 fn row(r: &Request) -> Row {
     Row {
         id: r.id.to_string(),
-        requester: r.facts.requester.id.clone(),
-        target: r.facts.target.clone(),
+        requester: escape(&r.facts.requester.id),
+        target: r.facts.target.as_deref().map(escape),
         policy: r.requirements.policy.to_string(),
         state: r.state.name(),
         created: fmt_time(r.created_at),
@@ -287,18 +288,20 @@ fn row(r: &Request) -> Row {
     }
 }
 
+/// Everything the requester or backend supplied is passed through
+/// [`escape`], so hidden characters cannot make it look like something else.
 fn request_view(r: &Request) -> RequestView {
     let f = &r.facts;
     RequestView {
         id: r.id.to_string(),
         state: r.state.name(),
-        requester: f.requester.id.clone(),
-        display_name: f.requester.display_name.clone(),
-        groups: f.requester.groups.iter().cloned().collect::<Vec<_>>().join(", "),
-        target: f.target.clone(),
-        reason: f.reason.clone(),
-        subject: format!("{}/{}/{}", r.subject.backend, r.subject.kind, r.subject.id),
-        attributes: f.attributes.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+        requester: escape(&f.requester.id),
+        display_name: f.requester.display_name.as_deref().map(escape),
+        groups: escape(&f.requester.groups.iter().cloned().collect::<Vec<_>>().join(", ")),
+        target: f.target.as_deref().map(escape),
+        reason: f.reason.as_deref().map(escape),
+        subject: escape(&format!("{}/{}/{}", r.subject.backend, r.subject.kind, r.subject.id)),
+        attributes: f.attributes.iter().map(|(k, v)| (escape(k), escape(v))).collect(),
         policy: r.requirements.policy.to_string(),
         ttl: fmt_duration(r.requirements.ttl),
         window: r.requirements.grant == countersign_core::GrantMode::Window,
@@ -311,7 +314,7 @@ fn request_view(r: &Request) -> RequestView {
             _ => None,
         },
         failure: match &r.state {
-            RequestState::Failed { error } => Some(error.clone()),
+            RequestState::Failed { error } => Some(escape(error)),
             _ => None,
         },
         decisions: r
@@ -326,7 +329,7 @@ fn request_view(r: &Request) -> RequestView {
                 assurance: d.assurance.to_string(),
                 via: d.via.to_string(),
                 at: fmt_time(d.at),
-                comment: d.comment.clone(),
+                comment: d.comment.as_deref().map(escape),
             })
             .collect(),
         uses: r
@@ -334,8 +337,8 @@ fn request_view(r: &Request) -> RequestView {
             .iter()
             .map(|u| UseView {
                 at: fmt_time(u.at),
-                command: u.attributes.get("command").cloned().unwrap_or_else(|| u.subject.id.clone()),
-                cwd: u.attributes.get("cwd").cloned(),
+                command: escape(u.attributes.get("command").unwrap_or(&u.subject.id)),
+                cwd: u.attributes.get("cwd").map(|c| escape(c)),
             })
             .collect(),
     }

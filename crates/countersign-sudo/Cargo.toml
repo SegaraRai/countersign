@@ -21,6 +21,9 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "time", "macros", "signal"] }
 toml.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 axum.workspace = true
 countersign-store-sqlite.workspace = true

@@ -28,6 +28,10 @@ const DONE: u32 = 0x001f_8b4c;
 const BAD: u32 = 0x00e7_4c3c;
 const MUTED: u32 = 0x0095_a5a6;
 const MAX_DECISIONS: usize = 10;
+/// Longest command and reason shown in full. Together they stay within
+/// Discord's 4096-character embed description.
+const MAX_COMMAND: usize = 3200;
+const MAX_REASON: usize = 600;
 
 pub fn view(n: Notification<'_>, caps: ChannelCaps) -> View {
     View { embeds: vec![embed(n)], components: components(n, caps) }
@@ -109,7 +113,13 @@ fn components(n: Notification<'_>, caps: ChannelCaps) -> Vec<Component> {
     let r = n.request;
     let web = web_link(n.web_url);
     let mut buttons = Vec::new();
-    match ApproveMode::for_request(caps, r) {
+    let mode = match ApproveMode::for_request(caps, r) {
+        // Approving here needs everything the approver is approving to be
+        // on screen; otherwise send them to the web UI.
+        ApproveMode::Direct if !shown_in_full(&r.facts) => ApproveMode::WebLink,
+        mode => mode,
+    };
+    match mode {
         ApproveMode::Direct => {
             buttons.push(action_button(r, Verdict::Approve));
             buttons.push(action_button(r, Verdict::Deny));
@@ -184,11 +194,13 @@ pub(crate) fn code(s: &str) -> String {
         .chars()
         .map(|c| {
             if c == '`' {
-                'ˋ'
+                'ˋ'.to_string()
             } else if c.is_control() {
-                ' '
+                ' '.to_string()
+            } else if countersign_core::text::is_hidden(c) {
+                c.escape_default().to_string()
             } else {
-                c
+                c.to_string()
             }
         })
         .collect();
@@ -196,22 +208,43 @@ pub(crate) fn code(s: &str) -> String {
     if cleaned.is_empty() { "—".to_owned() } else { format!("`{cleaned}`") }
 }
 
-/// Untrusted multi-line text as a code block.
 /// The command (if the backend reports one) and the requester's reason.
 fn description(facts: &countersign_core::SubjectFacts) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(command) = facts.attributes.get("command") {
-        parts.push(format!("**Command**\n{}", code_block(command)));
+        parts.push(format!("**Command**\n{}", code_block(command, MAX_COMMAND)));
     }
     if let Some(reason) = &facts.reason {
-        parts.push(format!("**Reason**\n{}", code_block(reason)));
+        parts.push(format!("**Reason**\n{}", code_block(reason, MAX_REASON)));
     }
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
-pub(crate) fn code_block(s: &str) -> String {
-    let cleaned = s.replace('`', "ˋ");
-    format!("```\n{}\n```", truncate(cleaned.trim(), 1000))
+/// Whether [`description`] shows the command and reason without cutting them.
+fn shown_in_full(facts: &countersign_core::SubjectFacts) -> bool {
+    let fits = |s: &str, max: usize| block_text(s).chars().count() <= max;
+    facts.attributes.get("command").is_none_or(|c| fits(c, MAX_COMMAND))
+        && facts.reason.as_deref().is_none_or(|r| fits(r, MAX_REASON))
+}
+
+/// Untrusted multi-line text as it appears inside a code block: no way out of
+/// the block, and hidden characters written out (line breaks are kept).
+fn block_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.trim().chars() {
+        match c {
+            '`' => out.push('ˋ'),
+            '\n' => out.push(c),
+            c if countersign_core::text::is_hidden(c) => out.extend(c.escape_default()),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Untrusted multi-line text as a code block, cut after `max` characters.
+pub(crate) fn code_block(s: &str, max: usize) -> String {
+    format!("```\n{}\n```", truncate(&block_text(s), max))
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {

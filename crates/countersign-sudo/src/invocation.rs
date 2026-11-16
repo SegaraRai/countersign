@@ -152,23 +152,21 @@ pub struct Parsed {
     pub command: Vec<String>,
 }
 
+// Only options that do not change what runs, or how, are recognised.
+// Anything else makes the command the raw arguments, which command-specific
+// policies do not match. Deliberately left out:
+// - `-E`/`--preserve-env`: the caller's environment (LD_PRELOAD, PYTHONPATH,
+//   APT_CONFIG, ...) can make a harmless-looking command do anything;
+// - `-D`/`--chdir` and `-R`/`--chroot`: relative paths and the programs found
+//   resolve somewhere else than approvers assume;
+// - `-g`/`--group`: runs with another group, which `runas` would not show.
+
 /// Short options that take a value.
-const SHORT_WITH_VALUE: &[char] = &['C', 'D', 'g', 'h', 'p', 'R', 'r', 't', 'T', 'U', 'u'];
+const SHORT_WITH_VALUE: &[char] = &['C', 'h', 'p', 'r', 't', 'T', 'U', 'u'];
 /// Short options without a value.
-const SHORT_FLAGS: &[char] = &['A', 'b', 'B', 'E', 'e', 'H', 'i', 'K', 'k', 'l', 'N', 'n', 'P', 'S', 's', 'V', 'v'];
-const LONG_WITH_VALUE: &[&str] = &[
-    "user",
-    "group",
-    "chdir",
-    "prompt",
-    "close-from",
-    "host",
-    "role",
-    "type",
-    "command-timeout",
-    "other-user",
-    "chroot",
-];
+const SHORT_FLAGS: &[char] = &['A', 'b', 'B', 'e', 'H', 'i', 'K', 'k', 'l', 'N', 'n', 'P', 'S', 's', 'V', 'v'];
+const LONG_WITH_VALUE: &[&str] =
+    &["user", "prompt", "close-from", "host", "role", "type", "command-timeout", "other-user"];
 const LONG_FLAGS: &[&str] = &[
     "askpass",
     "background",
@@ -187,7 +185,6 @@ const LONG_FLAGS: &[&str] = &[
     "shell",
     "version",
     "validate",
-    "preserve-env",
 ];
 
 /// Parse `sudo`'s arguments (`args[0]` is the program).
@@ -282,8 +279,23 @@ fn describe(program: &str, modes: &[char], rest: &[String]) -> Option<Vec<String
     if program == "sudoedit" || modes.contains(&'e') {
         return Some(std::iter::once("sudoedit".to_owned()).chain(rest.iter().cloned()).collect());
     }
+    // `VAR=value` before the command sets the command's environment.
+    if rest.first().is_some_and(|a| a.split_once('=').is_some_and(|(name, _)| !name.is_empty() && !name.contains('/')))
+    {
+        return None;
+    }
+    // With -s or -i the command runs through a shell (with -s, the one named
+    // by the caller's SHELL), so it is labelled and cannot match a policy
+    // written for the bare command.
+    let shell = if modes.contains(&'i') {
+        Some("(login shell)")
+    } else if modes.contains(&'s') {
+        Some("(shell)")
+    } else {
+        None
+    };
     if !rest.is_empty() {
-        return Some(rest.to_vec());
+        return Some(shell.map(str::to_owned).into_iter().chain(rest.iter().cloned()).collect());
     }
     let label = if let Some(m) = modes.iter().find(|m| matches!(m, 'l' | 'v' | 'V' | 'h' | 'K' | 'k')) {
         match m {

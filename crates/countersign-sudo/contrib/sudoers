@@ -4,7 +4,10 @@
 # timestamp), so every sudo reaches PAM and countersign. Approval windows
 # are tracked by countersign, which can scope them to a command pattern.
 
-agent   ALL=(ALL:ALL) ALL
+# NOSETENV: a rule for ALL commands otherwise implies SETENV, which lets the
+# caller pass `VAR=value` (LD_PRELOAD, ...) and keep its environment with
+# -E, unchecked by sudo. Then any approved command could run anything.
+agent   ALL=(ALL:ALL) NOSETENV: ALL
 Defaults:agent timestamp_timeout=0
 # Let `sudo -n` (and sudo without a terminal, as agents usually run it) go
 # through PAM: the helper needs no input from the user.
