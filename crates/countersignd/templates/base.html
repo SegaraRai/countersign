@@ -7,10 +7,10 @@
 <title>{% block title %}countersign{% endblock %}</title>
 <style>
 :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fafafa; --muted: #6b6b70; --line: #d9d9de; --card: #fff;
-        --ok: #1a7f37; --bad: #b42318; --warn: #9a6700; --accent: #2457d6; }
+        --ok: #1a7f37; --done: #4f7d5c; --bad: #b42318; --warn: #9a6700; --accent: #2457d6; }
 @media (prefers-color-scheme: dark) {
   :root { --fg: #e8e8ea; --bg: #141416; --muted: #9b9ba3; --line: #2e2e33; --card: #1c1c1f;
-          --ok: #4ac26b; --bad: #f47067; --warn: #d4a72c; --accent: #6d9bff; }
+          --ok: #4ac26b; --done: #7fa98a; --bad: #f47067; --warn: #d4a72c; --accent: #6d9bff; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; font: 15px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
@@ -29,7 +29,8 @@ th { color: var(--muted); font-weight: 500; font-size: .85rem; }
 .state-pending { color: var(--warn); }
 .state-active, .state-approved { color: var(--ok); }
 .state-denied, .state-failed, .state-revoked { color: var(--bad); }
-.state-expired, .state-withdrawn, .state-ended { color: var(--muted); }
+.state-ended { color: var(--done); }
+.state-expired, .state-withdrawn { color: var(--muted); }
 .flash { padding: .6rem .8rem; border-radius: 6px; margin: 0 0 1rem; border: 1px solid; }
 .flash-error { color: var(--bad); }
 .flash-info { color: var(--accent); }
