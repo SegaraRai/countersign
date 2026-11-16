@@ -3,13 +3,21 @@
 # countersign's intake listener, reached over the tailnet.
 server = "http://100.64.0.10:8443"
 
-# This host's key (root:root 0600). Create it on this host:
-#   (umask 077; openssl rand -hex 32 > /etc/countersign/host.key)
-#   printf 'key_sha256 = "%s"\n' "$(tr -d '[:space:]' < /etc/countersign/host.key | sha256sum | cut -d' ' -f1)"
-# and put the printed key_sha256 line under this host in countersign's
-# configuration. The key itself never leaves this host. (Where the
-# countersign CLI is installed, `countersign keygen --format host <file>`
-# does both steps.)
+# This host's key (root:root 0600), in countersign's host key format
+# (cshk_...; see docs/design/sudo-approval.md). Create it on this host, so
+# the key never leaves it. Where the countersign CLI is installed:
+#   countersign host-key /etc/countersign/host.key
+# Otherwise, with openssl and coreutils (basenc):
+#   b64() { basenc --base64url | tr -d '=
+'; }
+#   body="cshk_$(openssl rand 32 | b64)"
+#   sum=$(printf %s "$body" | openssl dgst -sha256 -binary | head -c 4 | b64)
+#   (umask 077; printf '%s%s
+' "$body" "$sum" > /etc/countersign/host.key)
+#   printf 'key_sha256 = "%s"
+' "$(printf %s "$body$sum" | sha256sum | cut -d' ' -f1)"
+# Either way, put the printed key_sha256 line under this host in
+# countersign's configuration.
 key_file = "/etc/countersign/host.key"
 
 # Give up (and withdraw the request) after this long without a decision.

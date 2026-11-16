@@ -63,8 +63,8 @@ identity_providers = { pocket = "oidc:https://id.example.com" }
 #
 # [[backend.sudo.host]]
 # name = "web-1"
-# # `countersign keygen --format host /etc/countersign/host.key` on the host
-# # prints this line; the key file stays on the host.
+# # `countersign host-key /etc/countersign/host.key` on the host prints this
+# # line; the key file stays on the host.
 # key_sha256 = "<64 hex digits>"
 # allowed_ips = ["100.64.0.21"]   # optional
 

@@ -22,6 +22,10 @@ countersign-store-sqlite = { path = "crates/countersign-store-sqlite" }
 askama = "0.16"
 async-trait = "0.1"
 axum = "0.8"
+base64 = "0.22"
+getrandom = "0.2"
+sha2 = "0.10"
+subtle = "2.6"
 axum-extra = { version = "0.12", features = ["cookie-private", "cookie-key-expansion"] }
 clap = { version = "4", features = ["derive", "env"] }
 http-body-util = "0.1"

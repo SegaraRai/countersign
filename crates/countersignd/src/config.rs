@@ -293,7 +293,7 @@ impl Config {
             if let BackendConfig::Host(h) = b {
                 errors.extend(h.problems(name));
                 for host in &h.hosts {
-                    if !keys.insert(&host.key_sha256) {
+                    if !keys.insert(host.key_sha256.to_ascii_lowercase()) {
                         errors.push(format!("backend {name}: host {}: key_sha256 is used by another host", host.name));
                     }
                 }

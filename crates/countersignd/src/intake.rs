@@ -11,8 +11,7 @@
 //! DELETE /intake/v1/requests/{id}   withdraw while pending
 //! ```
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fmt::Write as _;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,13 +22,14 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
+use countersign_core::host_key;
 use countersign_core::{
     AccessBackend, BackendCaps, BackendError, BackendName, GrantHandle, GrantMode, PendingSubject, Request,
     RequestFilter, RequestId, RequestState, Requester, Store, SubjectFacts, SubjectRef, TransitionError,
 };
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq as _;
 
 use crate::engine::{Engine, EngineError, Submitted};
 
@@ -101,10 +101,8 @@ impl HostBackendConfig {
             if !names.insert(&h.name) {
                 errors.push(format!("backend {backend}: duplicate host {}", h.name));
             }
-            if h.key_sha256.len() != 64
-                || !h.key_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            {
-                errors.push(format!("backend {backend}: host {}: key_sha256 must be 64 lowercase hex digits", h.name));
+            if host_key::parse_digest_hex(&h.key_sha256).is_none() {
+                errors.push(format!("backend {backend}: host {}: key_sha256 must be 64 hex digits", h.name));
             }
         }
         errors
@@ -117,17 +115,6 @@ fn is_name(s: &str) -> bool {
         && s.len() <= 64
         && !s.starts_with(['-', '.'])
         && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
-}
-
-/// The SHA-256 of a host key as written in the configuration. Surrounding
-/// whitespace (e.g. a trailing newline in the key file) is ignored.
-pub fn key_sha256(key: &str) -> String {
-    let digest = Sha256::digest(key.trim().as_bytes());
-    let mut s = String::with_capacity(64);
-    for b in digest {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 /// A backend for subjects that hosts submit. It holds no state of its own:
@@ -201,7 +188,7 @@ struct HostIdentity {
 pub struct IntakeState {
     engine: Arc<Engine>,
     /// Key hash → host.
-    hosts: Arc<HashMap<String, HostIdentity>>,
+    hosts: Arc<Vec<([u8; 32], HostIdentity)>>,
     /// Backend → OS user → requester groups.
     users: Arc<BTreeMap<BackendName, BTreeMap<String, Vec<String>>>>,
     public_url: Arc<str>,
@@ -222,15 +209,17 @@ impl IntakeState {
         intake: &IntakeConfig,
         public_url: &str,
     ) -> Self {
-        let mut hosts = HashMap::new();
+        let mut hosts = Vec::new();
         let mut users = BTreeMap::new();
         for (name, c) in backends {
             users.insert(name.clone(), c.users.clone());
             for h in &c.hosts {
-                hosts.insert(
-                    h.key_sha256.clone(),
+                // Validated with the configuration.
+                let Some(digest) = host_key::parse_digest_hex(&h.key_sha256) else { continue };
+                hosts.push((
+                    digest,
                     HostIdentity { backend: name.clone(), host: h.name.clone(), allowed_ips: h.allowed_ips.clone() },
-                );
+                ));
             }
         }
         Self {
@@ -254,7 +243,12 @@ impl IntakeState {
             .map(str::trim)
             .filter(|k| !k.is_empty())
             .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "unauthorized", "missing host key"))?;
-        let Some(id) = self.hosts.get(&key_sha256(key)) else {
+        // A malformed key gets the same answer as a wrong one, and is never
+        // hashed. Every configured digest is compared in constant time.
+        let found = host_key::is_well_formed(key).then(|| host_key::digest(key)).and_then(|digest| {
+            self.hosts.iter().fold(None, |found, (d, id)| if bool::from(d.ct_eq(&digest)) { Some(id) } else { found })
+        });
+        let Some(id) = found else {
             tracing::warn!(peer = ?peer, "intake request with an unknown host key");
             return Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "unknown host key"));
         };

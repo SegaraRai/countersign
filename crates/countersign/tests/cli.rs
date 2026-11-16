@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use countersign::{CliError, Command, Context, KeyFormat, execute, keygen};
+use countersign::{CliError, Command, Context, KeyFormat, execute, host_key, keygen};
 use countersign_core::{
     AccessBackend, BackendCaps, BackendError, BackendName, GrantHandle, PendingSubject, RequestFilter, RequestState,
     Requester, Store, SubjectFacts, SubjectRef,
@@ -245,9 +245,14 @@ fn keygen_writes_usable_secrets_and_refuses_to_overwrite() {
 
     let host = dir.join("host.key");
     let _ = std::fs::remove_file(&host);
-    let line = keygen(&host, KeyFormat::Host, false).unwrap().unwrap();
+    let line = host_key(&host, false).unwrap();
     let key = std::fs::read_to_string(&host).unwrap();
-    assert_eq!(line, format!("key_sha256 = \"{}\"", countersignd::intake::key_sha256(&key)));
-    assert!(!line.contains(key.trim()), "the key itself is not printed");
+    let key = key.trim();
+    assert!(countersign_core::host_key::is_well_formed(key), "{key}");
+    assert_eq!(line, format!("key_sha256 = \"{}\"", countersign_core::host_key::digest_hex(key)));
+    assert!(!line.contains(key), "the key itself is not printed");
+    assert!(matches!(host_key(&host, false), Err(CliError::Usage(_))));
+    host_key(&host, true).unwrap();
+    assert_ne!(std::fs::read_to_string(&host).unwrap().trim(), key, "a fresh key");
     let _ = std::fs::remove_dir_all(dir);
 }

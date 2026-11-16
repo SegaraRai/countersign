@@ -8,18 +8,22 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request as HttpRequest, StatusCode, header};
+use countersign_core::host_key::digest_hex;
 use countersign_core::{ActionIntent, Assurance, RequestState, Store, Verdict};
 use countersign_store_sqlite::SqliteStore;
 use countersignd::config::Config;
-use countersignd::intake::key_sha256;
 use countersignd::{Daemon, build_backends};
 use http_body_util::BodyExt;
 use jiff::Timestamp;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-const WEB1: &str = "key-for-web-1";
-const WEB2: &str = "key-for-web-2";
+const WEB1: &str = "cshk_AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEDVuYWg";
+const WEB2: &str = "cshk_AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIOJxDvA";
+/// Well-formed, but configured for no host.
+const UNKNOWN: &str = "cshk_AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMwVYYBQ";
+/// Configured for a host, but not in the host key format.
+const LEGACY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn config() -> Config {
     let text = format!(
@@ -44,6 +48,10 @@ fn config() -> Config {
         key_sha256 = "{}"
         allowed_ips = ["100.64.0.22"]
 
+        [[backend.sudo.host]]
+        name = "legacy"
+        key_sha256 = "{}"
+
         [[approver]]
         id = "bob"
         groups = ["ops"]
@@ -63,8 +71,9 @@ fn config() -> Config {
         approvers = ["group:ops"]
         min_assurance = "linked"
         "#,
-        key_sha256(WEB1),
-        key_sha256(&format!("{WEB2}\n")),
+        digest_hex(WEB1),
+        digest_hex(WEB2).to_uppercase(),
+        digest_hex(LEGACY),
     );
     Config::from_toml(&text).unwrap()
 }
@@ -159,6 +168,13 @@ async fn hosts_must_present_a_known_key_from_an_allowed_address() {
     };
     assert_eq!(s.call(post(None, None)).await.0, StatusCode::UNAUTHORIZED);
     assert_eq!(s.call(post(Some("wrong"), None)).await.0, StatusCode::UNAUTHORIZED);
+    let (status, unknown) = s.call(post(Some(UNKNOWN), None)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // A key in another format is refused even though its hash is configured,
+    // with the same answer as an unknown key.
+    assert_eq!(s.call(post(Some(LEGACY), None)).await, (StatusCode::UNAUTHORIZED, unknown));
+    let typo = format!("{WEB1}x");
+    assert_eq!(s.call(post(Some(&typo), None)).await.0, StatusCode::UNAUTHORIZED);
     assert_eq!(s.call(post(Some(WEB2), None)).await.0, StatusCode::UNAUTHORIZED, "no peer address known");
     assert_eq!(s.call(post(Some(WEB2), Some("100.64.0.99"))).await.0, StatusCode::UNAUTHORIZED);
     let (status, v) = s.call(post(Some(WEB2), Some("100.64.0.22"))).await;
@@ -322,7 +338,7 @@ fn configuration_mistakes_are_reported() {
         key_sha256 = "abc"
     "#;
     let e = Config::from_toml(bad).unwrap_err().to_string();
-    assert!(e.contains("64 lowercase hex"), "{e}");
+    assert!(e.contains("64 hex digits"), "{e}");
     assert!(e.contains("duplicate host a"), "{e}");
     assert!(e.contains("used by another host"), "{e}");
     assert!(e.contains("need an [intake] section"), "{e}");

@@ -12,6 +12,7 @@ name = "countersign-sudo"
 path = "src/main.rs"
 
 [dependencies]
+countersign-core.workspace = true
 humantime-serde.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -22,7 +23,6 @@ toml.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
-countersign-core.workspace = true
 countersign-store-sqlite.workspace = true
 countersignd = { path = "../countersignd" }
 jiff.workspace = true

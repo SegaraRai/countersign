@@ -19,6 +19,7 @@ pub mod backend;
 pub mod channel;
 pub mod event;
 mod glob;
+pub mod host_key;
 pub mod id;
 pub mod policy;
 pub mod principal;

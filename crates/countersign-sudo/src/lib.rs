@@ -100,8 +100,11 @@ pub fn read_key(path: &Path) -> Result<String, Error> {
         }
     }
     let key = std::fs::read_to_string(path).map_err(err)?.trim().to_owned();
-    if key.is_empty() {
-        return Err(Error::Config(format!("{} is empty", path.display())));
+    if !countersign_core::host_key::is_well_formed(&key) {
+        return Err(Error::Config(format!(
+            "{} does not hold a countersign host key (create one with `countersign host-key`)",
+            path.display()
+        )));
     }
     Ok(key)
 }

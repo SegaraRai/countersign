@@ -64,13 +64,19 @@ pub enum Command {
     /// Remove a chat account link.
     Unlink { channel: String, external_id: String },
     /// Write a new random secret to a file (mode 0600), e.g. for
-    /// `server.session_key_file`, a webhook `secret_file`, or a host key
-    /// (`--format host` also prints the `key_sha256` line for the
-    /// configuration).
+    /// `server.session_key_file` or a webhook `secret_file`.
     Keygen {
         path: PathBuf,
         #[arg(long, value_enum, default_value_t = KeyFormat::Hex)]
         format: KeyFormat,
+        /// Overwrite an existing file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Write a new host key for the intake API to a file (mode 0600) and
+    /// print the `key_sha256` line for countersign's configuration.
+    HostKey {
+        path: PathBuf,
         /// Overwrite an existing file.
         #[arg(long)]
         force: bool,
@@ -83,8 +89,6 @@ pub enum KeyFormat {
     Hex,
     /// `whsec_<base64>` (Standard Webhooks, 256 bits).
     Whsec,
-    /// A host key for the intake API (64 hex characters).
-    Host,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -176,11 +180,8 @@ pub async fn execute(cmd: Command, ctx: Context, out: &mut dyn Write) -> Result<
             }
             writeln!(out, "unlinked {external_id} on {channel}")?;
         }
-        Command::Keygen { path, format, force } => {
-            if let Some(line) = keygen(&path, format, force)? {
-                writeln!(out, "{line}")?;
-            }
-        }
+        Command::Keygen { path, format, force } => keygen(&path, format, force)?,
+        Command::HostKey { path, force } => writeln!(out, "{}", host_key(&path, force)?)?,
     }
     Ok(())
 }
@@ -305,25 +306,35 @@ pub fn details(r: &Request) -> String {
     s
 }
 
-fn random_bytes() -> [u8; 32] {
+/// 32 bytes from the operating system's CSPRNG.
+fn random_bytes() -> Result<[u8; 32], CliError> {
     let mut out = [0u8; 32];
-    out[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-    out[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-    // A v4 UUID fixes 6 bits; 2 x 122 random bits is plenty for a key.
-    out
+    getrandom::getrandom(&mut out).map_err(|e| CliError::Usage(format!("no random numbers from the OS: {e}")))?;
+    Ok(out)
 }
 
-/// Write a new secret, readable only by the owner. For a host key, returns
-/// the configuration line holding its hash.
-pub fn keygen(path: &Path, format: KeyFormat, force: bool) -> Result<Option<String>, CliError> {
-    let bytes = random_bytes();
+/// Write a new secret, readable only by the owner.
+pub fn keygen(path: &Path, format: KeyFormat, force: bool) -> Result<(), CliError> {
+    let bytes = random_bytes()?;
     let text = match format {
-        KeyFormat::Hex | KeyFormat::Host => bytes.iter().fold(String::new(), |mut s, b| {
+        KeyFormat::Hex => bytes.iter().fold(String::new(), |mut s, b| {
             let _ = write!(s, "{b:02x}");
             s
         }),
         KeyFormat::Whsec => format!("whsec_{}", base64::engine::general_purpose::STANDARD.encode(bytes)),
     };
+    write_secret(path, &text, force)
+}
+
+/// Write a new host key, readable only by the owner. Returns the
+/// configuration line holding its hash.
+pub fn host_key(path: &Path, force: bool) -> Result<String, CliError> {
+    let key = countersign_core::host_key::from_random(&random_bytes()?);
+    write_secret(path, &key, force)?;
+    Ok(format!("key_sha256 = \"{}\"", countersign_core::host_key::digest_hex(&key)))
+}
+
+fn write_secret(path: &Path, text: &str, force: bool) -> Result<(), CliError> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true);
     if force {
@@ -349,5 +360,5 @@ pub fn keygen(path: &Path, format: KeyFormat, force: bool) -> Result<Option<Stri
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
     writeln!(file, "{text}")?;
-    Ok((format == KeyFormat::Host).then(|| format!("key_sha256 = \"{}\"", countersignd::intake::key_sha256(&text))))
+    Ok(())
 }

@@ -134,7 +134,7 @@ countersign never stores the key itself:
 ```toml
 [[host]]
 name = "web-1"
-key_sha256 = "…"              # printed by `countersign keygen --format host <file>`
+key_sha256 = "…"              # printed by `countersign host-key <file>`
 allowed_ips = ["100.64.0.21"] # optional extra check on the peer address
 ```
 
@@ -152,8 +152,9 @@ cshk_<43 chars: base64url of 32 random bytes><6 chars: base64url checksum>
 - `countersign host-key` generates the key (from the OS CSPRNG) and prints
   the `key_sha256` line for the config; the key itself goes straight to a
   0600 file for the target host.
-- The checksum is the first 4 bytes of SHA-256 over the prefix and random
-  part. It catches typos and hand-made keys; it is not a secret.
+- The checksum is the base64url of the first 4 bytes of SHA-256 over the
+  text before it (`cshk_` and the random part). It catches typos and
+  hand-made keys; it is not a secret.
 - The server checks prefix, length, alphabet and checksum before hashing,
   and rejects anything else with the same response as a wrong key. Config
   loading rejects `key_sha256` values that are not 64 hex digits.

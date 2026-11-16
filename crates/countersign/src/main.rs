@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
-use countersign::{CliError, Command, Context, execute, keygen};
+use countersign::{CliError, Command, Context, execute, host_key, keygen};
 use countersign_core::Store;
 use countersign_store_sqlite::SqliteStore;
 use countersignd::config::Config;
@@ -31,11 +31,14 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
-    if let Command::Keygen { path, format, force } = &cli.command {
-        if let Some(line) = keygen(path, *format, *force)? {
-            println!("{line}");
+    // These need no configuration or database.
+    match &cli.command {
+        Command::Keygen { path, format, force } => return keygen(path, *format, *force),
+        Command::HostKey { path, force } => {
+            println!("{}", host_key(path, *force)?);
+            return Ok(());
         }
-        return Ok(());
+        _ => {}
     }
     let config = Config::load(&cli.config).map_err(|e| CliError::Usage(e.to_string()))?;
     let path = &config.store.path;

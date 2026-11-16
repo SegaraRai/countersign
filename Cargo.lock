@@ -538,11 +538,11 @@ dependencies = [
  "countersign-core",
  "countersign-store-sqlite",
  "countersignd",
+ "getrandom 0.2.17",
  "jiff",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -644,10 +644,12 @@ name = "countersign-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "humantime-serde",
  "jiff",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.21",
  "toml",
  "uuid",
@@ -705,7 +707,7 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "subtle",
  "thiserror 2.0.21",
  "tokio",
  "toml",

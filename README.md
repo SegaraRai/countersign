@@ -83,6 +83,7 @@ countersign links                     # chat accounts linked to approvers
 countersign unlink discord 123456789012345678
 countersign keygen /etc/countersign/session.key            # 256-bit hex
 countersign keygen /etc/countersign/webhook-secret --format whsec
+countersign host-key /etc/countersign/host.key             # on a target host; prints key_sha256
 ```
 
 Approving is intentionally not possible from the CLI; it goes through the web

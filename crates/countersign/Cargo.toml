@@ -17,11 +17,11 @@ clap.workspace = true
 countersign-core.workspace = true
 countersign-store-sqlite.workspace = true
 countersignd = { path = "../countersignd" }
+getrandom.workspace = true
 jiff.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 async-trait.workspace = true

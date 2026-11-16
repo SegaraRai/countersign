@@ -172,17 +172,21 @@ fn refuses_a_key_file_others_can_read() {
     let dir = std::env::temp_dir().join(format!("cs-sudo-key-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("host.key");
-    std::fs::write(&path, "secret\n").unwrap();
+    std::fs::write(&path, "cshk_AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEDVuYWg\n").unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     assert!(countersign_sudo::read_key(&path).is_err());
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert_eq!(countersign_sudo::read_key(&path).unwrap(), "secret");
+    assert_eq!(countersign_sudo::read_key(&path).unwrap(), "cshk_AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEDVuYWg");
+    // Anything but a host key is refused before it is sent anywhere.
+    std::fs::write(&path, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n").unwrap();
+    let e = countersign_sudo::read_key(&path).unwrap_err().to_string();
+    assert!(e.contains("countersign host-key"), "{e}");
     let _ = std::fs::remove_dir_all(dir);
 }
 
 // ---------------------------------------------------------------- end to end
 
-const KEY: &str = "host-key-for-web-1";
+const KEY: &str = "cshk_AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEDVuYWg";
 
 struct Server {
     url: String,
@@ -220,7 +224,7 @@ async fn server() -> Server {
         approvers = ["group:ops"]
         min_assurance = "linked"
         "#,
-        countersignd::intake::key_sha256(KEY)
+        countersign_core::host_key::digest_hex(KEY)
     );
     let config = DaemonConfig::from_toml(&text).unwrap();
     let store: Arc<dyn Store> = Arc::new(SqliteStore::in_memory().await.unwrap());
@@ -318,7 +322,9 @@ async fn denial_timeout_and_bad_keys_fail_closed() {
     assert_eq!(outcome, Outcome::Refused("no decision in time; request withdrawn".into()));
     assert!(s.states().await.contains(&RequestState::Withdrawn));
 
-    let Outcome::Refused(why) = ask(&s, "wrong-key", &["reboot"], Duration::from_secs(5)).await.0 else {
+    let Outcome::Refused(why) =
+        ask(&s, "cshk_BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQX7m8Nw", &["reboot"], Duration::from_secs(5)).await.0
+    else {
         panic!("a wrong key must not be approved")
     };
     assert!(why.contains("unknown host key"), "{why}");
