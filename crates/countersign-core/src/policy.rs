@@ -4,16 +4,14 @@
 //! matches no policy cannot be approved at all (deny by default).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
-use std::str::FromStr;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::actor::Selector;
 use crate::assurance::Assurance;
 use crate::glob;
-use crate::id::{ApproverId, BackendName, PolicyName};
-use crate::principal::Approver;
+use crate::id::{BackendName, PolicyName};
 use crate::subject::PendingSubject;
 
 const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -32,9 +30,15 @@ pub struct Policy {
     pub name: PolicyName,
     #[serde(default, rename = "match")]
     pub matcher: Matcher,
-    /// Who may decide. At least one entry is required.
-    pub approvers: Vec<ApproverSelector>,
-    /// Number of distinct approvals required. A single denial always wins.
+    /// Who may decide (`person:<id>`, `group:<name>`). At least one entry.
+    pub approvers: Vec<Selector>,
+    /// Who may not decide although selected. Defaults to the requester.
+    #[serde(default = "default_exclude")]
+    pub exclude: BTreeSet<Exclusion>,
+    /// Refuse requests whose source does not name the person who caused them.
+    #[serde(default)]
+    pub require_initiator: bool,
+    /// Number of distinct persons who must approve. A single denial always wins.
     #[serde(default = "one")]
     pub quorum: u8,
     /// Upper bound on the grant duration.
@@ -49,13 +53,29 @@ pub struct Policy {
     /// How long a request may stay undecided.
     #[serde(default = "default_pending_timeout", with = "humantime_serde")]
     pub pending_timeout: Duration,
-    /// Let the requester approve their own request. Off by default.
-    #[serde(default)]
-    pub allow_self_approval: bool,
     /// What an approval covers. Only meaningful for backends whose subjects
     /// are submitted to countersign (such as `sudo` invocations).
     #[serde(default)]
     pub grant: GrantMode,
+    /// Whether requests may be kept out of chat channels.
+    #[serde(default)]
+    pub sensitive: SensitiveMode,
+}
+
+/// Relations to the request that disqualify a decider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Exclusion {
+    /// The requester themself (or a person sharing an identity with it).
+    Requester,
+    /// The owners of the requesting workload.
+    Owners,
+    /// The person who caused the request.
+    Initiator,
+}
+
+fn default_exclude() -> BTreeSet<Exclusion> {
+    BTreeSet::from([Exclusion::Requester])
 }
 
 /// What an approval covers.
@@ -79,6 +99,29 @@ impl GrantMode {
     }
 }
 
+/// Whether a request's details are shown in chat channels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SensitiveMode {
+    /// Follow the requester's flag.
+    #[default]
+    Honor,
+    /// Always show the details in chat.
+    Ignore,
+    /// Never show this policy's details in chat.
+    Always,
+}
+
+impl SensitiveMode {
+    pub fn resolve(self, requested: bool) -> bool {
+        match self {
+            Self::Honor => requested,
+            Self::Ignore => false,
+            Self::Always => true,
+        }
+    }
+}
+
 fn one() -> u8 {
     1
 }
@@ -94,16 +137,25 @@ fn default_pending_timeout() -> Duration {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Matcher {
+    /// The client or backend that delivered the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<BackendName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// Glob on [`crate::Requester::id`].
+    /// Glob on the requester's actor id; an unresolved requester never matches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester: Option<String>,
-    /// The requester must be in this group (exact match).
+    /// Glob on the requester's identity (`unix:web-1#agent`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester_identity: Option<String>,
+    /// The requester must be in this countersign group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requester_group: Option<String>,
+    /// The source must report the requester in this group (exact match).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_group: Option<String>,
     /// Glob on [`crate::SubjectFacts::target`]; an absent target never matches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
@@ -113,71 +165,27 @@ pub struct Matcher {
 }
 
 impl Matcher {
-    pub fn matches(&self, p: &PendingSubject) -> bool {
+    /// `requester_groups` are the countersign groups of the resolved requester.
+    pub fn matches(&self, p: &PendingSubject, requester_groups: &BTreeSet<String>) -> bool {
         let facts = &p.facts;
-        self.backend.as_ref().is_none_or(|b| *b == p.subject.backend)
+        let requester = &facts.requester;
+        self.source.as_deref().is_none_or(|s| facts.source.as_ref().is_some_and(|src| glob::matches(s, src.name())))
+            && self.backend.as_ref().is_none_or(|b| *b == p.subject.backend)
             && self.kind.as_deref().is_none_or(|k| glob::matches(k, &p.subject.kind))
-            && self.requester.as_deref().is_none_or(|r| glob::matches(r, &facts.requester.id))
-            && self.requester_group.as_ref().is_none_or(|g| facts.requester.groups.contains(g))
+            && self
+                .requester
+                .as_deref()
+                .is_none_or(|r| requester.actor.as_ref().is_some_and(|a| glob::matches(r, a.as_str())))
+            && self.requester_identity.as_deref().is_none_or(|r| glob::matches(r, &requester.identity))
+            && self.requester_group.as_ref().is_none_or(|g| requester_groups.contains(g))
+            && self.backend_group.as_ref().is_none_or(|g| requester.groups.contains(g))
             && self.target.as_deref().is_none_or(|t| facts.target.as_deref().is_some_and(|v| glob::matches(t, v)))
             && self.attributes.iter().all(|(k, pat)| facts.attributes.get(k).is_some_and(|v| glob::matches(pat, v)))
     }
 }
 
-/// `approver:<id>` or `group:<name>`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub enum ApproverSelector {
-    Approver(ApproverId),
-    Group(String),
-}
-
-impl ApproverSelector {
-    pub fn selects(&self, approver: &Approver) -> bool {
-        match self {
-            Self::Approver(id) => *id == approver.id,
-            Self::Group(g) => approver.groups.contains(g),
-        }
-    }
-}
-
-impl FromStr for ApproverSelector {
-    type Err = PolicyError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.split_once(':') {
-            Some(("approver", id)) if !id.is_empty() => Ok(Self::Approver(ApproverId::new(id))),
-            Some(("group", g)) if !g.is_empty() => Ok(Self::Group(g.to_owned())),
-            _ => Err(PolicyError::BadSelector(s.to_owned())),
-        }
-    }
-}
-
-impl TryFrom<String> for ApproverSelector {
-    type Error = PolicyError;
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        s.parse()
-    }
-}
-
-impl From<ApproverSelector> for String {
-    fn from(s: ApproverSelector) -> Self {
-        s.to_string()
-    }
-}
-
-impl fmt::Display for ApproverSelector {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Approver(id) => write!(f, "approver:{id}"),
-            Self::Group(g) => write!(f, "group:{g}"),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PolicyError {
-    #[error("invalid approver selector {0:?} (expected \"approver:<id>\" or \"group:<name>\")")]
-    BadSelector(String),
     #[error("policy {0}: duplicate name")]
     DuplicateName(PolicyName),
     #[error("policy {0}: no approvers")]
@@ -192,27 +200,24 @@ pub enum PolicyError {
     DefaultExceedsMax(PolicyName),
 }
 
-/// Requirements resolved for one request, snapshotted when it is opened so
-/// later policy edits do not change decisions already in flight.
+/// Requirements resolved for one request, frozen when it is opened so later
+/// policy edits cannot make it easier to approve.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Requirements {
     pub policy: PolicyName,
-    pub approvers: Vec<ApproverSelector>,
+    pub approvers: Vec<Selector>,
+    #[serde(default = "default_exclude")]
+    pub exclude: BTreeSet<Exclusion>,
     pub quorum: u8,
     pub min_assurance: Assurance,
     #[serde(with = "humantime_serde")]
     pub ttl: Duration,
     #[serde(with = "humantime_serde")]
     pub pending_timeout: Duration,
-    pub allow_self_approval: bool,
     #[serde(default)]
     pub grant: GrantMode,
-}
-
-impl Requirements {
-    pub fn is_eligible(&self, approver: &Approver) -> bool {
-        self.approvers.iter().any(|s| s.selects(approver))
-    }
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_initiator: bool,
 }
 
 impl Policy {
@@ -228,12 +233,13 @@ impl Policy {
         Requirements {
             policy: self.name.clone(),
             approvers: self.approvers.clone(),
+            exclude: self.exclude.clone(),
             quorum: self.quorum,
             min_assurance: self.min_assurance,
             ttl: self.resolve_ttl(p.facts.requested_ttl),
             pending_timeout: self.pending_timeout,
-            allow_self_approval: self.allow_self_approval,
             grant: self.grant,
+            require_initiator: self.require_initiator,
         }
     }
 
@@ -245,10 +251,10 @@ impl Policy {
         if self.quorum == 0 {
             return Err(PolicyError::ZeroQuorum(name()));
         }
-        // Each `approver:` entry contributes at most one approval; a group may
-        // contribute many, so only an all-individuals list can be checked.
-        let only_individuals = self.approvers.iter().all(|s| matches!(s, ApproverSelector::Approver(_)));
-        if only_individuals {
+        // Each `person:` entry contributes at most one approval; a group may
+        // contribute many, so only an all-persons list can be checked.
+        let only_persons = self.approvers.iter().all(|s| matches!(s, Selector::Person(_)));
+        if only_persons {
             let distinct: BTreeSet<_> = self.approvers.iter().collect();
             if usize::from(self.quorum) > distinct.len() {
                 return Err(PolicyError::UnreachableQuorum(name()));
@@ -281,34 +287,29 @@ impl PolicySet {
     }
 
     /// The first policy matching `p`, if any.
-    pub fn find(&self, p: &PendingSubject) -> Option<&Policy> {
-        self.policies.iter().find(|pol| pol.matcher.matches(p))
-    }
-
-    /// Requirements for `p`, or `None` if no policy matches (deny by default).
-    pub fn evaluate(&self, p: &PendingSubject) -> Option<Requirements> {
-        self.find(p).map(|pol| pol.requirements_for(p))
+    pub fn find(&self, p: &PendingSubject, requester_groups: &BTreeSet<String>) -> Option<&Policy> {
+        self.policies.iter().find(|pol| pol.matcher.matches(p, requester_groups))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::principal::Requester;
-    use crate::subject::{SubjectFacts, SubjectRef};
+    use crate::subject::{Requester, Source, SubjectFacts, SubjectRef};
 
     const EXAMPLE: &str = r#"
         [[policy]]
         name = "elevated-agents"
-        match = { backend = "oct", requester_group = "agents-elevated" }
+        match = { backend = "oct", backend_group = "agents-elevated" }
         approvers = ["group:approvers"]
         max_ttl = "30m"
         default_ttl = "10m"
 
         [[policy]]
         name = "staging"
-        match = { backend = "exec-sudo", target = "staging-*" }
-        approvers = ["approver:alice", "approver:bob"]
+        match = { source = "web-*", requester = "agent-*", target = "staging-*" }
+        approvers = ["person:alice", "person:bob"]
+        exclude = ["requester", "owners"]
         quorum = 2
         max_ttl = "2h"
         min_assurance = "linked"
@@ -319,22 +320,25 @@ mod tests {
     }
 
     fn pending(backend: &str, groups: &[&str], target: Option<&str>, ttl: Option<Duration>) -> PendingSubject {
+        let mut facts = SubjectFacts::new(Requester {
+            id: "agent".into(),
+            groups: groups.iter().map(|g| (*g).to_owned()).collect(),
+            identity: "unix:web-1#agent".into(),
+            actor: Some("agent-ops".into()),
+            ..Requester::default()
+        });
+        facts.source = Some(Source::Client("web-1".into()));
+        facts.target = target.map(str::to_owned);
+        facts.requested_ttl = ttl;
         PendingSubject {
             subject: SubjectRef { backend: backend.into(), kind: "session".into(), id: "s1".into() },
-            facts: SubjectFacts {
-                requester: Requester {
-                    id: "agent-1".into(),
-                    display_name: None,
-                    groups: groups.iter().map(|g| (*g).to_owned()).collect(),
-                    identities: BTreeSet::new(),
-                },
-                target: target.map(str::to_owned),
-                requested_ttl: ttl,
-                reason: None,
-                attributes: BTreeMap::new(),
-            },
+            facts,
             observed_at: jiff::Timestamp::UNIX_EPOCH,
         }
+    }
+
+    fn eval(s: &PolicySet, p: &PendingSubject) -> Option<Requirements> {
+        s.find(p, &BTreeSet::new()).map(|pol| pol.requirements_for(p))
     }
 
     #[test]
@@ -343,25 +347,41 @@ mod tests {
         assert_eq!(s.policies.len(), 2);
         assert_eq!(s.policies[0].min_assurance, Assurance::FreshAuth, "secure default");
         assert_eq!(s.policies[0].quorum, 1);
+        assert_eq!(s.policies[0].exclude, BTreeSet::from([Exclusion::Requester]), "self-approval is off by default");
         assert_eq!(s.policies[0].pending_timeout, DEFAULT_PENDING_TIMEOUT);
-        assert_eq!(s.policies[1].approvers[0], ApproverSelector::Approver("alice".into()));
+        assert_eq!(s.policies[1].approvers[0], Selector::Person("alice".into()));
         s.validate().unwrap();
     }
 
     #[test]
     fn first_match_wins_and_unmatched_is_none() {
         let s = set();
-        let r = s.evaluate(&pending("oct", &["agents-elevated"], None, None)).unwrap();
+        let r = eval(&s, &pending("oct", &["agents-elevated"], None, None)).unwrap();
         assert_eq!(r.policy.as_str(), "elevated-agents");
         assert_eq!(r.ttl, Duration::from_secs(600));
 
-        let r = s.evaluate(&pending("exec-sudo", &[], Some("staging-web"), None)).unwrap();
+        let r = eval(&s, &pending("host", &[], Some("staging-web"), None)).unwrap();
         assert_eq!(r.policy.as_str(), "staging");
         assert_eq!(r.quorum, 2);
 
-        assert!(s.evaluate(&pending("oct", &["agents"], None, None)).is_none());
-        assert!(s.evaluate(&pending("exec-sudo", &[], Some("prod-web"), None)).is_none());
-        assert!(s.evaluate(&pending("exec-sudo", &[], None, None)).is_none(), "absent target never matches");
+        assert!(eval(&s, &pending("oct", &["agents"], None, None)).is_none());
+        assert!(eval(&s, &pending("host", &[], Some("prod-web"), None)).is_none());
+        assert!(eval(&s, &pending("host", &[], None, None)).is_none(), "absent target never matches");
+
+        let mut unresolved = pending("host", &[], Some("staging-web"), None);
+        unresolved.facts.requester.actor = None;
+        assert!(eval(&s, &unresolved).is_none(), "requester globs need a resolved requester");
+    }
+
+    #[test]
+    fn requester_groups_come_from_countersign() {
+        let s: PolicySet = toml::from_str(
+            "[[policy]]\nname='p'\nmatch={requester_group='agents'}\napprovers=['group:g']\nmax_ttl='1m'\n",
+        )
+        .unwrap();
+        let p = pending("host", &["agents"], None, None);
+        assert!(s.find(&p, &BTreeSet::new()).is_none(), "source-reported groups are not countersign groups");
+        assert!(s.find(&p, &BTreeSet::from(["agents".to_owned()])).is_some());
     }
 
     #[test]
@@ -384,7 +404,7 @@ mod tests {
 
             [[policy]]
             name = "a"
-            approvers = ["approver:x"]
+            approvers = ["person:x"]
             quorum = 2
             max_ttl = "1m"
             default_ttl = "5m"
@@ -399,9 +419,23 @@ mod tests {
     fn rejects_bad_selector_and_unknown_fields() {
         let e = toml::from_str::<PolicySet>("[[policy]]\nname='x'\napprovers=['alice']\nmax_ttl='1m'\n");
         assert!(e.is_err());
+        let e = toml::from_str::<PolicySet>("[[policy]]\nname='x'\napprovers=['approver:a']\nmax_ttl='1m'\n");
+        assert!(e.is_err(), "the old selector form is gone");
         let e = toml::from_str::<PolicySet>(
             "[[policy]]\nname='x'\napprovers=['group:g']\nmax_ttl='1m'\nmin_assurence='web'\n",
         );
         assert!(e.is_err(), "typos must not silently fall back to defaults");
+        let e = toml::from_str::<PolicySet>(
+            "[[policy]]\nname='x'\napprovers=['group:g']\nmax_ttl='1m'\nallow_self_approval=true\n",
+        );
+        assert!(e.is_err(), "self-approval is configured through exclude now");
+    }
+
+    #[test]
+    fn sensitive_modes() {
+        assert!(SensitiveMode::Honor.resolve(true));
+        assert!(!SensitiveMode::Honor.resolve(false));
+        assert!(!SensitiveMode::Ignore.resolve(true));
+        assert!(SensitiveMode::Always.resolve(false));
     }
 }

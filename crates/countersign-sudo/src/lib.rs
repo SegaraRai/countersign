@@ -45,8 +45,13 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Base URL of countersign's intake listener, e.g. `http://100.64.0.10:8443`.
+    /// Base URL of countersign's intake API, e.g. `https://countersign.example.com:8443`.
+    /// Must be HTTPS (plain HTTP only to this machine).
     pub server: String,
+    /// Extra PEM certificates to trust for `server`, e.g. a private CA or a
+    /// self-signed certificate. The system's usual roots stay trusted.
+    #[serde(default)]
+    pub ca_file: Option<PathBuf>,
     /// File holding this host's key. Must not be readable by group or others.
     #[serde(default = "default_key_file")]
     pub key_file: PathBuf,
@@ -73,8 +78,11 @@ fn default_sudo_binaries() -> Vec<PathBuf> {
 impl Config {
     pub fn parse(text: &str) -> Result<Self, Error> {
         let c: Self = toml::from_str(text).map_err(|e| Error::Config(e.to_string()))?;
-        if !(c.server.starts_with("http://") || c.server.starts_with("https://")) {
-            return Err(Error::Config(format!("server must be an http(s) URL, got {:?}", c.server)));
+        if !countersign_core::url::is_secure(&c.server) {
+            return Err(Error::Config(format!(
+                "server must be an https:// URL (http:// only to this machine), got {:?}",
+                c.server
+            )));
         }
         if c.timeout.is_zero() {
             return Err(Error::Config("timeout must be greater than zero".into()));
@@ -144,8 +152,24 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(server: &str, key: String) -> Result<Self, Error> {
-        let http = reqwest::Client::builder()
+    /// `ca_file`: extra PEM certificates to trust (see [`Config::ca_file`]).
+    pub fn new(server: &str, key: String, ca_file: Option<&Path>) -> Result<Self, Error> {
+        let mut http = reqwest::Client::builder();
+        if let Some(path) = ca_file {
+            let err = |e: &dyn std::fmt::Display| Error::Config(format!("{}: {e}", path.display()));
+            let pem = std::fs::read(path).map_err(|e| err(&e))?;
+            let certs = reqwest::Certificate::from_pem_bundle(&pem).map_err(|e| err(&e))?;
+            if certs.is_empty() {
+                return Err(Error::Config(format!("{}: no certificate found", path.display())));
+            }
+            for c in certs {
+                http = http.add_root_certificate(c);
+            }
+        }
+        let http = http
+            .https_only(!countersign_core::url::is_local_http(server))
+            // The bearer key goes to `server` and nowhere else.
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(POLL + Duration::from_secs(15))
             .user_agent(concat!("countersign-sudo/", env!("CARGO_PKG_VERSION")))

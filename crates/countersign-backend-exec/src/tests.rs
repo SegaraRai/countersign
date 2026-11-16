@@ -230,3 +230,19 @@ fn find_python() -> Option<std::path::PathBuf> {
     }
     None
 }
+
+#[tokio::test]
+async fn facts_carry_an_initiator_and_refuse_unknown_keys() {
+    let facts =
+        json!({ "requester": { "id": "ci" }, "initiator": { "identity": "github:42", "display_name": "alice" } });
+    let b = backend(Fake::default().ok(&json!({ "facts": facts })));
+    let f = b.verify(&subject()).await.unwrap();
+    let i = f.initiator.unwrap();
+    assert_eq!((i.identity.as_str(), i.actor), ("github:42", None));
+    assert_eq!(f.requester.identity, "", "countersign names the requester");
+    assert_eq!(b.identity_scheme(), "exec");
+
+    // A helper cannot claim an identity or actor for the requester.
+    let claimed = json!({ "facts": { "requester": { "id": "ci", "identity": "oidc:x#y" } } });
+    assert!(backend(Fake::default().ok(&claimed)).verify(&subject()).await.is_err());
+}

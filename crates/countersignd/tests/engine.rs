@@ -7,15 +7,18 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use countersign_core::{
-    AccessBackend, ActionIntent, Assurance, BackendCaps, BackendError, BackendName, Channel, ChannelCaps, ChannelError,
-    ChannelName, GrantHandle, MessageRef, Notification, PendingSubject, RequestFilter, RequestState, Requester, Store,
+    AccessBackend, ActionIntent, AnswerIntent, Asker, Assurance, BackendCaps, BackendError, BackendName, Channel,
+    ChannelCaps, ChannelError, ChannelName, ClientId, Confidentiality, Exclusion, GrantHandle, Initiator, Item,
+    MessageRef, Notification, PendingSubject, QuestionOutcome, RequestFilter, RequestState, Requester, Response, Store,
     SubjectFacts, SubjectRef, TransitionError, Verdict,
 };
 use countersign_store_sqlite::SqliteStore;
 use countersignd::Daemon;
 use countersignd::config::Config;
+use countersignd::engine::Ask;
 use countersignd::engine::EngineError;
 use jiff::Timestamp;
+use serde_json::json;
 
 fn t(secs: i64) -> Timestamp {
     Timestamp::from_second(1_800_000_000 + secs).unwrap()
@@ -34,6 +37,7 @@ enum SessionState {
 struct FakeBackend {
     sessions: Mutex<BTreeMap<String, (String, SessionState)>>,
     groups: Mutex<BTreeMap<String, BTreeSet<String>>>,
+    initiators: Mutex<BTreeMap<String, String>>,
     /// Number of upcoming grant calls that fail with a retryable error.
     flaky_grants: Mutex<u32>,
     native_expiry: bool,
@@ -58,12 +62,19 @@ impl FakeBackend {
     }
     fn facts(&self, user: &str) -> SubjectFacts {
         SubjectFacts {
+            source: None,
+            sensitive: false,
             requester: Requester {
                 id: user.into(),
                 display_name: None,
                 groups: self.groups.lock().unwrap().get(user).cloned().unwrap_or_default(),
-                identities: [format!("test:user:{user}")].into(),
+                ..Requester::default()
             },
+            initiator: self.initiators.lock().unwrap().get(user).map(|i| Initiator {
+                identity: i.clone(),
+                display_name: None,
+                actor: None,
+            }),
             target: None,
             requested_ttl: None,
             reason: None,
@@ -84,6 +95,9 @@ impl AccessBackend for FakeBackend {
     }
     fn capabilities(&self) -> BackendCaps {
         BackendCaps { discover: true, revoke: true, native_expiry: self.native_expiry }
+    }
+    fn identity_scheme(&self) -> &'static str {
+        "fake"
     }
     async fn discover_pending(&self) -> Result<Vec<PendingSubject>, BackendError> {
         let sessions = self.sessions.lock().unwrap().clone();
@@ -173,13 +187,16 @@ impl Channel for RecordingChannel {
     }
     async fn notify(&self, n: Notification<'_>) -> Result<Option<MessageRef>, ChannelError> {
         self.maybe_fail()?;
-        self.log.lock().unwrap().push(format!("notify {} {}", n.event.kind(), n.request.state.name()));
-        Ok(self.can_update.then(|| MessageRef { channel: self.name.clone(), id: format!("msg-{}", n.request.id) }))
+        self.log.lock().unwrap().push(format!("notify {} {}", n.event.kind(), n.item.state()));
+        Ok(self.can_update.then(|| MessageRef { channel: self.name.clone(), id: format!("msg-{}", n.item.id()) }))
     }
     async fn update(&self, m: &MessageRef, n: Notification<'_>) -> Result<(), ChannelError> {
         self.maybe_fail()?;
-        assert_eq!(m.id, format!("msg-{}", n.request.id));
-        self.log.lock().unwrap().push(format!("update {} {}", n.event.kind(), n.request.state.name()));
+        assert_eq!(m.id, format!("msg-{}", n.item.id()));
+        if let Item::Question(q) = n.item {
+            assert!(!q.question_confidential() || q.message.is_empty() || n.item.withheld());
+        }
+        self.log.lock().unwrap().push(format!("update {} {}", n.event.kind(), n.item.state()));
         Ok(())
     }
 }
@@ -190,33 +207,73 @@ const CONFIG: &str = r#"
     [server]
     public_url = "https://cs.example.test/"
 
-    [[approver]]
+    [[person]]
     id = "bob"
-    groups = ["ops"]
+    identities = ["github:1001"]
 
-    [[approver]]
+    [[person]]
     id = "carol"
-    groups = ["ops"]
 
-    [[approver]]
+    [[person]]
     id = "agent-owner"
-    groups = ["ops"]
-    identities = ["test:user:agent"]
+
+    [[person]]
+    id = "dave"
+
+    [[workload]]
+    id = "agent"
+    owners = ["agent-owner"]
+    identities = ["fake:fake#agent"]
+
+    [[group]]
+    name = "ops"
+    members = ["bob", "carol", "agent-owner"]
+
+    [roles]
+    member = ["group:ops", "person:dave"]
+    admin = ["person:carol"]
 
     [[policy]]
     name = "pair"
-    match = { requester_group = "needs-two" }
+    match = { backend_group = "needs-two" }
     approvers = ["group:ops"]
     quorum = 2
     max_ttl = "1h"
 
     [[policy]]
     name = "agents"
-    match = { requester_group = "agents" }
+    match = { backend_group = "agents" }
     approvers = ["group:ops"]
+    exclude = ["requester", "owners", "initiator"]
     max_ttl = "30m"
     pending_timeout = "5m"
     min_assurance = "web"
+
+    [[policy]]
+    name = "ci"
+    match = { backend_group = "ci" }
+    approvers = ["group:ops"]
+    exclude = ["requester", "initiator"]
+    require_initiator = true
+    max_ttl = "10m"
+
+    [intake]
+    listen = "127.0.0.1:0"
+    behind_proxy = true
+
+    [[client]]
+    id = "agent-host"
+    auth = { host_key_sha256 = "1111111111111111111111111111111111111111111111111111111111111111" }
+    scopes = ["question"]
+    actor = "agent"
+
+    [[question_policy]]
+    name = "deploys"
+    match = { asker = "agent-host" }
+    responders = ["group:ops"]
+    min_assurance = "linked"
+    confidential = "allow"
+    max_pending = 2
 "#;
 
 struct Harness {
@@ -231,6 +288,7 @@ async fn harness_with(extra: &str, backend: FakeBackend, channels: Vec<Arc<dyn C
     let backend = Arc::new(backend);
     backend.set_groups("agent", &["agents"]);
     backend.set_groups("pairuser", &["needs-two"]);
+    backend.set_groups("runner", &["ci"]);
     let daemon =
         Daemon::with_parts(&config, Arc::clone(&store), vec![Arc::clone(&backend) as Arc<dyn AccessBackend>], channels)
             .unwrap();
@@ -360,16 +418,190 @@ async fn quorum_needs_two_distinct_approvers() {
 }
 
 #[tokio::test]
-async fn refuses_self_unknown_and_weak_approvals() {
+async fn requesters_are_recognized_and_owners_excluded() {
+    let h = harness().await;
+    h.backend.add("s1", "agent");
+    h.daemon.engine.tick(t(0)).await;
+    let r = h.only_request().await;
+    assert_eq!(r.facts.requester.identity, "fake:fake#agent", "set by countersign from the backend");
+    assert_eq!(r.facts.requester.actor.as_ref().map(countersign_core::ActorId::as_str), Some("agent"));
+    assert_eq!(r.facts.source.as_ref().map(|s| s.name().to_owned()).as_deref(), Some("fake"));
+    assert!(matches!(
+        h.decide(r.id, "agent-owner", Verdict::Approve, t(1)).await,
+        Err(EngineError::Transition(TransitionError::Excluded(Exclusion::Owners)))
+    ));
+}
+
+#[tokio::test]
+async fn initiators_are_resolved_excluded_and_can_be_required() {
+    let h = harness().await;
+    h.backend.initiators.lock().unwrap().insert("runner".into(), "github:1001".into());
+    h.backend.add("s1", "runner");
+    h.daemon.engine.tick(t(0)).await;
+    let r = h.only_request().await;
+    assert_eq!(
+        r.facts.initiator.as_ref().and_then(|i| i.actor.as_ref()).map(countersign_core::ActorId::as_str),
+        Some("bob")
+    );
+    assert!(matches!(
+        h.decide(r.id, "bob", Verdict::Approve, t(1)).await,
+        Err(EngineError::Transition(TransitionError::Excluded(Exclusion::Initiator)))
+    ));
+    assert!(matches!(
+        h.decide(r.id, "carol", Verdict::Approve, t(1)).await.unwrap().state,
+        RequestState::Active { .. }
+    ));
+
+    // Without an initiator a policy that needs one fails the request.
+    let h = harness().await;
+    h.backend.add("s2", "runner");
+    h.daemon.engine.tick(t(0)).await;
+    let r = h.only_request().await;
+    assert!(matches!(r.state, RequestState::Failed { ref error } if error.contains("initiator")), "{:?}", r.state);
+}
+
+#[tokio::test]
+async fn suspension_stops_deciding_and_uncounts_approvals() {
+    let h = harness().await;
+    h.backend.add("s1", "pairuser");
+    h.daemon.engine.tick(t(0)).await;
+    let id = h.only_request().await.id;
+    assert!(h.decide(id, "bob", Verdict::Approve, t(1)).await.unwrap().state.is_pending());
+
+    let e = h.daemon.engine.suspend(&"bob".into(), &"dave".into(), None, t(2)).await.unwrap_err();
+    assert!(matches!(e, EngineError::Forbidden(_)), "only admins suspend: {e}");
+    h.daemon.engine.suspend(&"bob".into(), &"carol".into(), Some("phone lost".into()), t(2)).await.unwrap();
+    assert!(matches!(
+        h.decide(id, "bob", Verdict::Deny, t(3)).await,
+        Err(EngineError::Forbidden(_) | EngineError::Transition(TransitionError::Inactive))
+    ));
+    // Bob's approval no longer counts: one more is not enough.
+    assert!(h.decide(id, "agent-owner", Verdict::Approve, t(4)).await.unwrap().state.is_pending());
+    assert!(matches!(h.decide(id, "carol", Verdict::Approve, t(5)).await.unwrap().state, RequestState::Active { .. }));
+
+    assert!(h.daemon.engine.reinstate(&"bob".into(), &"carol".into(), t(6)).await.unwrap());
+    let audit = h.store.admin_actions(10).await.unwrap();
+    assert_eq!(audit.iter().map(|a| a.action.as_str()).collect::<Vec<_>>(), ["reinstate", "suspend"]);
+}
+
+#[tokio::test]
+async fn suspending_a_workload_withdraws_its_requests() {
+    let h = harness().await;
+    h.backend.add("s1", "agent");
+    h.daemon.engine.tick(t(0)).await;
+    h.daemon.engine.suspend(&"agent".into(), &"carol".into(), None, t(1)).await.unwrap();
+    let state = h.only_request().await.state;
+    assert!(!state.is_pending(), "{state:?}");
+}
+
+fn ask(message: &str, schema: serde_json::Value, confidential: bool) -> Ask {
+    Ask {
+        asker: Asker { client: ClientId::new("agent-host"), actor: Some("agent".into()) },
+        message: message.into(),
+        schema,
+        context: BTreeMap::from([("service".to_owned(), "api".to_owned())]),
+        confidentiality: Confidentiality { question: confidential, answer_may_be: false },
+    }
+}
+
+fn answer(q: countersign_core::RequestId, who: &str, response: Response, assurance: Assurance) -> AnswerIntent {
+    AnswerIntent { question_id: q, responder: who.into(), response, assurance, via: "web".into() }
+}
+
+fn accept(content: &serde_json::Value, confidential: bool) -> Response {
+    Response::Accept { content: content.as_object().unwrap().clone(), confidential }
+}
+
+#[tokio::test]
+async fn questions_are_answered_once_by_an_eligible_responder() {
+    let chat = Arc::new(RecordingChannel::new("chat", true));
+    let h = harness_with("", FakeBackend::new(), vec![Arc::clone(&chat) as Arc<dyn Channel>]).await;
+    let e = &h.daemon.engine;
+    let schema = json!({"type": "object", "properties": {"go": {"type": "boolean"}}, "required": ["go"]});
+    let q = e.ask(ask("Release v2?", schema.clone(), false), t(0)).await.unwrap();
+    assert_eq!(q.requirements.policy.as_str(), "deploys");
+
+    // The owner of the asking workload is one of the responders, but the
+    // question is asked for the workload itself, not for them.
+    let bad = e.answer(answer(q.id, "dave", accept(&json!({"go": true}), false), Assurance::FreshAuth), t(1)).await;
+    assert!(bad.is_err(), "dave is not a responder");
+    let bad = e.answer(answer(q.id, "bob", accept(&json!({"go": "yes"}), false), Assurance::FreshAuth), t(1)).await;
+    assert!(matches!(bad, Err(EngineError::Answer(_))), "{bad:?}");
+    let q2 = e.answer(answer(q.id, "bob", accept(&json!({"go": true}), false), Assurance::Linked), t(2)).await.unwrap();
+    assert_eq!(q2.state(), "answered");
+    let again = e.answer(answer(q.id, "carol", Response::Decline { note: None }, Assurance::Linked), t(3)).await;
+    assert!(again.is_err(), "answered once");
+
+    let read = e.read_question(q.id, &ClientId::new("agent-host"), t(4)).await.unwrap();
+    assert!(
+        matches!(read.outcome, Some(QuestionOutcome::Accepted { content: Some(ref c), .. }) if c["go"] == json!(true))
+    );
+    assert!(e.read_question(q.id, &ClientId::new("other"), t(4)).await.is_err(), "only the asker reads it");
+
+    h.daemon.dispatcher.run_once(t(5)).await.unwrap();
+    // Delivered after the answer: both carry the current snapshot.
+    assert_eq!(chat.log(), ["notify requested answered", "update answered answered"]);
+}
+
+#[tokio::test]
+async fn questions_are_limited_per_asker_and_need_a_policy() {
+    let h = harness().await;
+    let e = &h.daemon.engine;
+    let schema = json!({"type": "object", "properties": {"ok": {"type": "boolean"}}});
+    e.ask(ask("one", schema.clone(), false), t(0)).await.unwrap();
+    e.ask(ask("two", schema.clone(), false), t(0)).await.unwrap();
+    assert!(matches!(e.ask(ask("three", schema.clone(), false), t(0)).await, Err(EngineError::Refused(_))));
+
+    let mut stranger = ask("hi", schema.clone(), false);
+    stranger.asker.client = ClientId::new("unknown-host");
+    assert!(matches!(e.ask(stranger, t(0)).await, Err(EngineError::Refused(_))));
+    let bad_schema = json!({"type": "object", "properties": {"x": {"type": "array"}}});
+    assert!(matches!(e.ask(ask("bad", bad_schema, false), t(0)).await, Err(EngineError::Invalid(_))));
+
+    // A suspended workload cannot ask.
+    e.suspend(&"agent".into(), &"carol".into(), None, t(1)).await.unwrap();
+    assert!(matches!(e.ask(ask("four", schema, false), t(2)).await, Err(EngineError::Forbidden(_))));
+}
+
+#[tokio::test]
+async fn confidential_content_is_removed_once_read_and_unanswered_questions_expire() {
+    let h = harness().await;
+    let e = &h.daemon.engine;
+    let schema = json!({"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]});
+    let q = e.ask(ask("Which recovery code?", schema.clone(), true), t(0)).await.unwrap();
+    // Confidential questions need the stronger assurance to answer.
+    let weak = e.answer(answer(q.id, "bob", accept(&json!({"code": "K-1"}), true), Assurance::Linked), t(1)).await;
+    assert!(weak.is_err());
+    let weak = e.answer(answer(q.id, "bob", accept(&json!({"code": "K-1"}), false), Assurance::FreshAuth), t(1)).await;
+    assert!(weak.is_err(), "the answer to a confidential question stays confidential");
+    e.answer(answer(q.id, "bob", accept(&json!({"code": "K-1"}), true), Assurance::FreshAuth), t(2)).await.unwrap();
+
+    let stored = h.store.get_question(q.id).await.unwrap().unwrap();
+    assert!(stored.message.is_empty() && stored.content_removed, "the text goes once the question is closed");
+    let read = e.read_question(q.id, &ClientId::new("agent-host"), t(3)).await.unwrap();
+    assert!(matches!(read.outcome, Some(QuestionOutcome::Accepted { content: Some(ref c), .. }) if c["code"] == "K-1"));
+    let stored = h.store.get_question(q.id).await.unwrap().unwrap();
+    assert!(matches!(stored.outcome, Some(QuestionOutcome::Accepted { content: None, .. })), "{stored:?}");
+    assert!(!stored.holds_content());
+    let again = e.read_question(q.id, &ClientId::new("agent-host"), t(4)).await.unwrap();
+    assert!(matches!(again.outcome, Some(QuestionOutcome::Accepted { content: None, .. })), "handed over once");
+
+    let q = e.ask(ask("Still there?", schema, false), t(10)).await.unwrap();
+    e.tick(t(10 + 30 * 60)).await;
+    assert_eq!(h.store.get_question(q.id).await.unwrap().unwrap().state(), "expired");
+}
+
+#[tokio::test]
+async fn refuses_unknown_and_weak_approvals() {
     let h = harness().await;
     h.backend.add("s1", "agent");
     h.daemon.engine.tick(t(0)).await;
     let id = h.only_request().await.id;
+    assert!(matches!(h.decide(id, "mallory", Verdict::Approve, t(1)).await, Err(EngineError::Forbidden(_))));
     assert!(matches!(
-        h.decide(id, "agent-owner", Verdict::Approve, t(1)).await,
-        Err(EngineError::Transition(TransitionError::SelfApproval))
+        h.decide(id, "dave", Verdict::Approve, t(1)).await,
+        Err(EngineError::Transition(TransitionError::NotEligible))
     ));
-    assert!(matches!(h.decide(id, "mallory", Verdict::Approve, t(1)).await, Err(EngineError::UnknownApprover(_))));
     let weak = h.daemon.engine.decide(intent(id, "bob", Verdict::Approve, Assurance::Linked, "chat"), t(1)).await;
     assert!(matches!(weak, Err(EngineError::Transition(TransitionError::InsufficientAssurance { .. }))));
     assert_eq!(h.backend.state("s1"), Some(SessionState::Pending));

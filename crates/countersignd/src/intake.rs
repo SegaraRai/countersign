@@ -1,17 +1,22 @@
-//! Subjects pushed to countersign by target hosts, such as a `sudo`
-//! invocation waiting for approval.
+//! The API for clients: `sudo` invocations waiting for approval, and
+//! questions for people.
 //!
-//! Hosts authenticate with a per-host key (`Authorization: Bearer <key>`);
-//! the configuration holds only its SHA-256. The host name, and so the
-//! request's target, comes from the key, never from the request body.
+//! Clients authenticate with their own key (`Authorization: Bearer cshk_…`);
+//! the configuration holds only its SHA-256. Who the client is, and so the
+//! namespace of the requesters it may name (`unix:<client>#<user>`) and the
+//! target of its requests, comes from the key, never from the body. Each key
+//! has scopes: `approval`, `question`, or both.
 //!
 //! ```text
-//! POST   /intake/v1/requests        submit; 201 pending, 200 approved by a window, 403 no policy
-//! GET    /intake/v1/requests/{id}   state; ?wait=<secs> long-polls while pending
-//! DELETE /intake/v1/requests/{id}   withdraw while pending
+//! POST   /intake/v1/requests         submit; 201 pending, 200 approved by a window, 403 no policy
+//! GET    /intake/v1/requests/{id}    state; ?wait=<secs> long-polls while pending
+//! DELETE /intake/v1/requests/{id}    withdraw while pending
+//! POST   /intake/v1/questions        ask; 201 pending
+//! GET    /intake/v1/questions/{id}   state and answer; ?wait=<secs> long-polls while pending
+//! DELETE /intake/v1/questions/{id}   withdraw while pending
 //! ```
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,105 +29,115 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use countersign_core::host_key;
 use countersign_core::{
-    AccessBackend, BackendCaps, BackendError, BackendName, GrantHandle, GrantMode, PendingSubject, Request,
-    RequestFilter, RequestId, RequestState, Requester, Store, SubjectFacts, SubjectRef, TransitionError,
+    AccessBackend, AnswerError, Asker, BackendCaps, BackendError, BackendName, ClientId, Confidentiality, GrantHandle,
+    GrantMode, PendingSubject, Purpose, Question, QuestionOutcome, Request, RequestFilter, RequestId, RequestState,
+    Requester, Source, Store, SubjectFacts, SubjectRef, TransitionError,
 };
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use subtle::ConstantTimeEq as _;
 
-use crate::engine::{Engine, EngineError, Submitted};
+use crate::config::{ClientConfig, Scope};
+use crate::engine::{Ask, Engine, EngineError, Submitted};
+use crate::tls::TlsConfig;
 
 /// Subject kind for `sudo` invocations.
 pub const KIND_SUDO: &str = "sudo";
 
 const MAX_WAIT: Duration = Duration::from_secs(60);
-/// While long-polling, re-read the request at least this often.
+/// While long-polling, re-read at least this often.
 const RECHECK: Duration = Duration::from_secs(2);
 const MAX_ARGV_BYTES: usize = 8 * 1024;
 const MAX_FIELD: usize = 1024;
 const MAX_REASON: usize = 500;
+/// Largest body accepted for a question.
+const MAX_QUESTION_BODY: usize = 64 * 1024;
 /// The longest command (as shown) approvers are asked about. Chat
 /// channels can show this much in full.
 pub const MAX_COMMAND_CHARS: usize = 3000;
 
-/// `[intake]`: where hosts reach countersign.
+/// `[intake]`: where clients reach countersign.
+///
+/// Clients authenticate with their key alone; the network is not trusted.
+/// The listener therefore always serves HTTPS: either it terminates TLS
+/// itself (`tls`), or a reverse proxy or tunnel in front of it does
+/// (`behind_proxy`, on a loopback or private address).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IntakeConfig {
-    /// Listen address for hosts. Keep it private (a tailnet address); this
-    /// listener speaks plain HTTP.
     pub listen: SocketAddr,
-    /// Undecided requests a single host may have at once.
+    /// Terminate TLS here.
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+    /// A reverse proxy or tunnel terminates TLS and forwards plain HTTP to
+    /// `listen`.
+    #[serde(default)]
+    pub behind_proxy: bool,
+    /// Behind a proxy: the header in which it passes the client's address
+    /// (e.g. `x-forwarded-for`; the last entry counts). Only needed for
+    /// clients with `allowed_ips`.
+    #[serde(default)]
+    pub client_ip_header: Option<String>,
+    /// Undecided approval requests a single client may have at once.
+    /// Questions have their own limit per question policy.
     #[serde(default = "default_max_pending")]
-    pub max_pending_per_host: usize,
+    pub max_pending_per_client: usize,
+}
+
+impl IntakeConfig {
+    /// Problems with how the listener is exposed.
+    pub fn problems(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        match (&self.tls, self.behind_proxy) {
+            (None, false) => errors.push(
+                "intake: set tls = { cert_file, key_file } to serve HTTPS, or behind_proxy = true when a reverse \
+                 proxy or tunnel terminates TLS"
+                    .into(),
+            ),
+            (Some(_), true) => errors.push("intake: tls and behind_proxy exclude each other".into()),
+            (None, true) if !crate::config::is_private(self.listen.ip()) => errors.push(format!(
+                "intake: behind_proxy serves plain HTTP; listen on a loopback or private address, not {}",
+                self.listen
+            )),
+            _ => {}
+        }
+        if let Some(h) = &self.client_ip_header {
+            if !self.behind_proxy {
+                errors.push("intake: client_ip_header is only used with behind_proxy".into());
+            }
+            if axum::http::HeaderName::try_from(h.as_str()).is_err() {
+                errors.push(format!("intake: client_ip_header {h:?} is not a header name"));
+            }
+        }
+        errors
+    }
+
+    /// Whether the client's address can be known (for `allowed_ips`).
+    pub fn knows_client_address(&self) -> bool {
+        !self.behind_proxy || self.client_ip_header.is_some()
+    }
 }
 
 fn default_max_pending() -> usize {
     10
 }
 
-/// `[backend.<name>] type = "host"`: hosts that submit `sudo` invocations.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// `[backend.<name>] type = "host"`: `sudo` invocations from clients. Which
+/// OS users may ask is decided by workload identities (`unix:<client>#<user>`)
+/// and policies.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HostBackendConfig {
-    /// OS users whose submissions are accepted, with the requester groups
-    /// they get for policy matching. Others are refused.
-    pub users: BTreeMap<String, Vec<String>>,
-    #[serde(default, rename = "host")]
-    pub hosts: Vec<HostEntry>,
-}
+pub struct HostBackendConfig {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HostEntry {
-    pub name: String,
-    /// Lowercase hex SHA-256 of the host's key (`countersign keygen --host`).
-    pub key_sha256: String,
-    /// If set, requests with this key must come from one of these addresses.
-    #[serde(default)]
-    pub allowed_ips: Vec<IpAddr>,
-}
-
-impl HostBackendConfig {
-    /// Problems with this backend's settings, for the configuration check.
-    pub fn problems(&self, backend: &BackendName) -> Vec<String> {
-        let mut errors = Vec::new();
-        if self.users.is_empty() {
-            errors.push(format!("backend {backend}: users must list at least one OS user"));
-        }
-        for user in self.users.keys() {
-            if !is_name(user) {
-                errors.push(format!("backend {backend}: invalid user name {user:?}"));
-            }
-        }
-        let mut names = BTreeSet::new();
-        for h in &self.hosts {
-            if !is_name(&h.name) {
-                errors.push(format!("backend {backend}: invalid host name {:?}", h.name));
-            }
-            if !names.insert(&h.name) {
-                errors.push(format!("backend {backend}: duplicate host {}", h.name));
-            }
-            if host_key::parse_digest_hex(&h.key_sha256).is_none() {
-                errors.push(format!("backend {backend}: host {}: key_sha256 must be 64 hex digits", h.name));
-            }
-        }
-        errors
-    }
-}
-
-/// Host, user and group names: ASCII letters, digits, `-`, `_` and `.`.
+/// OS user names: ASCII letters, digits, `-`, `_` and `.`.
 fn is_name(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && !s.starts_with(['-', '.'])
-        && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    countersign_core::actor::is_name(s)
 }
 
-/// A backend for subjects that hosts submit. It holds no state of its own:
-/// the stored request is the record, and hosts read the outcome through the
-/// intake API.
+/// A backend for subjects that clients submit. It holds no state of its
+/// own: the stored request is the record, and clients read the outcome
+/// through the intake API.
 pub struct HostBackend {
     name: BackendName,
     store: Arc<dyn Store>,
@@ -146,6 +161,11 @@ impl AccessBackend for HostBackend {
         &self.name
     }
 
+    /// Unused: intake names requesters `unix:<client>#<user>` itself.
+    fn identity_scheme(&self) -> &'static str {
+        "unix"
+    }
+
     fn capabilities(&self) -> BackendCaps {
         BackendCaps { discover: false, revoke: true, native_expiry: true }
     }
@@ -154,7 +174,7 @@ impl AccessBackend for HostBackend {
         Ok(Vec::new())
     }
 
-    /// The facts recorded when the authenticated host submitted the subject.
+    /// The facts recorded when the authenticated client submitted the subject.
     async fn verify(&self, subject: &SubjectRef) -> Result<SubjectFacts, BackendError> {
         if subject.backend != self.name {
             return Err(BackendError::NotFound);
@@ -179,58 +199,48 @@ impl AccessBackend for HostBackend {
     }
 }
 
-#[derive(Debug)]
-struct HostIdentity {
-    backend: BackendName,
-    host: String,
-    allowed_ips: Vec<IpAddr>,
-}
-
-/// Everything the intake API needs.
+/// Everything the intake API needs. Clients are read from the engine's
+/// rules, so a configuration reload adds and removes them.
 #[derive(Clone)]
 pub struct IntakeState {
     engine: Arc<Engine>,
-    /// Key hash → host.
-    hosts: Arc<Vec<([u8; 32], HostIdentity)>>,
-    /// Backend → OS user → requester groups.
-    users: Arc<BTreeMap<BackendName, BTreeMap<String, Vec<String>>>>,
     public_url: Arc<str>,
     max_pending: usize,
+    /// Behind a proxy: where it puts the client's address.
+    client_ip_header: Option<axum::http::HeaderName>,
 }
 
 impl std::fmt::Debug for IntakeState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IntakeState").field("hosts", &self.hosts.len()).finish_non_exhaustive()
+        f.debug_struct("IntakeState").field("public_url", &self.public_url).finish_non_exhaustive()
     }
 }
 
 impl IntakeState {
-    /// `backends` are the `host` backends by name.
-    pub fn new(
-        engine: Arc<Engine>,
-        backends: &BTreeMap<BackendName, HostBackendConfig>,
-        intake: &IntakeConfig,
-        public_url: &str,
-    ) -> Self {
-        let mut hosts = Vec::new();
-        let mut users = BTreeMap::new();
-        for (name, c) in backends {
-            users.insert(name.clone(), c.users.clone());
-            for h in &c.hosts {
-                // Validated with the configuration.
-                let Some(digest) = host_key::parse_digest_hex(&h.key_sha256) else { continue };
-                hosts.push((
-                    digest,
-                    HostIdentity { backend: name.clone(), host: h.name.clone(), allowed_ips: h.allowed_ips.clone() },
-                ));
-            }
-        }
+    pub fn new(engine: Arc<Engine>, intake: &IntakeConfig, public_url: &str) -> Self {
+        let client_ip_header = intake
+            .client_ip_header
+            .as_deref()
+            .filter(|_| intake.behind_proxy)
+            .and_then(|h| axum::http::HeaderName::try_from(h).ok());
         Self {
             engine,
-            hosts: Arc::new(hosts),
-            users: Arc::new(users),
             public_url: public_url.trim_end_matches('/').into(),
-            max_pending: intake.max_pending_per_host,
+            max_pending: intake.max_pending_per_client,
+            client_ip_header,
+        }
+    }
+
+    /// The client's address: the peer's, or behind a proxy the last entry of
+    /// the header it sets (earlier entries come from the client and are not
+    /// trusted).
+    fn client_ip(&self, headers: &HeaderMap, peer: Option<SocketAddr>) -> Option<IpAddr> {
+        match &self.client_ip_header {
+            None => peer.map(|p| p.ip()),
+            Some(name) => {
+                let last = headers.get_all(name).iter().next_back()?.to_str().ok()?.rsplit(',').next()?.trim();
+                last.parse::<IpAddr>().ok().or_else(|| last.parse::<SocketAddr>().ok().map(|a| a.ip()))
+            }
         }
     }
 
@@ -238,40 +248,59 @@ impl IntakeState {
         format!("{}/requests/{id}", self.public_url)
     }
 
-    fn authenticate(&self, headers: &HeaderMap, peer: Option<SocketAddr>) -> Result<&HostIdentity, ApiError> {
+    fn authenticate(
+        &self,
+        headers: &HeaderMap,
+        peer: Option<SocketAddr>,
+        scope: Scope,
+    ) -> Result<ClientConfig, ApiError> {
         let key = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .map(str::trim)
             .filter(|k| !k.is_empty())
-            .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "unauthorized", "missing host key"))?;
+            .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "unauthorized", "missing client key"))?;
+        let rules = self.engine.rules();
         // A malformed key gets the same answer as a wrong one, and is never
         // hashed. Every configured digest is compared in constant time.
         let found = host_key::is_well_formed(key).then(|| host_key::digest(key)).and_then(|digest| {
-            self.hosts.iter().fold(None, |found, (d, id)| if bool::from(d.ct_eq(&digest)) { Some(id) } else { found })
+            rules.clients.values().fold(None, |found, c| {
+                let matches =
+                    host_key::parse_digest_hex(&c.auth.host_key_sha256).is_some_and(|d| bool::from(d.ct_eq(&digest)));
+                if matches { Some(c) } else { found }
+            })
         });
-        let Some(id) = found else {
-            tracing::warn!(peer = ?peer, "intake request with an unknown host key");
-            return Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "unknown host key"));
+        let ip = self.client_ip(headers, peer);
+        let Some(client) = found else {
+            tracing::warn!(address = ?ip, "intake request with an unknown client key");
+            return Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "unknown client key"));
         };
-        if !id.allowed_ips.is_empty() && !peer.is_some_and(|p| id.allowed_ips.contains(&p.ip())) {
-            tracing::warn!(host = %id.host, peer = ?peer, "host key used from an address that is not allowed");
-            return Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "address not allowed for this host"));
+        if !client.allowed_ips.is_empty() && !ip.is_some_and(|a| client.allowed_ips.contains(&a)) {
+            tracing::warn!(client = %client.id, address = ?ip, "client key used from an address that is not allowed");
+            return Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "address not allowed for this client"));
         }
-        Ok(id)
+        if !client.has_scope(scope) {
+            tracing::warn!(client = %client.id, ?scope, "client key used outside its scopes");
+            return Err(error(StatusCode::FORBIDDEN, "scope", "this key may not be used for this"));
+        }
+        Ok(client.clone())
     }
 
-    /// The request, if it exists and belongs to this host.
-    async fn owned(&self, id: &HostIdentity, raw: &str) -> Result<Request, ApiError> {
+    /// The request, if it exists and this client submitted it.
+    async fn owned(&self, client: &ClientConfig, raw: &str) -> Result<Request, ApiError> {
         let not_found = || error(StatusCode::NOT_FOUND, "not-found", "no such request");
         let rid: RequestId = raw.parse().map_err(|_| not_found())?;
         let r = self.engine.store().get_request(rid).await.map_err(|e| internal(&e))?.ok_or_else(not_found)?;
-        if r.subject.backend == id.backend && r.facts.target.as_deref() == Some(id.host.as_str()) {
-            Ok(r)
-        } else {
-            Err(not_found())
-        }
+        if r.facts.source == Some(Source::Client(client.id.clone())) { Ok(r) } else { Err(not_found()) }
+    }
+
+    /// The question, if it exists and this client asked it.
+    async fn owned_question(&self, client: &ClientConfig, raw: &str) -> Result<Question, ApiError> {
+        let not_found = || error(StatusCode::NOT_FOUND, "not-found", "no such question");
+        let id: RequestId = raw.parse().map_err(|_| not_found())?;
+        let q = self.engine.store().get_question(id).await.map_err(|e| internal(&e))?.ok_or_else(not_found)?;
+        if q.asker.client == client.id { Ok(q) } else { Err(not_found()) }
     }
 }
 
@@ -279,6 +308,8 @@ pub fn router(state: IntakeState) -> Router {
     Router::new()
         .route("/intake/v1/requests", post(submit))
         .route("/intake/v1/requests/{id}", get(status).delete(withdraw))
+        .route("/intake/v1/questions", post(ask))
+        .route("/intake/v1/questions/{id}", get(question_status).delete(withdraw_question))
         .with_state(state)
 }
 
@@ -317,7 +348,7 @@ fn internal(e: &dyn std::fmt::Display) -> ApiError {
     error(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error")
 }
 
-/// What the submitting host sees.
+/// What the submitting client sees.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StatusBody {
     pub id: String,
@@ -329,7 +360,7 @@ pub struct StatusBody {
     pub until: Option<Timestamp>,
 }
 
-/// The state as the host should act on it: only `approved` lets the
+/// The state as the client should act on it: only `approved` lets the
 /// command run.
 fn host_state(r: &Request) -> &'static str {
     match &r.state {
@@ -378,6 +409,10 @@ pub struct SubmitBody {
     /// Free text from the requester. Displayed, never trusted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Keep the details out of chat channels (the policy decides whether
+    /// this is honoured). The record keeps everything.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sensitive: bool,
 }
 
 /// Write out control and other hidden characters (see
@@ -409,8 +444,16 @@ pub fn shell_join(argv: &[String]) -> String {
         .join(" ")
 }
 
-fn pending_subject(id: &HostIdentity, groups: &[String], body: SubmitBody) -> Result<PendingSubject, ApiError> {
+/// The requester identity a client may name for an OS user.
+pub fn unix_identity(client: &ClientId, user: &str) -> String {
+    format!("unix:{client}#{user}")
+}
+
+fn pending_subject(client: &ClientConfig, backend: BackendName, body: SubmitBody) -> Result<PendingSubject, ApiError> {
     let bad = |m: &str| error(StatusCode::BAD_REQUEST, "bad-request", m);
+    if !is_name(&body.user) {
+        return Err(bad("invalid user"));
+    }
     if body.argv.is_empty() || body.argv[0].is_empty() {
         return Err(bad("argv must name a command"));
     }
@@ -427,8 +470,9 @@ fn pending_subject(id: &HostIdentity, groups: &[String], body: SubmitBody) -> Re
         return Err(bad("the command is too long to show to approvers"));
     }
 
+    let host = client.id.to_string();
     let mut attributes = BTreeMap::from([
-        ("host".to_owned(), id.host.clone()),
+        ("host".to_owned(), host.clone()),
         ("user".to_owned(), body.user.clone()),
         ("runas".to_owned(), runas),
         ("command".to_owned(), command),
@@ -440,26 +484,27 @@ fn pending_subject(id: &HostIdentity, groups: &[String], body: SubmitBody) -> Re
         attributes.insert("tty".to_owned(), clean(&tty, MAX_FIELD));
     }
 
+    let mut facts = SubjectFacts::new(Requester {
+        id: body.user.clone(),
+        display_name: Some(format!("{}@{host}", body.user)),
+        identity: unix_identity(&client.id, &body.user),
+        ..Requester::default()
+    });
+    facts.source = Some(Source::Client(client.id.clone()));
+    facts.target = Some(host);
+    facts.reason = body.reason.map(|r| clean(r.trim(), MAX_REASON)).filter(|r| !r.is_empty());
+    facts.attributes = attributes;
+    facts.sensitive = body.sensitive;
     Ok(PendingSubject {
-        subject: SubjectRef {
-            backend: id.backend.clone(),
-            kind: KIND_SUDO.to_owned(),
-            id: uuid::Uuid::new_v4().to_string(),
-        },
-        facts: SubjectFacts {
-            requester: Requester {
-                id: body.user.clone(),
-                display_name: Some(format!("{}@{}", body.user, id.host)),
-                groups: groups.iter().cloned().collect(),
-                identities: BTreeSet::from([format!("host:{}:{}:user:{}", id.backend, id.host, body.user)]),
-            },
-            target: Some(id.host.clone()),
-            requested_ttl: None,
-            reason: body.reason.map(|r| clean(r.trim(), MAX_REASON)).filter(|r| !r.is_empty()),
-            attributes,
-        },
+        subject: SubjectRef { backend, kind: KIND_SUDO.to_owned(), id: uuid::Uuid::new_v4().to_string() },
+        facts,
         observed_at: Timestamp::now(),
     })
+}
+
+fn unknown_user(client: &ClientConfig, user: &str) -> ApiError {
+    tracing::warn!(client = %client.id, user = %clean(user, 64), "submission for a user that is not an active workload or person");
+    error(StatusCode::FORBIDDEN, "unknown-user", "this user may not submit requests")
 }
 
 async fn submit(
@@ -469,28 +514,30 @@ async fn submit(
     body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
     // Authenticate before looking at the body.
-    let id = state.authenticate(&headers, peer_addr(peer))?;
+    let client = state.authenticate(&headers, peer_addr(peer), Scope::Approval)?;
     let body: SubmitBody = serde_json::from_slice(&body)
         .map_err(|e| error(StatusCode::BAD_REQUEST, "bad-request", format!("invalid request body: {e}")))?;
-    let Some(groups) = state.users.get(&id.backend).and_then(|u| u.get(&body.user)) else {
-        tracing::warn!(host = %id.host, user = %clean(&body.user, 64), "submission for a user that is not configured");
-        return Err(error(StatusCode::FORBIDDEN, "unknown-user", "this user may not submit requests"));
+    let Some(backend) = client.backend.clone() else {
+        return Err(internal(&"approval client without a host backend"));
     };
-    let p = pending_subject(id, groups, body)?;
 
-    // Bound how many undecided requests one host can pile up.
+    // Only OS users that are configured actors may ask.
+    let rules = state.engine.rules();
+    if rules.directory.by_identity(&unix_identity(&client.id, &body.user), Purpose::Recognition).is_none() {
+        return Err(unknown_user(&client, &body.user));
+    }
+    let user = body.user.clone();
+    let p = pending_subject(&client, backend, body)?;
+
+    // Bound how many undecided requests one client can pile up.
     let open = state
         .engine
         .store()
         .list_requests(&RequestFilter { open_only: true, limit: None })
         .await
         .map_err(|e| internal(&e))?;
-    let waiting = open
-        .iter()
-        .filter(|r| {
-            r.state.is_pending() && r.subject.backend == id.backend && r.facts.target.as_ref() == Some(&id.host)
-        })
-        .count();
+    let source = Some(Source::Client(client.id.clone()));
+    let waiting = open.iter().filter(|r| r.state.is_pending() && r.facts.source == source).count();
     if waiting >= state.max_pending {
         return Err(error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -503,12 +550,13 @@ async fn submit(
         Submitted::Opened(r) => Ok((StatusCode::CREATED, Json(status_body(&state, &r))).into_response()),
         Submitted::Covered(r) => Ok(Json(status_body(&state, &r)).into_response()),
         Submitted::Unmatched => Err(error(StatusCode::FORBIDDEN, "no-policy", "no policy allows this request")),
+        Submitted::Inactive => Err(unknown_user(&client, &user)),
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct WaitQuery {
-    /// Seconds to wait while the request is pending (at most 60).
+    /// Seconds to wait while pending (at most 60).
     #[serde(default)]
     wait: u64,
 }
@@ -520,12 +568,12 @@ async fn status(
     Path(raw): Path<String>,
     Query(q): Query<WaitQuery>,
 ) -> Result<Json<StatusBody>, ApiError> {
-    let id = state.authenticate(&headers, peer_addr(peer))?;
+    let client = state.authenticate(&headers, peer_addr(peer), Scope::Approval)?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(q.wait).min(MAX_WAIT);
     let mut changes = state.engine.subscribe();
     loop {
         changes.borrow_and_update();
-        let r = state.owned(id, &raw).await?;
+        let r = state.owned(&client, &raw).await?;
         if host_state(&r) == "pending" {
             let now = tokio::time::Instant::now();
             if now >= deadline {
@@ -537,7 +585,7 @@ async fn status(
             continue;
         }
         if matches!(r.state, RequestState::Active { .. }) && r.requirements.grant == GrantMode::Once {
-            // The host has the answer; a single-use approval ends here.
+            // The client has the answer; a single-use approval ends here.
             let r = state.engine.collect(r.id, Timestamp::now()).await.map_err(|e| internal(&e))?;
             return Ok(Json(status_body(&state, &r)));
         }
@@ -551,8 +599,8 @@ async fn withdraw(
     headers: HeaderMap,
     Path(raw): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let id = state.authenticate(&headers, peer_addr(peer))?;
-    let r = state.owned(id, &raw).await?;
+    let client = state.authenticate(&headers, peer_addr(peer), Scope::Approval)?;
+    let r = state.owned(&client, &raw).await?;
     match state.engine.withdraw(r.id, Timestamp::now()).await {
         Ok(_) => Ok(StatusCode::NO_CONTENT),
         Err(EngineError::Transition(TransitionError::InvalidState { state: s, .. })) => {
@@ -560,4 +608,152 @@ async fn withdraw(
         }
         Err(e) => Err(internal(&e)),
     }
+}
+
+// ---- Questions ------------------------------------------------------------
+
+/// A question as a client asks it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AskBody {
+    pub message: String,
+    /// The MCP elicitation `requestedSchema` subset.
+    pub requested_schema: Value,
+    /// Extra facts shown to responders.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub context: BTreeMap<String, String>,
+    #[serde(default)]
+    pub confidentiality: Confidentiality,
+}
+
+/// What the asking client sees.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionBody {
+    pub id: String,
+    pub url: String,
+    /// `pending`, `answered`, `declined`, `expired` or `withdrawn`.
+    pub state: String,
+    /// The MCP view: `accept`, `decline` or `cancel`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<Map<String, Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_at: Option<Timestamp>,
+    /// The responder marked the answer confidential: it is given out once
+    /// and then removed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confidential: bool,
+    /// The confidential answer was already read or has run out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub content_removed: bool,
+    /// A responder's note when declining.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+fn question_body(state: &IntakeState, q: &Question) -> QuestionBody {
+    let mut b = QuestionBody {
+        id: q.id.to_string(),
+        url: state.url(q.id),
+        state: q.state().to_owned(),
+        action: q.mcp_action().map(str::to_owned),
+        ..QuestionBody::default()
+    };
+    match &q.outcome {
+        Some(QuestionOutcome::Accepted { by, at, content, confidential, .. }) => {
+            b.answered_by = Some(by.to_string());
+            b.answered_at = Some(*at);
+            b.confidential = *confidential;
+            b.content_removed = content.is_none();
+            b.content.clone_from(content);
+        }
+        Some(QuestionOutcome::Declined { by, at, note, .. }) => {
+            b.answered_by = Some(by.to_string());
+            b.answered_at = Some(*at);
+            b.note.clone_from(note);
+        }
+        _ => {}
+    }
+    b
+}
+
+fn question_error(e: EngineError) -> ApiError {
+    match e {
+        EngineError::Invalid(m) => error(StatusCode::BAD_REQUEST, "bad-request", m),
+        EngineError::Refused(m) if m.starts_with("too many") => {
+            error(StatusCode::TOO_MANY_REQUESTS, "too-many-pending", m)
+        }
+        EngineError::Refused(m) => error(StatusCode::FORBIDDEN, "no-policy", m),
+        EngineError::Forbidden(m) => error(StatusCode::FORBIDDEN, "forbidden", m),
+        EngineError::Answer(AnswerError::NotPending(s)) => {
+            error(StatusCode::CONFLICT, "conflict", format!("the question is {s}"))
+        }
+        EngineError::UnknownQuestion(_) => error(StatusCode::NOT_FOUND, "not-found", "no such question"),
+        e => internal(&e),
+    }
+}
+
+async fn ask(
+    State(state): State<IntakeState>,
+    peer: Peer,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Response, ApiError> {
+    let client = state.authenticate(&headers, peer_addr(peer), Scope::Question)?;
+    if body.len() > MAX_QUESTION_BODY {
+        return Err(error(StatusCode::PAYLOAD_TOO_LARGE, "too-large", "the question is too large"));
+    }
+    let body: AskBody = serde_json::from_slice(&body)
+        .map_err(|e| error(StatusCode::BAD_REQUEST, "bad-request", format!("invalid request body: {e}")))?;
+    let ask = Ask {
+        asker: Asker { client: client.id.clone(), actor: client.actor.clone() },
+        message: body.message,
+        schema: body.requested_schema,
+        context: body.context,
+        confidentiality: body.confidentiality,
+    };
+    let q = state.engine.ask(ask, Timestamp::now()).await.map_err(question_error)?;
+    Ok((StatusCode::CREATED, Json(question_body(&state, &q))).into_response())
+}
+
+async fn question_status(
+    State(state): State<IntakeState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Path(raw): Path<String>,
+    Query(w): Query<WaitQuery>,
+) -> Result<Json<QuestionBody>, ApiError> {
+    let client = state.authenticate(&headers, peer_addr(peer), Scope::Question)?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(w.wait).min(MAX_WAIT);
+    let mut changes = state.engine.subscribe();
+    loop {
+        changes.borrow_and_update();
+        let q = state.owned_question(&client, &raw).await?;
+        if q.is_pending() {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(Json(question_body(&state, &q)));
+            }
+            let _ = tokio::time::timeout_at(deadline.min(now + RECHECK), changes.changed()).await;
+            continue;
+        }
+        let q = state.engine.read_question(q.id, &client.id, Timestamp::now()).await.map_err(question_error)?;
+        return Ok(Json(question_body(&state, &q)));
+    }
+}
+
+async fn withdraw_question(
+    State(state): State<IntakeState>,
+    peer: Peer,
+    headers: HeaderMap,
+    Path(raw): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let client = state.authenticate(&headers, peer_addr(peer), Scope::Question)?;
+    let q = state.owned_question(&client, &raw).await?;
+    state.engine.withdraw_question(q.id, Some(&client.id), Timestamp::now()).await.map_err(question_error)?;
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use countersign_core::{
-    ActionIntent, ActionSink, ApproverId, ApproverSelector, Assurance, ChannelCaps, ChannelName, DomainEvent,
-    Notification, PendingSubject, PolicyName, Request, RequestState, Requester, Requirements, SubjectFacts, SubjectRef,
-    Verdict,
+    ActionIntent, ActionSink, ActorId, AnswerIntent, Asker, Assurance, ChannelCaps, ChannelName, ClientId,
+    Confidentiality, DomainEvent, Item, Notification, PendingSubject, PolicyName, Question, QuestionPolicy, Request,
+    RequestState, Requester, Requirements, Response, Selector, SubjectFacts, SubjectRef, Verdict,
 };
 use jiff::Timestamp;
 use serde_json::json;
@@ -27,11 +27,14 @@ fn request(min_assurance: Assurance, reason: Option<&str>) -> Request {
     let pending = PendingSubject {
         subject: SubjectRef { backend: "oct".into(), kind: "session".into(), id: "s-1".into() },
         facts: SubjectFacts {
+            source: None,
+            initiator: None,
+            sensitive: false,
             requester: Requester {
                 id: "alice".into(),
                 display_name: Some("Alice `@everyone`".into()),
                 groups: BTreeSet::new(),
-                identities: BTreeSet::new(),
+                ..Requester::default()
             },
             target: Some("ssh-host".into()),
             requested_ttl: None,
@@ -42,15 +45,16 @@ fn request(min_assurance: Assurance, reason: Option<&str>) -> Request {
     };
     let reqs = Requirements {
         policy: PolicyName::new("ops"),
-        approvers: vec![ApproverSelector::Approver(ApproverId::new("bob"))],
+        approvers: vec![Selector::Person(ActorId::new("bob"))],
         quorum: 1,
         min_assurance,
         ttl: Duration::from_secs(5400),
         pending_timeout: Duration::from_secs(600),
-        allow_self_approval: false,
+        exclude: BTreeSet::from([countersign_core::Exclusion::Requester]),
+        require_initiator: false,
         grant: countersign_core::GrantMode::Once,
     };
-    Request::open(pending, reqs, Timestamp::UNIX_EPOCH).0
+    Request::open(pending, reqs, false, Timestamp::UNIX_EPOCH).0
 }
 
 fn caps() -> ChannelCaps {
@@ -61,7 +65,7 @@ fn render(r: &Request) -> render::View {
     let event = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
     view(
         Notification {
-            request: r,
+            item: countersign_core::Item::Approval(r),
             event_id: countersign_core::EventId::new(),
             event: &event,
             web_url: "https://cs.example/requests/x",
@@ -176,21 +180,22 @@ fn config_reads_snowflakes_as_strings() {
 
 #[derive(Default)]
 struct FakeSink {
-    links: Mutex<BTreeMap<String, ApproverId>>,
+    links: Mutex<BTreeMap<String, ActorId>>,
     submitted: Mutex<Vec<ActionIntent>>,
+    answered: Mutex<Vec<AnswerIntent>>,
 }
 
 #[async_trait]
 impl ActionSink for FakeSink {
-    async fn resolve_account(&self, _: &ChannelName, external_id: &str) -> Result<Option<ApproverId>, String> {
+    async fn resolve_account(&self, _: &ChannelName, external_id: &str) -> Result<Option<ActorId>, String> {
         Ok(self.links.lock().unwrap().get(external_id).cloned())
     }
 
-    async fn link_account(&self, _: &ChannelName, external_id: &str, code: &str) -> Result<ApproverId, String> {
+    async fn link_account(&self, _: &ChannelName, external_id: &str, code: &str) -> Result<ActorId, String> {
         if code != "GOOD-CODE" {
             return Err("unknown or expired code".into());
         }
-        let a = ApproverId::new("bob");
+        let a = ActorId::new("bob");
         self.links.lock().unwrap().insert(external_id.to_owned(), a.clone());
         Ok(a)
     }
@@ -201,6 +206,147 @@ impl ActionSink for FakeSink {
         r.state = RequestState::Approved;
         Ok(r)
     }
+
+    async fn answer(&self, intent: AnswerIntent) -> Result<Question, String> {
+        self.answered.lock().unwrap().push(intent);
+        Ok(question(json!({"type": "object", "properties": {}}), Confidentiality::default()))
+    }
+}
+
+fn question(schema: serde_json::Value, confidentiality: Confidentiality) -> Question {
+    let policy: QuestionPolicy = toml::from_str(
+        "name = \"deploys\"\nresponders = [\"person:bob\"]\nmin_assurance = \"linked\"\nconfidential = \"allow\"",
+    )
+    .unwrap();
+    let asker = Asker { client: ClientId::new("agent-host"), actor: Some(ActorId::new("deploy-bot")) };
+    let context = BTreeMap::from([("service".to_owned(), "api".to_owned())]);
+    Question::ask(
+        asker,
+        "Release `v2` now? @everyone".into(),
+        schema,
+        context,
+        &policy,
+        confidentiality,
+        Timestamp::UNIX_EPOCH,
+    )
+    .0
+}
+
+fn yes_no() -> serde_json::Value {
+    json!({"type": "object", "properties": {"go": {"type": "boolean"}}, "required": ["go"]})
+}
+
+fn render_item(item: Item<'_>) -> render::View {
+    let event = DomainEvent::Requested { request_id: item.id(), at: Timestamp::UNIX_EPOCH };
+    view(
+        Notification {
+            item,
+            event_id: countersign_core::EventId::new(),
+            event: &event,
+            web_url: "https://cs.example/requests/x",
+        },
+        caps(),
+    )
+}
+
+#[test]
+fn a_yes_no_question_is_answered_with_buttons() {
+    let q = question(yes_no(), Confidentiality::default());
+    let v = render_item(Item::Question(&q));
+    let b = buttons(&v);
+    assert_eq!(b.iter().map(|b| b.0.as_str()).collect::<Vec<_>>(), ["Yes", "No", "Decline"]);
+    let id = b[0].2.clone().unwrap();
+    let Some(Action::Answer { question_id, content }) = interact::action(&button_press(&id, CHANNEL, Some(GUILD)))
+    else {
+        panic!("not an answer: {id}");
+    };
+    assert_eq!(question_id, q.id);
+    assert_eq!(content.get("go"), Some(&json!(true)));
+    let e = &v.embeds[0];
+    assert!(e.description.as_deref().unwrap().contains("```"), "the question text is in a code block");
+}
+
+#[test]
+fn choices_become_buttons_but_free_text_goes_to_the_web() {
+    let choice = json!({"type": "object", "properties": {"env": {"type": "string", "enum": ["staging", "prod"]}}, "required": ["env"]});
+    let q = question(choice, Confidentiality::default());
+    let b = buttons(&render_item(Item::Question(&q)));
+    assert_eq!(b.iter().map(|b| b.0.as_str()).collect::<Vec<_>>(), ["staging", "prod", "Decline"]);
+
+    let text = json!({"type": "object", "properties": {"why": {"type": "string"}}, "required": ["why"]});
+    let q = question(text, Confidentiality::default());
+    let b = buttons(&render_item(Item::Question(&q)));
+    assert_eq!(b[0].0, "Answer in web UI");
+    assert_eq!(b[1].0, "Decline");
+
+    // An answer that may be confidential is never given with a button.
+    let q = question(yes_no(), Confidentiality { question: false, answer_may_be: true });
+    assert_eq!(buttons(&render_item(Item::Question(&q)))[0].0, "Answer in web UI");
+}
+
+#[test]
+fn confidential_questions_show_only_that_they_exist() {
+    let q = question(yes_no(), Confidentiality { question: true, answer_may_be: false });
+    let v = render_item(Item::Question(&q));
+    let e = &v.embeds[0];
+    let all = format!("{e:?}");
+    assert!(!all.contains("Release"), "{all}");
+    assert!(!all.contains("service"), "{all}");
+    assert!(e.description.as_deref().unwrap().contains("Confidential question from agent-host (deploys)"));
+    let b = buttons(&v);
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].0, "Answer in web UI");
+}
+
+#[test]
+fn sensitive_approvals_show_only_where_they_come_from() {
+    let mut r = request(Assurance::Linked, Some("rotate the root key"));
+    r.sensitive = true;
+    r.facts.attributes.insert("command".into(), "cat /etc/shadow".into());
+    let v = render_item(Item::Approval(&r));
+    let all = format!("{:?}", v.embeds[0]);
+    for secret in ["alice", "ssh-host", "rotate", "shadow"] {
+        assert!(!all.contains(secret), "{secret} leaked: {all}");
+    }
+    let b = buttons(&v);
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].0, "Review in web UI");
+}
+
+#[test]
+fn closed_questions_name_who_answered_but_never_the_answer() {
+    let mut q = question(yes_no(), Confidentiality::default());
+    q.outcome = Some(countersign_core::QuestionOutcome::Accepted {
+        by: ActorId::new("bob"),
+        at: Timestamp::UNIX_EPOCH,
+        assurance: Assurance::Linked,
+        via: ChannelName::new("discord"),
+        content: Some(serde_json::Map::from_iter([("go".to_owned(), json!("secret-value"))])),
+        fields: Vec::new(),
+        confidential: false,
+    });
+    let v = render_item(Item::Question(&q));
+    let all = format!("{:?}", v.embeds[0]);
+    assert!(all.contains("Answered by bob"), "{all}");
+    assert!(!all.contains("secret-value"), "{all}");
+    assert_eq!(v.components, [] as [twilight_model::channel::message::Component; 0]);
+}
+
+#[tokio::test]
+async fn pressing_an_answer_button_records_a_linked_answer() {
+    let sink = FakeSink::default();
+    sink.links.lock().unwrap().insert(USER.to_string(), ActorId::new("bob"));
+    let q = question(yes_no(), Confidentiality::default());
+    let decline = interact::decline_custom_id(q.id);
+    let i = button_press(&decline, CHANNEL, Some(GUILD));
+    let action = interact::action(&i).unwrap();
+    let reply = interact::perform(&scope(), &sink, &i, action).await;
+    assert!(reply.contains("declined"), "{reply}");
+    let got = sink.answered.lock().unwrap().clone();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].responder, ActorId::new("bob"));
+    assert_eq!(got[0].assurance, Assurance::Linked);
+    assert_eq!(got[0].response, Response::Decline { note: None });
 }
 
 fn scope() -> Scope {
@@ -278,7 +424,7 @@ async fn linking_then_pressing_submits_a_linked_decision() {
         [ActionIntent {
             request_id: rid,
             verdict: Verdict::Deny,
-            approver: ApproverId::new("bob"),
+            approver: ActorId::new("bob"),
             assurance: Assurance::Linked,
             via: ChannelName::new("discord"),
             comment: None,
@@ -298,7 +444,7 @@ async fn bad_codes_are_refused() {
 #[tokio::test]
 async fn presses_from_elsewhere_are_ignored() {
     let sink = FakeSink::default();
-    sink.links.lock().unwrap().insert(USER.to_string(), ApproverId::new("bob"));
+    sink.links.lock().unwrap().insert(USER.to_string(), ActorId::new("bob"));
     let id = custom_id(Verdict::Approve, countersign_core::RequestId::new());
     for (channel, guild) in [(4242, Some(GUILD)), (CHANNEL, Some(9999)), (CHANNEL, None)] {
         let i = button_press(&id, channel, guild);

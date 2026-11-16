@@ -4,8 +4,9 @@
 //! [`Channel::update`]). Inbound, interactive channels run a long-lived task
 //! ([`Channel::run`]) that receives button presses over a connection the
 //! channel itself opens (e.g. the Discord Gateway), authenticates the sender
-//! by the platform's own means, resolves them to a linked approver through
-//! the [`ActionSink`], and submits an [`ActionIntent`].
+//! by the platform's own means, resolves them to a linked person through
+//! the [`ActionSink`], and submits an [`ActionIntent`] (approvals) or an
+//! [`AnswerIntent`] (questions).
 
 use std::sync::Arc;
 
@@ -14,7 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::assurance::Assurance;
 use crate::event::DomainEvent;
-use crate::id::{ApproverId, ChannelName, EventId, RequestId};
+use crate::id::{ActorId, ChannelName, EventId, RequestId};
+use crate::question::{Question, Response};
 use crate::request::{Request, Verdict};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,11 +61,110 @@ pub struct MessageRef {
     pub id: String,
 }
 
+/// What a notification is about.
+#[derive(Debug, Clone, Copy)]
+pub enum Item<'a> {
+    Approval(&'a Request),
+    Question(&'a Question),
+}
+
+impl Item<'_> {
+    pub fn id(&self) -> RequestId {
+        match self {
+            Self::Approval(r) => r.id,
+            Self::Question(q) => q.id,
+        }
+    }
+
+    /// `pending`, `answered`, `denied`, ...
+    pub fn state(&self) -> &'static str {
+        match self {
+            Self::Approval(r) => r.state.name(),
+            Self::Question(q) => q.state(),
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        match self {
+            Self::Approval(r) => r.state.is_pending(),
+            Self::Question(q) => q.is_pending(),
+        }
+    }
+
+    /// `approval` or `question`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Approval(_) => "approval",
+            Self::Question(_) => "question",
+        }
+    }
+
+    /// The policy that governs it.
+    pub fn policy(&self) -> &str {
+        match self {
+            Self::Approval(r) => r.requirements.policy.as_str(),
+            Self::Question(q) => q.requirements.policy.as_str(),
+        }
+    }
+
+    /// Whether channels may show only that it exists: a sensitive approval
+    /// or a confidential question.
+    pub fn withheld(&self) -> bool {
+        match self {
+            Self::Approval(r) => r.sensitive,
+            Self::Question(q) => q.question_confidential(),
+        }
+    }
+
+    /// Where it came from: the client or backend for an approval, the asking
+    /// client for a question.
+    pub fn origin(&self) -> String {
+        match self {
+            Self::Approval(r) => {
+                r.facts.source.as_ref().map_or_else(|| r.subject.backend.to_string(), |s| s.name().to_owned())
+            }
+            Self::Question(q) => q.asker.client.to_string(),
+        }
+    }
+
+    /// A one-line title any channel may show, whatever the item's
+    /// confidentiality.
+    pub fn safe_title(&self) -> String {
+        match self {
+            Self::Approval(r) if r.sensitive => {
+                format!("Sensitive approval request from {} ({})", self.origin(), self.policy())
+            }
+            Self::Approval(_) => format!("Approval request from {} ({})", self.origin(), self.policy()),
+            Self::Question(q) if q.question_confidential() => {
+                format!("Confidential question from {} ({})", self.origin(), self.policy())
+            }
+            Self::Question(_) => format!("Question from {} ({})", self.origin(), self.policy()),
+        }
+    }
+
+    /// Who answered or declined a closed question, safe to show anywhere
+    /// (never the answer itself).
+    pub fn question_result(q: &Question) -> Option<String> {
+        use crate::question::QuestionOutcome as O;
+        Some(match q.outcome.as_ref()? {
+            O::Accepted { by, confidential: true, .. } => format!("Answered by {by} (confidential)"),
+            O::Accepted { by, .. } => format!("Answered by {by}"),
+            O::Declined { by, .. } => format!("Declined by {by}"),
+            O::Expired { .. } => "No answer in time".to_owned(),
+            O::Withdrawn { .. } => "Withdrawn by the asker".to_owned(),
+        })
+    }
+}
+
 /// What a channel is asked to render.
+///
+/// Channels must not show the details of a sensitive approval
+/// ([`Request::sensitive`]), the text of a confidential question, or a
+/// confidential answer: only that something happened, with the link.
 #[derive(Debug, Clone, Copy)]
 pub struct Notification<'a> {
-    /// Current snapshot of the request.
-    pub request: &'a Request,
+    /// Current snapshot of the approval or question.
+    pub item: Item<'a>,
     /// Outbox identity of the event: the same across delivery retries, so
     /// receivers can use it to drop duplicates.
     pub event_id: EventId,
@@ -74,16 +175,26 @@ pub struct Notification<'a> {
 }
 
 /// A decision received through a channel, after signature verification and
-/// approver resolution.
+/// resolution to a person.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionIntent {
     pub request_id: RequestId,
     pub verdict: Verdict,
-    pub approver: ApproverId,
+    pub approver: ActorId,
     pub assurance: Assurance,
     pub via: ChannelName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+}
+
+/// An answer to a question received through a channel or the web UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswerIntent {
+    pub question_id: RequestId,
+    pub responder: ActorId,
+    pub response: Response,
+    pub assurance: Assurance,
+    pub via: ChannelName,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -107,15 +218,18 @@ impl ChannelError {
 /// What an interactive channel can ask of the daemon.
 #[async_trait]
 pub trait ActionSink: Send + Sync {
-    /// The approver linked to an external account on this channel, if any.
-    async fn resolve_account(&self, channel: &ChannelName, external_id: &str) -> Result<Option<ApproverId>, String>;
+    /// The active person linked to an external account on this channel, if any.
+    async fn resolve_account(&self, channel: &ChannelName, external_id: &str) -> Result<Option<ActorId>, String>;
 
     /// Redeem a one-time code issued in the web UI, linking `external_id` on
-    /// `channel` to the approver who requested the code.
-    async fn link_account(&self, channel: &ChannelName, external_id: &str, code: &str) -> Result<ApproverId, String>;
+    /// `channel` to the person who requested the code.
+    async fn link_account(&self, channel: &ChannelName, external_id: &str, code: &str) -> Result<ActorId, String>;
 
     /// Record a decision. Errors are human-readable reasons.
     async fn submit(&self, intent: ActionIntent) -> Result<Request, String>;
+
+    /// Record an answer to a question. Errors are human-readable reasons.
+    async fn answer(&self, intent: AnswerIntent) -> Result<Question, String>;
 }
 
 #[async_trait]

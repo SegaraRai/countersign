@@ -1,23 +1,25 @@
 # /etc/countersign/sudo.toml (root:root 0644)
 
-# countersign's intake listener, reached over the tailnet.
-server = "http://100.64.0.10:8443"
+# countersign's intake API. Always HTTPS: the host key is the only thing
+# that authenticates this host, so it must not cross the network in clear.
+server = "https://countersign.example.com:8443"
+
+# Extra PEM certificates to trust for `server` (a private CA or a
+# self-signed certificate); the system's usual roots stay trusted.
+# ca_file = "/etc/countersign/ca.pem"
 
 # This host's key (root:root 0600), in countersign's host key format
 # (cshk_...; see docs/design/sudo-approval.md). Create it on this host, so
 # the key never leaves it. Where the countersign CLI is installed:
 #   countersign host-key /etc/countersign/host.key
 # Otherwise, with openssl and coreutils (basenc):
-#   b64() { basenc --base64url | tr -d '=
-'; }
+#   b64() { basenc --base64url | tr -d '=\n'; }
 #   body="cshk_$(openssl rand 32 | b64)"
 #   sum=$(printf %s "$body" | openssl dgst -sha256 -binary | head -c 4 | b64)
-#   (umask 077; printf '%s%s
-' "$body" "$sum" > /etc/countersign/host.key)
-#   printf 'key_sha256 = "%s"
-' "$(printf %s "$body$sum" | sha256sum | cut -d' ' -f1)"
-# Either way, put the printed key_sha256 line under this host in
-# countersign's configuration.
+#   (umask 077; printf '%s%s\n' "$body" "$sum" > /etc/countersign/host.key)
+#   printf 'auth = { host_key_sha256 = "%s" }\n' "$(printf %s "$body$sum" | sha256sum | cut -d' ' -f1)"
+# Either way, put the printed auth line in this host's [[client]] entry in
+# countersign's configuration (its id is the host name approvers see).
 key_file = "/etc/countersign/host.key"
 
 # Give up (and withdraw the request) after this long without a decision.

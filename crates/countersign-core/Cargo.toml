@@ -13,12 +13,19 @@ base64.workspace = true
 humantime-serde.workspace = true
 sha2.workspace = true
 jiff.workspace = true
+regex = { version = "1", default-features = false, features = ["std", "unicode"] }
 serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror.workspace = true
 uuid.workspace = true
 
+# Browser-like WebAssembly hosts (e.g. Cloudflare Workers) have no OS clock or
+# randomness; take them from JavaScript there.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+uuid = { workspace = true, features = ["js"] }
+jiff = { workspace = true, features = ["js"] }
+
 [dev-dependencies]
-serde_json.workspace = true
 toml.workspace = true
 
 [lints]

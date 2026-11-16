@@ -2,17 +2,18 @@
 {% block content %}
 <h1>Requests</h1>
 {% if open.is_empty() %}
-<p class="muted">Nothing is waiting for a decision.</p>
+<p class="muted">Nothing is waiting for a decision or an answer.</p>
 {% else %}
 <div class="table-wrap">
 <table>
-  <thead><tr><th>Requester</th><th>Policy</th><th>State</th><th>Created</th></tr></thead>
+  <thead><tr><th></th><th>From</th><th>Policy</th><th>State</th><th>Created</th></tr></thead>
   <tbody>
   {% for r in open %}
   <tr>
-    <td><a href="/requests/{{ r.id }}">{{ r.requester }}</a>{% if let Some(t) = r.target %} <span class="muted">({{ t }})</span>{% endif %}</td>
+    <td><span class="kind kind-{{ r.kind }}">{{ r.kind }}</span></td>
+    <td><a href="/requests/{{ r.id }}">{{ r.from }}</a>{% if let Some(t) = r.target %} <span class="muted">({{ t }})</span>{% endif %}{% if r.sensitive %} <span class="muted">· confidential</span>{% endif %}</td>
     <td>{{ r.policy }}</td>
-    <td><span class="state state-{{ r.state }}">{{ r.state }}</span></td>
+    <td><span class="state state-{% if r.kind == "question" %}q-{% endif %}{{ r.state }}">{{ r.state }}</span></td>
     <td class="muted">{{ r.created }}</td>
   </tr>
   {% endfor %}
@@ -23,17 +24,18 @@
 
 <h2>Recent</h2>
 {% if recent.is_empty() %}
-<p class="muted">No closed requests yet.</p>
+<p class="muted">Nothing has finished yet.</p>
 {% else %}
 <div class="table-wrap">
 <table>
-  <thead><tr><th>Requester</th><th>Policy</th><th>State</th><th>Updated</th></tr></thead>
+  <thead><tr><th></th><th>From</th><th>Policy</th><th>State</th><th>Updated</th></tr></thead>
   <tbody>
   {% for r in recent %}
   <tr>
-    <td><a href="/requests/{{ r.id }}">{{ r.requester }}</a></td>
+    <td><span class="kind kind-{{ r.kind }}">{{ r.kind }}</span></td>
+    <td><a href="/requests/{{ r.id }}">{{ r.from }}</a>{% if let Some(t) = r.target %} <span class="muted">({{ t }})</span>{% endif %}</td>
     <td>{{ r.policy }}</td>
-    <td><span class="state state-{{ r.state }}">{{ r.state }}</span></td>
+    <td><span class="state state-{% if r.kind == "question" %}q-{% endif %}{{ r.state }}">{% if r.kind == "question" && r.state == "expired" %}no answer{% else %}{{ r.state }}{% endif %}</span></td>
     <td class="muted">{{ r.updated }}</td>
   </tr>
   {% endfor %}

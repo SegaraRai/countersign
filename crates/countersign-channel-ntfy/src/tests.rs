@@ -6,8 +6,8 @@ use axum::Router;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use countersign_core::{
-    ApproverId, ApproverSelector, Assurance, Channel, ChannelError, ChannelName, DomainEvent, Notification,
-    PendingSubject, PolicyName, Request, RequestState, Requester, Requirements, SubjectFacts, SubjectRef,
+    ActorId, Assurance, Channel, ChannelError, ChannelName, DomainEvent, Notification, PendingSubject, PolicyName,
+    Request, RequestState, Requester, Requirements, Selector, SubjectFacts, SubjectRef,
 };
 use jiff::Timestamp;
 
@@ -17,11 +17,14 @@ fn request() -> Request {
     let pending = PendingSubject {
         subject: SubjectRef { backend: "oct".into(), kind: "session".into(), id: "s-1".into() },
         facts: SubjectFacts {
+            source: None,
+            initiator: None,
+            sensitive: false,
             requester: Requester {
                 id: "agent-7".into(),
                 display_name: None,
                 groups: BTreeSet::new(),
-                identities: BTreeSet::new(),
+                ..Requester::default()
             },
             target: Some("db-prod".into()),
             requested_ttl: None,
@@ -32,15 +35,16 @@ fn request() -> Request {
     };
     let reqs = Requirements {
         policy: PolicyName::new("ops"),
-        approvers: vec![ApproverSelector::Approver(ApproverId::new("bob"))],
+        approvers: vec![Selector::Person(ActorId::new("bob"))],
         quorum: 1,
         min_assurance: Assurance::FreshAuth,
         ttl: Duration::from_secs(1800),
         pending_timeout: Duration::from_secs(600),
-        allow_self_approval: false,
+        exclude: BTreeSet::from([countersign_core::Exclusion::Requester]),
+        require_initiator: false,
         grant: countersign_core::GrantMode::Once,
     };
-    Request::open(pending, reqs, Timestamp::UNIX_EPOCH).0
+    Request::open(pending, reqs, false, Timestamp::UNIX_EPOCH).0
 }
 
 fn config(details: bool) -> NtfyConfig {
@@ -55,7 +59,12 @@ fn new_requests_carry_details_and_a_review_button() {
     let ev = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
     let p = publish(
         &config(true),
-        Notification { request: &r, event_id: countersign_core::EventId::new(), event: &ev, web_url: URL },
+        Notification {
+            item: countersign_core::Item::Approval(&r),
+            event_id: countersign_core::EventId::new(),
+            event: &ev,
+            web_url: URL,
+        },
     );
     assert_eq!(p.topic, "cs-ops");
     assert_eq!(p.title, "Access request: agent-7");
@@ -76,7 +85,12 @@ fn without_details_nothing_about_the_request_leaves() {
     let ev = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
     let p = publish(
         &config(false),
-        Notification { request: &r, event_id: countersign_core::EventId::new(), event: &ev, web_url: URL },
+        Notification {
+            item: countersign_core::Item::Approval(&r),
+            event_id: countersign_core::EventId::new(),
+            event: &ev,
+            web_url: URL,
+        },
     );
     let json = serde_json::to_string(&p).unwrap();
     for secret in ["agent-7", "db-prod", "rotate", "\"ops\""] {
@@ -88,7 +102,12 @@ fn without_details_nothing_about_the_request_leaves() {
     let ev = DomainEvent::GrantFailed { request_id: r.id, error: "boom db-prod".into(), at: Timestamp::UNIX_EPOCH };
     let p = publish(
         &config(false),
-        Notification { request: &r, event_id: countersign_core::EventId::new(), event: &ev, web_url: "relative/x" },
+        Notification {
+            item: countersign_core::Item::Approval(&r),
+            event_id: countersign_core::EventId::new(),
+            event: &ev,
+            web_url: "relative/x",
+        },
     );
     assert!(!serde_json::to_string(&p).unwrap().contains("db-prod"));
     assert_eq!(p.click, None, "non-http links are dropped");
@@ -103,7 +122,12 @@ fn outcomes_say_what_happened() {
     let ev = DomainEvent::Granted { request_id: r.id, until, at: Timestamp::UNIX_EPOCH };
     let p = publish(
         &config(true),
-        Notification { request: &r, event_id: countersign_core::EventId::new(), event: &ev, web_url: URL },
+        Notification {
+            item: countersign_core::Item::Approval(&r),
+            event_id: countersign_core::EventId::new(),
+            event: &ev,
+            web_url: URL,
+        },
     );
     assert_eq!(p.title, "Access granted: agent-7");
     assert!(p.message.ends_with("Active until 1970-01-01 01:00 UTC"), "{}", p.message);
@@ -170,9 +194,14 @@ async fn publishes_json_with_bearer_token() {
     let r = request();
     let ev = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
     assert_eq!(
-        ch.notify(Notification { request: &r, event_id: countersign_core::EventId::new(), event: &ev, web_url: URL })
-            .await
-            .unwrap(),
+        ch.notify(Notification {
+            item: countersign_core::Item::Approval(&r),
+            event_id: countersign_core::EventId::new(),
+            event: &ev,
+            web_url: URL
+        })
+        .await
+        .unwrap(),
         None
     );
 
@@ -189,7 +218,12 @@ async fn publishes_json_with_bearer_token() {
 async fn http_failures_map_to_retryable_or_permanent_errors() {
     let r = request();
     let ev = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
-    let n = Notification { request: &r, event_id: countersign_core::EventId::new(), event: &ev, web_url: URL };
+    let n = Notification {
+        item: countersign_core::Item::Approval(&r),
+        event_id: countersign_core::EventId::new(),
+        event: &ev,
+        web_url: URL,
+    };
 
     let (url, _) = server(StatusCode::TOO_MANY_REQUESTS).await;
     let e = channel(&url, None).notify(n).await.unwrap_err();
@@ -204,4 +238,57 @@ async fn http_failures_map_to_retryable_or_permanent_errors() {
     // Nothing listening.
     let e = channel("http://127.0.0.1:9", None).notify(n).await.unwrap_err();
     assert!(e.is_retryable(), "{e:?}");
+}
+
+fn question(confidential: bool) -> countersign_core::Question {
+    let policy: countersign_core::QuestionPolicy =
+        toml::from_str("name = \"deploys\"\nresponders = [\"person:bob\"]\nconfidential = \"allow\"").unwrap();
+    let asker = countersign_core::Asker { client: countersign_core::ClientId::new("agent-host"), actor: None };
+    let schema = serde_json::json!({"type": "object", "properties": {"go": {"type": "boolean"}}});
+    let confidentiality = countersign_core::Confidentiality { question: confidential, answer_may_be: false };
+    countersign_core::Question::ask(
+        asker,
+        "Rotate the TOP-SECRET key?".into(),
+        schema,
+        BTreeMap::from([("ticket".to_owned(), "OPS-42".to_owned())]),
+        &policy,
+        confidentiality,
+        Timestamp::UNIX_EPOCH,
+    )
+    .0
+}
+
+#[test]
+fn questions_and_sensitive_requests_never_carry_their_text() {
+    for confidential in [false, true] {
+        let q = question(confidential);
+        let ev = DomainEvent::Requested { request_id: q.id, at: Timestamp::UNIX_EPOCH };
+        let n = Notification {
+            item: countersign_core::Item::Question(&q),
+            event_id: countersign_core::EventId::new(),
+            event: &ev,
+            web_url: URL,
+        };
+        let p = publish(&config(true), n);
+        let all = format!("{} {}", p.title, p.message);
+        assert!(!all.contains("TOP-SECRET") && !all.contains("OPS-42"), "{all}");
+        assert!(p.title.contains("agent-host"), "{}", p.title);
+        assert_eq!(p.actions[0].label, "Answer");
+    }
+
+    let mut r = request();
+    r.sensitive = true;
+    let ev = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
+    let n = Notification {
+        item: countersign_core::Item::Approval(&r),
+        event_id: countersign_core::EventId::new(),
+        event: &ev,
+        web_url: URL,
+    };
+    let p = publish(&config(true), n);
+    let all = format!("{} {}", p.title, p.message);
+    for secret in ["agent-7", "db-prod", "rotate"] {
+        assert!(!all.contains(secret), "{secret} leaked: {all}");
+    }
+    assert!(p.title.starts_with("Sensitive approval request"), "{}", p.title);
 }

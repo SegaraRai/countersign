@@ -16,7 +16,7 @@
 mod model;
 pub mod runner;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -52,12 +52,6 @@ pub struct OcteliumConfig {
     pub homedir: Option<PathBuf>,
     #[serde(default = "default_timeout", with = "humantime_serde")]
     pub command_timeout: Duration,
-    /// Maps Octelium identity-provider names to the identity namespace used by
-    /// approvers, so self-approval can be detected across systems. For
-    /// example `{ pocket = "oidc:https://id.example.com" }` turns identity
-    /// `<sub>` from identity provider `pocket` into `oidc:https://id.example.com#<sub>`.
-    #[serde(default)]
-    pub identity_providers: BTreeMap<String, String>,
     /// Authentication token used to log in again when the current Octelium
     /// session has ended. Without it, an expired login needs a manual
     /// `octeliumctl login`.
@@ -211,18 +205,9 @@ impl<R: Runner> OcteliumBackend<R> {
         Ok(all)
     }
 
-    fn facts(&self, session: &Session, user: &User) -> SubjectFacts {
+    fn facts(session: &Session, user: &User) -> SubjectFacts {
         let spec = &user.spec;
         let user_name = &session.status.user_ref.name;
-        let domain = &self.config.domain;
-
-        let mut identities = BTreeSet::from([format!("octelium:{domain}:user:{user_name}")]);
-        for id in spec.authentication.iter().flat_map(|a| &a.identities) {
-            identities.insert(match self.config.identity_providers.get(&id.identity_provider) {
-                Some(prefix) => format!("{prefix}#{}", id.identifier),
-                None => format!("octelium:{domain}:idp:{}#{}", id.identity_provider, id.identifier),
-            });
-        }
 
         let mut attributes = BTreeMap::new();
         let mut put = |k: &str, v: Option<&String>| {
@@ -243,16 +228,13 @@ impl<R: Runner> OcteliumBackend<R> {
         }
 
         SubjectFacts {
-            requester: Requester {
+            attributes,
+            ..SubjectFacts::new(Requester {
                 id: user_name.clone(),
                 display_name: spec.email.clone(),
                 groups: spec.groups.iter().cloned().collect(),
-                identities,
-            },
-            target: None,
-            requested_ttl: None,
-            reason: None,
-            attributes,
+                ..Requester::default()
+            })
         }
     }
 
@@ -292,6 +274,10 @@ impl<R: Runner> AccessBackend for OcteliumBackend<R> {
         &self.name
     }
 
+    fn identity_scheme(&self) -> &'static str {
+        "octelium"
+    }
+
     fn capabilities(&self) -> BackendCaps {
         BackendCaps { discover: true, revoke: true, native_expiry: true }
     }
@@ -305,7 +291,7 @@ impl<R: Runner> AccessBackend for OcteliumBackend<R> {
             if !users.contains_key(user_name) {
                 users.insert(user_name.clone(), self.get_user(user_name).await?);
             }
-            let facts = self.facts(&s, &users[user_name]);
+            let facts = Self::facts(&s, &users[user_name]);
             out.push(PendingSubject {
                 subject: self.subject(&s.metadata.name),
                 facts,
@@ -319,7 +305,7 @@ impl<R: Runner> AccessBackend for OcteliumBackend<R> {
         let name = self.session_name(subject)?;
         let s = self.get_session(name).await?;
         let user = self.get_user(&s.status.user_ref.name).await?;
-        Ok(self.facts(&s, &user))
+        Ok(Self::facts(&s, &user))
     }
 
     async fn grant(&self, subject: &SubjectRef, ttl: Duration) -> Result<GrantHandle, BackendError> {

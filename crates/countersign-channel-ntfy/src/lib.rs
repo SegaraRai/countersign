@@ -23,7 +23,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use countersign_core::{Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, MessageRef, Notification};
+use countersign_core::{
+    Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, Item, MessageRef, Notification, Question, Request,
+};
 use serde::{Deserialize, Serialize};
 
 /// Environment variable holding the access token when `token_file` is unset.
@@ -175,10 +177,59 @@ impl Channel for NtfyChannel {
 
 /// The notification for an event.
 pub fn publish(config: &NtfyConfig, n: Notification<'_>) -> Publish {
-    let r = n.request;
-    let who = if config.details { clean(&r.facts.requester.id, 80) } else { String::new() };
+    let (title, tag, priority, message) = match n.item {
+        Item::Approval(r) => approval(config, n.event, r),
+        Item::Question(q) => question(config, n.event, q),
+    };
+    let message = if message.trim().is_empty() { "Open countersign for details.".to_owned() } else { message };
+    let message: String = message.trim_end().chars().take(MAX_MESSAGE_CHARS).collect();
+
+    let web = (n.web_url.starts_with("https://") || n.web_url.starts_with("http://")).then(|| n.web_url.to_owned());
+    let label = match n.item {
+        Item::Question(_) if n.item.is_pending() => "Answer",
+        _ if n.item.is_pending() => "Review",
+        _ => "Open",
+    };
+    Publish {
+        topic: config.topic.clone(),
+        title,
+        message,
+        tags: vec![tag.to_owned()],
+        priority,
+        click: web.clone(),
+        actions: web
+            .map(|url| ViewAction { action: "view".to_owned(), label: label.to_owned(), url, clear: true })
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// A question never shows its text here, confidential or not: push
+/// notifications land on lock screens and in third-party logs. Only who asked,
+/// under which policy, and how it ended.
+fn question(config: &NtfyConfig, event: &DomainEvent, q: &Question) -> (String, &'static str, u8, String) {
+    let item = Item::Question(q);
+    let (title, tag, priority) = match event {
+        DomainEvent::Requested { .. } => (item.safe_title(), "question", config.priority),
+        DomainEvent::Answered { .. } => (format!("Question answered ({})", item.origin()), "speech_balloon", 3),
+        DomainEvent::Declined { .. } => (format!("Question declined ({})", item.origin()), "no_entry", 3),
+        DomainEvent::Expired { .. } => (format!("Question unanswered ({})", item.origin()), "hourglass", 3),
+        _ => (format!("Question closed ({})", item.origin()), "leftwards_arrow_with_hook", 2),
+    };
+    let mut message = String::new();
+    if q.is_pending() {
+        let _ = writeln!(message, "Answer by {}", time(q.pending_until));
+    } else if let Some(r) = Item::question_result(q) {
+        let _ = writeln!(message, "{}", clean(&r, 200));
+    }
+    (title, tag, priority, message)
+}
+
+fn approval(config: &NtfyConfig, event: &DomainEvent, r: &Request) -> (String, &'static str, u8, String) {
+    let details = config.details && !r.sensitive;
+    let who = if details { clean(&r.facts.requester.id, 80) } else { String::new() };
     let about = |what: &str| if who.is_empty() { what.to_owned() } else { format!("{what}: {who}") };
-    let (title, tag, priority) = match n.event {
+    let (title, tag, priority) = match event {
         DomainEvent::Requested { .. } => (about("Access request"), "key", config.priority),
         DomainEvent::Granted { .. } => (about("Access granted"), "white_check_mark", 3),
         DomainEvent::Denied { .. } => (about("Access denied"), "no_entry", 3),
@@ -187,11 +238,19 @@ pub fn publish(config: &NtfyConfig, n: Notification<'_>) -> Publish {
         DomainEvent::Revoked { .. } => (about("Access revoked"), "x", 3),
         DomainEvent::Withdrawn { .. } => (about("Request withdrawn"), "leftwards_arrow_with_hook", 2),
         DomainEvent::Ended { .. } => (about("Access ended"), "checkered_flag", 2),
-        DomainEvent::Approved { .. } | DomainEvent::DecisionRecorded { .. } => (about("Request updated"), "memo", 2),
+        DomainEvent::Approved { .. }
+        | DomainEvent::DecisionRecorded { .. }
+        | DomainEvent::Answered { .. }
+        | DomainEvent::Declined { .. } => (about("Request updated"), "memo", 2),
+    };
+    let (title, priority) = match event {
+        DomainEvent::Requested { .. } if r.sensitive => (Item::Approval(r).safe_title(), config.priority),
+        DomainEvent::Requested { .. } => (title, config.priority),
+        _ => (title, priority),
     };
 
     let mut message = String::new();
-    if config.details {
+    if details {
         let f = &r.facts;
         if let Some(name) = &f.requester.display_name {
             let _ = writeln!(message, "Requester: {} ({})", clean(&f.requester.id, 80), clean(name, 80));
@@ -210,37 +269,19 @@ pub fn publish(config: &NtfyConfig, n: Notification<'_>) -> Publish {
             let _ = writeln!(message, "Reason: {}", clean(reason, 1000));
         }
     }
-    match n.event {
+    match event {
         DomainEvent::Requested { .. } => {
             let _ = writeln!(message, "Decide by {}", time(r.pending_until));
         }
         DomainEvent::Granted { until, .. } => {
             let _ = writeln!(message, "Active until {}", time(*until));
         }
-        DomainEvent::GrantFailed { error, .. } if config.details => {
+        DomainEvent::GrantFailed { error, .. } if details => {
             let _ = writeln!(message, "Error: {}", clean(error, 500));
         }
         _ => {}
     }
-    if message.is_empty() {
-        message.push_str("Open countersign for details.");
-    }
-    let message: String = message.trim_end().chars().take(MAX_MESSAGE_CHARS).collect();
-
-    let web = (n.web_url.starts_with("https://") || n.web_url.starts_with("http://")).then(|| n.web_url.to_owned());
-    let label = if r.state.is_pending() { "Review" } else { "Open" };
-    Publish {
-        topic: config.topic.clone(),
-        title,
-        message,
-        tags: vec![tag.to_owned()],
-        priority,
-        click: web.clone(),
-        actions: web
-            .map(|url| ViewAction { action: "view".to_owned(), label: label.to_owned(), url, clear: true })
-            .into_iter()
-            .collect(),
-    }
+    (title, tag, priority, message)
 }
 
 /// Untrusted text on one line, bounded.

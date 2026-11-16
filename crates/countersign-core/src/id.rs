@@ -92,6 +92,11 @@ name_id!(
     PolicyName
 );
 name_id!(
-    /// Stable identifier of an approver known to countersign.
-    ApproverId
+    /// Stable identifier of a person or workload known to countersign. Never
+    /// reused, so old records keep pointing at the same actor.
+    ActorId
+);
+name_id!(
+    /// Configured name of a client of the intake API (e.g. a host).
+    ClientId
 );

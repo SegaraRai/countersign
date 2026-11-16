@@ -97,8 +97,13 @@ A small static Rust binary run by `pam_exec` as root. It:
    known sudo binary; its real uid must be `PAM_USER`'s; `cmdline` gives the
    argv as typed; `cwd` the working directory. The process is setuid root, so
    the agent cannot alter it.
-3. Reads an optional reason from `COUNTERSIGN_REASON` in
-   `/proc/$PPID/environ`. Displayed, never trusted.
+3. Reads optional hints from `/proc/$PPID/environ`: `COUNTERSIGN_REASON`
+   (shown to approvers) and `COUNTERSIGN_SENSITIVE=1` (see "Sensitive
+   commands"). Both are set by the caller, so they are displayed or used to
+   narrow where the request is shown, never trusted for anything else.
+   sudo has no way to pass extra data to PAM, and the variables live in
+   `sudo`'s own environment (`COUNTERSIGN_REASON=… sudo …`), so they work
+   with `NOSETENV`.
 4. Sends the request with the host key from
    `/etc/countersign/host.key` (root-only 0600; the agent cannot read it).
 5. Long-polls until a final answer or its deadline (default 5 minutes, below
@@ -124,31 +129,94 @@ Command patterns in policies are globs over the command as shown. Write them
 for exact commands or arguments the command cannot abuse: `apt *` also
 matches `apt -o APT::Update::Pre-Invoke::=sh …`.
 
+### Sensitive commands
+
+Some command lines are better kept out of chat channels (internal host or
+path names, customer identifiers). The caller can ask for that with
+`COUNTERSIGN_SENSITIVE=1`, and policies can ask for it too.
+
+What it changes — display only:
+
+- Discord, ntfy and webhooks get "Sensitive approval request from
+  &lt;host&gt; (&lt;policy&gt;)" and countersign's link, nothing from the
+  command line. Approving happens in the web UI only, as for commands too long
+  for chat.
+- The web UI shows the full request to approvers as usual.
+
+What it does not change:
+
+- The audit record keeps the full command, user, runas and cwd. Unlike
+  confidential questions (`docs/design/questions.md`), approvals have no
+  "do not keep" option: the record of what ran as root is the reason
+  approvals exist, and a flag set by the requester must not be able to remove
+  it.
+- Approvers always see everything they approve.
+
+Policy field:
+
+```toml
+sensitive = "honor"   # "honor" (default): follow the caller's flag
+                      # "ignore": always show in chat
+                      # "always": never show this policy's commands in chat
+```
+
+The flag does not protect secrets. A command line is visible to every user
+on the host while it runs (`ps`, `/proc/*/cmdline`), and sudo writes it to
+its own log. Secrets must not be passed as arguments at all.
+
+### Wrapper (optional)
+
+A thin client mode of the helper for callers that prefer flags to
+environment variables:
+
+```sh
+countersign-sudo run [--reason TEXT] [--sensitive] -- apt upgrade
+```
+
+It sets `COUNTERSIGN_REASON` / `COUNTERSIGN_SENSITIVE` and executes `sudo --`
+with the command, nothing else.
+
+- It is a convenience, not the enforcement point. A plain `sudo` still goes
+  through PAM and the helper and needs the same approval; it just has no
+  reason attached.
+- It never talks to the intake API itself. Doing so would need the host key,
+  which is readable by root only so that the agent cannot create requests
+  outside sudo.
+- It runs as the caller, unprivileged; the same binary acts as the PAM helper
+  only when started by `pam_exec` (`PAM_TYPE` set, parent is sudo).
+
 ## countersign side
 
 ### Intake listener
 
-A second listener for machines, bound to the tailnet address only (never
-behind Cloudflare Access, never public):
+A second listener for machines. It always serves HTTPS, because the host key
+is the only thing that authenticates a host and the network is not trusted
+(see `deployment.md`): countersign either terminates TLS itself or sits
+behind a reverse proxy or tunnel on a loopback or private address.
 
 ```toml
 [intake]
-listen = "100.64.0.10:8443"
+listen = "0.0.0.0:8443"
+tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/countersign/tls/key.pem" }
+# or: listen = "127.0.0.1:8081" with behind_proxy = true
 ```
 
-The tailnet already encrypts and authenticates traffic between nodes, so
-plain HTTP is acceptable on this listener; TLS can be added later.
+An access layer in front of it (single sign-on for browsers) would block the
+hosts; put it only in front of the web UI. A mesh VPN or private network is
+welcome as defence in depth, but nothing relies on it.
 
 ### Host authentication
 
-Each target host is configured with a name and the SHA-256 of its key, so
-countersign never stores the key itself:
+Each target host is a `[[client]]` with the `approval` scope (the default),
+configured with an id and the SHA-256 of its key, so countersign never stores
+the key itself (see `identity-model.md` for clients and scopes):
 
 ```toml
-[[host]]
-name = "web-1"
-key_sha256 = "…"              # printed by `countersign host-key <file>`
-allowed_ips = ["100.64.0.21"] # optional extra check on the peer address
+[[client]]
+id = "web-1"
+auth = { host_key_sha256 = "…" } # printed by `countersign host-key <file>`
+allowed_ips = ["192.0.2.21"]     # optional extra check on the client address
+# backend = "sudo"               # only with more than one host backend
 ```
 
 The key is sent as `Authorization: Bearer <key>` and compared by hash in
@@ -163,23 +231,23 @@ cshk_<43 chars: base64url of 32 random bytes><6 chars: base64url checksum>
 ```
 
 - `countersign host-key` generates the key (from the OS CSPRNG) and prints
-  the `key_sha256` line for the config; the key itself goes straight to a
+  the `auth` line for the `[[client]]`; the key itself goes straight to a
   0600 file for the target host.
 - The checksum is the base64url of the first 4 bytes of SHA-256 over the
   text before it (`cshk_` and the random part). It catches typos and
   hand-made keys; it is not a secret.
 - The server checks prefix, length, alphabet and checksum before hashing,
   and rejects anything else with the same response as a wrong key. Config
-  loading rejects `key_sha256` values that are not 64 hex digits.
+  loading rejects `host_key_sha256` values that are not 64 hex digits.
 - Limit: someone who deliberately builds a low-entropy key in this format and
   hashes it themselves is not stopped. The format blocks accidents (short
   keys, reused passwords, keys from other systems), not deliberate misuse by
   whoever edits the config. The authenticated host name becomes a fact of the request (it
 is not taken from the body).
 
-Decided: per-host keys. Tailscale identity (LocalAPI `whois`) was considered
-and rejected for now: it would give the daemon access to `tailscaled`'s
-socket and tie countersign to Tailscale.
+Decided: per-host keys. Network-level identity (for example a mesh VPN's
+peer lookup) was considered and rejected: it would tie countersign to one
+network product, and the key works over any network.
 
 ### API
 
@@ -222,9 +290,12 @@ A new push-style backend, `host`, with `discover = false`. Its subjects are
 created by the intake API, not discovered:
 
 - `subject`: `{ backend: <backend name>, kind: "sudo", id: <uuid> }`
-- `facts.requester.id`: the OS user; groups come from the backend's `users`
-  map (`users = { agent = ["agents"] }`). Users not listed are refused.
-- `facts.target`: the host name.
+- `facts.requester.id`: the OS user. countersign sets the requester identity
+  to `unix:<client>#<user>` and resolves it to a `[[workload]]` or
+  `[[person]]` listing that identity; its countersign groups are what
+  `requester_group` matches. Users that resolve to no active actor are
+  refused (`unknown-user`).
+- `facts.source`: the client; `facts.target`: the client id (the host name).
 - `facts.attributes`: `host`, `user`, `runas`, `command` (argv joined with
   spaces), `cwd`.
 - `grant` / `deny` / `revoke` have nothing external to do; the result is the
@@ -291,9 +362,14 @@ pending_timeout = "5m"
 
 ## Open questions
 
-- Reason: is `COUNTERSIGN_REASON` in the caller's environment enough?
+- Reason: is `COUNTERSIGN_REASON` in the caller's environment enough? (The
+  optional `countersign-sudo run` wrapper only makes it easier to set.)
+- Sensitive commands: should countersign also mark a request sensitive by
+  itself when the command looks like it carries a secret (`password=`,
+  `token`)? Not planned yet; such commands are a mistake to fix at the
+  caller.
 - Window scope: same policy + host + user (proposed), or narrower?
 - Assurance: is a Discord tap (`linked`) enough for sudo, or should some
   commands require `fresh-auth` in the web UI?
-- Octelium's role: keep it for connection-level access and audit, or simplify
-  to Tailscale + SSH only.
+- Other access systems (such as Octelium) remain optional backends for
+  connection-level access and audit; sudo approval does not depend on them.

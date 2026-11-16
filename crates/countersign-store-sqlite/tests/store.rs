@@ -2,8 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use countersign_core::{
-    Approver, ApproverSelector, Assurance, ChannelName, MessageRef, PendingSubject, Request, RequestFilter, Requester,
-    Requirements, Store, StoreError, SubjectFacts, SubjectRef, Verdict,
+    ActorId, AdminAction, Asker, Assurance, ChannelName, Confidentiality, Directory, Exclusion, GroupConfig,
+    IdpSnapshot, MessageRef, PendingSubject, PersonConfig, Question, QuestionPolicy, Request, RequestFilter, Requester,
+    Requirements, Response, Roles, Roster, Selector, Standing, Store, StoreError, SubjectFacts, SubjectRef, Suspension,
+    Verdict,
 };
 use countersign_store_sqlite::SqliteStore;
 use jiff::Timestamp;
@@ -16,34 +18,46 @@ fn open_request(subject_id: &str, now: Timestamp) -> (Request, Vec<countersign_c
     let pending = PendingSubject {
         subject: SubjectRef { backend: "oct".into(), kind: "session".into(), id: subject_id.into() },
         facts: SubjectFacts {
-            requester: Requester {
-                id: "agent-1".into(),
-                display_name: None,
-                groups: BTreeSet::new(),
-                identities: BTreeSet::new(),
-            },
-            target: None,
-            requested_ttl: None,
             reason: Some("deploy".into()),
-            attributes: BTreeMap::new(),
+            ..SubjectFacts::new(Requester {
+                id: "agent-1".into(),
+                identity: "unix:web-1#agent-1".into(),
+                ..Requester::default()
+            })
         },
         observed_at: now,
     };
     let reqs = Requirements {
         policy: "p".into(),
-        approvers: vec![ApproverSelector::Group("ops".into())],
+        approvers: vec![Selector::Group("ops".into())],
+        exclude: BTreeSet::from([Exclusion::Requester]),
         quorum: 1,
         min_assurance: Assurance::Web,
         ttl: Duration::from_secs(600),
         pending_timeout: Duration::from_secs(300),
-        allow_self_approval: false,
         grant: countersign_core::GrantMode::Once,
+        require_initiator: false,
     };
-    Request::open(pending, reqs, now)
+    Request::open(pending, reqs, false, now)
 }
 
-fn bob() -> Approver {
-    Approver { id: "bob".into(), display_name: None, groups: ["ops".to_owned()].into(), identities: BTreeSet::new() }
+fn directory() -> Directory {
+    let person = |id: &str| PersonConfig { id: id.into(), display_name: None, identities: vec![] };
+    Directory::new(
+        vec![person("alice"), person("bob")],
+        vec![],
+        vec![GroupConfig { name: "ops".into(), members: vec!["bob".into()], from_idp: vec![] }],
+        Roles::default(),
+    )
+    .unwrap()
+}
+
+fn bob() -> ActorId {
+    "bob".into()
+}
+
+fn roster<'a>(dir: &'a Directory, standing: &'a Standing) -> Roster<'a> {
+    Roster { directory: dir, standing, now: t(0), idp_max_age: Duration::from_secs(3600) }
 }
 
 #[tokio::test]
@@ -84,7 +98,9 @@ async fn optimistic_concurrency() {
     let mut a = store.get_request(r.id).await.unwrap().unwrap();
     let mut b = a.clone();
 
-    let ev_a = a.decide(&bob(), Verdict::Approve, Assurance::Web, "web".into(), None, t(1)).unwrap();
+    let (dir, standing) = (directory(), Standing::default());
+    let ev_a =
+        a.decide(&roster(&dir, &standing), &bob(), Verdict::Approve, Assurance::Web, "web".into(), None, t(1)).unwrap();
     store.update_request(&a, r.version, &ev_a).await.unwrap();
 
     let ev_b = b.withdraw(t(1)).unwrap();
@@ -103,7 +119,9 @@ async fn outbox_lease_retry_and_completion() {
     let (mut r, ev) = open_request("s1", t(0));
     store.insert_request(&r, &ev).await.unwrap();
     let v = r.version;
-    let ev = r.decide(&bob(), Verdict::Approve, Assurance::Web, "web".into(), None, t(1)).unwrap();
+    let (dir, standing) = (directory(), Standing::default());
+    let ev =
+        r.decide(&roster(&dir, &standing), &bob(), Verdict::Approve, Assurance::Web, "web".into(), None, t(1)).unwrap();
     store.update_request(&r, v, &ev).await.unwrap();
 
     let lease = Duration::from_secs(30);
@@ -207,7 +225,7 @@ async fn message_refs_and_account_links() {
     store.link_account(&"slack".into(), "U1", &"bob".into()).await.unwrap();
     let links = store.list_account_links().await.unwrap();
     let summary: Vec<_> =
-        links.iter().map(|l| (l.channel.as_str(), l.external_id.as_str(), l.approver.as_str())).collect();
+        links.iter().map(|l| (l.channel.as_str(), l.external_id.as_str(), l.person.as_str())).collect();
     assert_eq!(summary, [("discord", "123", "carol"), ("slack", "U1", "bob")]);
     assert!(store.unlink_account(&discord, "123").await.unwrap());
     assert!(!store.unlink_account(&discord, "123").await.unwrap(), "already gone");
@@ -231,4 +249,112 @@ async fn file_database_persists_across_reopen() {
     assert_eq!(store.get_request(r.id).await.unwrap(), Some(r));
     store.pool().close().await;
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn question(conf: Confidentiality) -> Question {
+    let policy: QuestionPolicy = toml::from_str(
+        "name = 'q'\nresponders = ['group:ops']\nmin_assurance = 'linked'\nconfidential = 'allow'\nanswer_retention = '1h'\n",
+    )
+    .unwrap();
+    let schema = serde_json::json!({ "type": "object", "properties": { "pin": { "type": "string" } } });
+    Question::ask(
+        Asker { client: "agent-1".into(), actor: Some("alice".into()) },
+        "What is the PIN?".into(),
+        schema,
+        BTreeMap::new(),
+        &policy,
+        conf,
+        t(0),
+    )
+    .0
+}
+
+#[tokio::test]
+async fn questions_are_kept_apart_from_approvals() {
+    let store = SqliteStore::in_memory().await.unwrap();
+    let (r, ev) = open_request("s1", t(0));
+    store.insert_request(&r, &ev).await.unwrap();
+    let q = question(Confidentiality::default());
+    store.insert_question(&q, &[]).await.unwrap();
+
+    assert_eq!(store.get_question(q.id).await.unwrap().as_ref(), Some(&q));
+    assert_eq!(store.get_request(q.id).await.unwrap(), None, "a question is not an approval");
+    assert_eq!(store.get_question(r.id).await.unwrap(), None);
+    assert_eq!(store.list_requests(&RequestFilter::default()).await.unwrap().len(), 1);
+    assert_eq!(store.list_questions(&RequestFilter::default()).await.unwrap(), std::slice::from_ref(&q));
+    assert!(matches!(store.update_request(&r, 7, &[]).await, Err(StoreError::Conflict(_))));
+    assert!(matches!(store.update_question(&q, 7, &[]).await, Err(StoreError::Conflict(_))));
+}
+
+#[tokio::test]
+async fn confidential_content_is_tracked_until_removed() {
+    let store = SqliteStore::in_memory().await.unwrap();
+    let (dir, standing) = (directory(), Standing::default());
+    let mut q = question(Confidentiality { question: false, answer_may_be: true });
+    store.insert_question(&q, &[]).await.unwrap();
+    assert_eq!(store.questions_holding_content().await.unwrap(), [], "open questions are not swept");
+
+    let v = q.version;
+    let content = serde_json::json!({ "pin": "4711" }).as_object().unwrap().clone();
+    let ev = q
+        .respond(
+            &roster(&dir, &standing),
+            &bob(),
+            Response::Accept { content, confidential: true },
+            Assurance::FreshAuth,
+            "web".into(),
+            t(5),
+        )
+        .unwrap();
+    store.update_question(&q, v, &ev).await.unwrap();
+    let held = store.questions_holding_content().await.unwrap();
+    assert_eq!(held.iter().map(|x| x.id).collect::<Vec<_>>(), [q.id]);
+
+    let v = q.version;
+    assert!(q.mark_read(t(6)));
+    store.update_question(&q, v, &[]).await.unwrap();
+    assert_eq!(store.questions_holding_content().await.unwrap(), []);
+    let body: String = sqlx_body(&store, q.id).await;
+    assert!(!body.contains("4711"), "the answer is gone from the row");
+}
+
+async fn sqlx_body(store: &SqliteStore, id: countersign_core::RequestId) -> String {
+    use sqlx::Row;
+    sqlx::query("SELECT body FROM requests WHERE id = ?")
+        .bind(id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+        .get("body")
+}
+
+#[tokio::test]
+async fn suspensions_snapshots_and_admin_actions() {
+    let store = SqliteStore::in_memory().await.unwrap();
+    let s = Suspension { since: t(1), by: "root".into(), reason: Some("lost laptop".into()) };
+    store.suspend(&bob(), &s).await.unwrap();
+    store.suspend(&bob(), &s).await.unwrap(); // replaces
+    let snap = IdpSnapshot { provider: "oidc:https://id.example".into(), groups: ["ops".to_owned()].into(), at: t(2) };
+    store.save_idp_snapshot(&"alice".into(), &snap).await.unwrap();
+
+    let standing = store.standing().await.unwrap();
+    assert_eq!(standing.suspended.get(&bob()), Some(&s));
+    assert_eq!(standing.idp.get(&ActorId::from("alice")), Some(&snap));
+
+    assert!(store.reinstate(&bob()).await.unwrap());
+    assert!(!store.reinstate(&bob()).await.unwrap());
+    assert!(store.suspensions().await.unwrap().is_empty());
+
+    for (i, action) in ["suspend", "reinstate"].into_iter().enumerate() {
+        let a = AdminAction {
+            at: t(i64::try_from(i).unwrap()),
+            by: "root".into(),
+            action: action.into(),
+            target: "bob".into(),
+            detail: None,
+        };
+        store.record_admin_action(&a).await.unwrap();
+    }
+    let actions = store.admin_actions(10).await.unwrap();
+    assert_eq!(actions.iter().map(|a| a.action.as_str()).collect::<Vec<_>>(), ["reinstate", "suspend"]);
 }

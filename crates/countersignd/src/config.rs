@@ -1,16 +1,21 @@
 //! Configuration file loading and validation.
 //!
-//! The main file holds everything; `include` entries may add more
-//! `[[policy]]` and `[[approver]]` tables (e.g. `policies.d/*.toml`). Secrets
-//! never live here: components read them from `*_file` paths or environment
-//! variables.
+//! The main file holds everything; `include` entries may add more persons,
+//! workloads, groups, clients and policies (e.g. `policies.d/*.toml`).
+//! Secrets never live here: components read them from `*_file` paths or
+//! environment variables, and clients are known only by the SHA-256 of their
+//! keys.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use countersign_core::{Approver, ApproverId, ApproverSelector, BackendName, ChannelName, Policy, PolicySet};
+use countersign_core::host_key;
+use countersign_core::{
+    ActorId, BackendName, ChannelName, ClientId, Directory, GroupConfig, PersonConfig, Policy, PolicySet,
+    QuestionPolicy, QuestionPolicySet, Roles, WorkloadConfig,
+};
 use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
@@ -32,10 +37,17 @@ pub struct Config {
     pub engine: EngineConfig,
     pub backends: BTreeMap<BackendName, BackendConfig>,
     pub channels: BTreeMap<ChannelName, ChannelConfig>,
-    pub approvers: Vec<Approver>,
+    pub persons: Vec<PersonConfig>,
+    pub workloads: Vec<WorkloadConfig>,
+    pub groups: Vec<GroupConfig>,
+    pub roles: Roles,
+    pub clients: Vec<ClientConfig>,
     pub policies: PolicySet,
-    /// Where hosts submit subjects (needed by `host` backends).
+    pub question_policies: QuestionPolicySet,
+    /// Where clients submit requests and questions.
     pub intake: Option<crate::intake::IntakeConfig>,
+    /// Built from persons, workloads, groups and roles by validation.
+    directory: Directory,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -44,9 +56,14 @@ pub struct ServerConfig {
     /// Base URL of the web UI, used in links sent to channels and as the
     /// base of the login callback URL.
     pub public_url: String,
-    /// Address the web UI listens on. Keep it private (loopback, tailnet).
+    /// Address the web UI listens on. Without `tls`, it serves plain HTTP
+    /// for a reverse proxy or tunnel that terminates TLS: keep it on a
+    /// loopback or private address.
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
+    /// Terminate TLS here instead.
+    #[serde(default)]
+    pub tls: Option<crate::tls::TlsConfig>,
     /// File with at least 32 bytes of secret key material for session
     /// cookies. Without it a random key is used and sessions end on restart.
     #[serde(default)]
@@ -58,18 +75,28 @@ pub struct ServerConfig {
     /// decision to count as `fresh-auth`.
     #[serde(default = "default_fresh_window", with = "humantime_serde")]
     pub fresh_auth_window: Duration,
+    /// How long groups reported by the identity provider at sign-in count.
+    /// Defaults to `session_ttl`.
+    #[serde(default, with = "humantime_serde")]
+    pub idp_groups_max_age: Option<Duration>,
+}
+
+impl ServerConfig {
+    pub fn idp_max_age(&self) -> Duration {
+        self.idp_groups_max_age.unwrap_or(self.session_ttl)
+    }
 }
 
 /// Whether `ip` is reachable only from a private network (loopback, RFC 1918,
 /// CGNAT/tailnet, link-local, IPv6 unique-local). The unspecified address
 /// (all interfaces) is not.
-pub fn is_private(ip: std::net::IpAddr) -> bool {
+pub fn is_private(ip: IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(v4) => {
+        IpAddr::V4(v4) => {
             let [a, b, ..] = v4.octets();
             v4.is_loopback() || v4.is_private() || v4.is_link_local() || (a == 100 && (64..128).contains(&b))
         }
-        std::net::IpAddr::V6(v6) => {
+        IpAddr::V6(v6) => {
             let first = v6.segments()[0];
             v6.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
         }
@@ -88,7 +115,7 @@ fn default_fresh_window() -> Duration {
     Duration::from_secs(5 * 60)
 }
 
-/// How approvers log in to the web UI.
+/// How persons sign in to the web UI.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
@@ -148,7 +175,7 @@ fn default_poll() -> Duration {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum BackendConfig {
-    /// Hosts that submit `sudo` invocations through the intake API.
+    /// `sudo` invocations that clients submit through the intake API.
     Host(crate::intake::HostBackendConfig),
     #[cfg(feature = "backend-octelium")]
     Octelium(countersign_backend_octelium::OcteliumConfig),
@@ -173,6 +200,56 @@ pub enum ChannelConfig {
     Webhook(countersign_channel_webhook::WebhookConfig),
 }
 
+/// What a client key may be used for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Scope {
+    /// Submit `sudo` approvals (`/intake/v1/requests`).
+    Approval,
+    /// Ask questions (`/intake/v1/questions`).
+    Question,
+}
+
+/// `[[client]]`: a program that talks to the intake API with its own key.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientConfig {
+    /// Also the namespace of the requesters it may name: `unix:<id>#<user>`,
+    /// and the target of its `sudo` requests.
+    pub id: ClientId,
+    pub auth: ClientAuth,
+    /// Defaults to `["approval"]`.
+    #[serde(default = "default_scopes")]
+    pub scopes: BTreeSet<Scope>,
+    /// If set, requests with this key must come from one of these addresses.
+    #[serde(default)]
+    pub allowed_ips: Vec<IpAddr>,
+    /// The `host` backend its approvals belong to. Needed only when there is
+    /// more than one.
+    #[serde(default)]
+    pub backend: Option<BackendName>,
+    /// The actor whose questions this client asks (e.g. an agent workload).
+    #[serde(default)]
+    pub actor: Option<ActorId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientAuth {
+    /// Lowercase hex SHA-256 of the client's `cshk_` key (`countersign keygen --host`).
+    pub host_key_sha256: String,
+}
+
+fn default_scopes() -> BTreeSet<Scope> {
+    BTreeSet::from([Scope::Approval])
+}
+
+impl ClientConfig {
+    pub fn has_scope(&self, scope: Scope) -> bool {
+        self.scopes.contains(&scope)
+    }
+}
+
 /// One file as written on disk.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -191,50 +268,64 @@ struct MainFile {
     #[serde(default)]
     channel: BTreeMap<ChannelName, ChannelConfig>,
     #[serde(default)]
-    approver: Vec<Approver>,
-    #[serde(default)]
-    policy: Vec<Policy>,
+    roles: Roles,
     #[serde(default)]
     intake: Option<crate::intake::IntakeConfig>,
-}
-
-/// An included file: only approvers and policies.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct IncludeFile {
     #[serde(default)]
-    approver: Vec<Approver>,
+    person: Vec<PersonConfig>,
+    #[serde(default)]
+    workload: Vec<WorkloadConfig>,
+    #[serde(default)]
+    group: Vec<GroupConfig>,
+    #[serde(default)]
+    client: Vec<ClientConfig>,
     #[serde(default)]
     policy: Vec<Policy>,
+    #[serde(default)]
+    question_policy: Vec<QuestionPolicy>,
+}
+
+/// The tables that included files may add to.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Lists {
+    #[serde(default)]
+    person: Vec<PersonConfig>,
+    #[serde(default)]
+    workload: Vec<WorkloadConfig>,
+    #[serde(default)]
+    group: Vec<GroupConfig>,
+    #[serde(default)]
+    client: Vec<ClientConfig>,
+    #[serde(default)]
+    policy: Vec<Policy>,
+    #[serde(default)]
+    question_policy: Vec<QuestionPolicy>,
+}
+
+impl MainFile {
+    fn extend(&mut self, other: Lists) {
+        self.person.extend(other.person);
+        self.workload.extend(other.workload);
+        self.group.extend(other.group);
+        self.client.extend(other.client);
+        self.policy.extend(other.policy);
+        self.question_policy.extend(other.question_policy);
+    }
 }
 
 impl Config {
     /// Read, merge includes, and validate.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let main: MainFile = parse_file(path)?;
+        let mut main: MainFile = parse_file(path)?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
-        let mut approvers = main.approver;
-        let mut policies = main.policy;
-        for pattern in &main.include {
-            for file in expand_include(base, pattern)? {
-                let inc: IncludeFile = parse_file(&file)?;
-                approvers.extend(inc.approver);
-                policies.extend(inc.policy);
+        for pattern in std::mem::take(&mut main.include) {
+            for file in expand_include(base, &pattern)? {
+                let inc: Lists = parse_file(&file)?;
+                main.extend(inc);
             }
         }
-        let config = Self {
-            server: main.server,
-            auth: main.auth,
-            store: main.store,
-            engine: main.engine,
-            backends: main.backend,
-            channels: main.channel,
-            approvers,
-            policies: PolicySet { policies },
-            intake: main.intake,
-        };
-        config.validate()?;
-        Ok(config)
+        Self::build(main)
     }
 
     /// Parse a single file with no includes (for tests and tooling).
@@ -244,26 +335,56 @@ impl Config {
         if !main.include.is_empty() {
             return Err(ConfigError::Invalid(vec!["include is not supported for inline configuration".into()]));
         }
-        let config = Self {
+        Self::build(main)
+    }
+
+    fn build(main: MainFile) -> Result<Self, ConfigError> {
+        let MainFile { person, workload, group, client, policy, question_policy, .. } = main;
+        let mut config = Self {
             server: main.server,
             auth: main.auth,
             store: main.store,
             engine: main.engine,
             backends: main.backend,
             channels: main.channel,
-            approvers: main.approver,
-            policies: PolicySet { policies: main.policy },
+            persons: person,
+            workloads: workload,
+            groups: group,
+            roles: main.roles,
+            clients: client,
+            policies: PolicySet { policies: policy },
+            question_policies: QuestionPolicySet { policies: question_policy },
             intake: main.intake,
+            directory: Directory::default(),
         };
         config.validate()?;
         Ok(config)
     }
 
-    pub fn validate(&self) -> Result<(), ConfigError> {
+    /// Everyone in the configuration, checked.
+    pub fn directory(&self) -> &Directory {
+        &self.directory
+    }
+
+    fn validate(&mut self) -> Result<(), ConfigError> {
         let mut errors = Vec::new();
 
-        if !(self.server.public_url.starts_with("https://") || self.server.public_url.starts_with("http://")) {
-            errors.push(format!("server.public_url must be an http(s) URL, got {:?}", self.server.public_url));
+        if !countersign_core::url::is_secure(&self.server.public_url) {
+            errors.push(format!(
+                "server.public_url must be an https:// URL (http:// only for localhost), got {:?}",
+                self.server.public_url
+            ));
+        }
+        if let Some(intake) = &self.intake {
+            errors.extend(intake.problems());
+            if !intake.knows_client_address() {
+                for c in self.clients.iter().filter(|c| !c.allowed_ips.is_empty()) {
+                    errors.push(format!(
+                        "client {}: allowed_ips cannot be checked behind a proxy without intake.client_ip_header",
+                        c.id
+                    ));
+                }
+            }
         }
         if self.server.fresh_auth_window.is_zero() || self.server.fresh_auth_window > Duration::from_secs(3600) {
             errors.push("server.fresh_auth_window must be between 1s and 1h".into());
@@ -271,16 +392,18 @@ impl Config {
         if self.server.session_ttl < Duration::from_secs(60) {
             errors.push("server.session_ttl must be at least 1m".into());
         }
+        if self.server.idp_groups_max_age.is_some_and(|d| d < Duration::from_secs(60)) {
+            errors.push("server.idp_groups_max_age must be at least 1m".into());
+        }
         if self.engine.poll_interval < Duration::from_secs(1) {
             errors.push("engine.poll_interval must be at least 1s".into());
         }
 
-        let mut ids = BTreeSet::new();
-        for a in &self.approvers {
-            if !ids.insert(&a.id) {
-                errors.push(format!("approver {}: duplicate id", a.id));
-            }
+        match Directory::new(self.persons.clone(), self.workloads.clone(), self.groups.clone(), self.roles.clone()) {
+            Ok(d) => self.directory = d,
+            Err(es) => errors.extend(es),
         }
+        let dir = &self.directory;
 
         if let Err(es) = self.policies.validate() {
             errors.extend(es.into_iter().map(|e| e.to_string()));
@@ -292,50 +415,93 @@ impl Config {
                 errors.push(format!("policy {}: unknown backend {b}", p.name));
             }
             for sel in &p.approvers {
-                match sel {
-                    ApproverSelector::Approver(id) if !ids.contains(id) => {
-                        errors.push(format!("policy {}: unknown approver {id}", p.name));
-                    }
-                    ApproverSelector::Group(g) if !self.approvers.iter().any(|a| a.groups.contains(g)) => {
-                        errors.push(format!("policy {}: no approver is in group {g}", p.name));
-                    }
-                    _ => {}
+                if let Some(problem) = dir.selector_problem(sel) {
+                    errors.push(format!("policy {}: {problem}", p.name));
+                }
+            }
+        }
+        if let Err(es) = self.question_policies.validate() {
+            errors.extend(es);
+        }
+        for p in &self.question_policies.policies {
+            for sel in &p.responders {
+                if let Some(problem) = dir.selector_problem(sel) {
+                    errors.push(format!("question_policy {}: {problem}", p.name));
                 }
             }
         }
 
-        let mut keys = BTreeSet::new();
-        for (name, b) in &self.backends {
-            if let BackendConfig::Host(h) = b {
-                errors.extend(h.problems(name));
-                for host in &h.hosts {
-                    if !keys.insert(host.key_sha256.to_ascii_lowercase()) {
-                        errors.push(format!("backend {name}: host {}: key_sha256 is used by another host", host.name));
-                    }
-                }
-                if self.intake.is_none() {
-                    errors.push(format!("backend {name}: host backends need an [intake] section"));
-                }
-            }
+        errors.extend(self.client_problems());
+        if self.roles.member.is_empty() {
+            errors.push("roles.member is empty: nobody could decide or answer anything".into());
         }
 
         if errors.is_empty() { Ok(()) } else { Err(ConfigError::Invalid(errors)) }
     }
 
-    /// The `host` backends, by name.
-    pub fn host_backends(&self) -> BTreeMap<BackendName, crate::intake::HostBackendConfig> {
-        self.backends
-            .iter()
-            .filter_map(|(n, b)| match b {
-                BackendConfig::Host(h) => Some((n.clone(), h.clone())),
-                #[allow(unreachable_patterns)]
-                _ => None,
-            })
-            .collect()
+    fn client_problems(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        let hosts: Vec<&BackendName> =
+            self.backends.iter().filter(|(_, b)| matches!(b, BackendConfig::Host(_))).map(|(n, _)| n).collect();
+        let mut ids = BTreeSet::new();
+        let mut keys = BTreeSet::new();
+        for c in &self.clients {
+            let id = &c.id;
+            if !countersign_core::actor::is_name(id.as_str()) {
+                errors.push(format!("client {id:?}: ids are letters, digits, '-', '_' and '.'"));
+            }
+            if !ids.insert(id) {
+                errors.push(format!("client {id}: duplicate id"));
+            }
+            if host_key::parse_digest_hex(&c.auth.host_key_sha256).is_none() {
+                errors.push(format!("client {id}: auth.host_key_sha256 must be 64 hex digits"));
+            } else if !keys.insert(c.auth.host_key_sha256.to_ascii_lowercase()) {
+                errors.push(format!("client {id}: auth.host_key_sha256 is used by another client"));
+            }
+            if c.scopes.is_empty() {
+                errors.push(format!("client {id}: scopes is empty"));
+            }
+            if c.has_scope(Scope::Approval) {
+                match &c.backend {
+                    Some(b) if !hosts.contains(&b) => {
+                        errors.push(format!("client {id}: backend {b} is not a host backend"));
+                    }
+                    None if hosts.len() != 1 => errors.push(format!(
+                        "client {id}: the approval scope needs a host backend; set backend (there are {})",
+                        hosts.len()
+                    )),
+                    _ => {}
+                }
+            } else if c.backend.is_some() {
+                errors.push(format!("client {id}: backend is only used with the approval scope"));
+            }
+            if let Some(a) = &c.actor
+                && self.directory.actor(a).is_none()
+            {
+                errors.push(format!("client {id}: unknown actor {a}"));
+            }
+            if c.actor.is_some() && !c.has_scope(Scope::Question) {
+                errors.push(format!("client {id}: actor is only used with the question scope"));
+            }
+        }
+        if !self.clients.is_empty() && self.intake.is_none() {
+            errors.push("clients need an [intake] section".into());
+        }
+        if !hosts.is_empty() && self.intake.is_none() {
+            errors.push("host backends need an [intake] section".into());
+        }
+        errors
     }
 
-    pub fn approver_map(&self) -> BTreeMap<ApproverId, Approver> {
-        self.approvers.iter().map(|a| (a.id.clone(), a.clone())).collect()
+    /// The host backend a client's approvals go to.
+    pub fn client_backend(&self, client: &ClientConfig) -> Option<BackendName> {
+        client.backend.clone().or_else(|| {
+            let mut hosts = self.backends.iter().filter(|(_, b)| matches!(b, BackendConfig::Host(_)));
+            match (hosts.next(), hosts.next()) {
+                (Some((n, _)), None) => Some(n.clone()),
+                _ => None,
+            }
+        })
     }
 }
 
@@ -390,9 +556,11 @@ fn wildcard(pattern: &str, text: &str) -> bool {
 mod tests {
     use super::*;
 
+    const KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+
     pub(crate) const EXAMPLE: &str = r#"
         [server]
-        public_url = "https://countersign.example.ts.net"
+        public_url = "https://countersign.example.com"
 
         [store]
         path = "/tmp/cs.db"
@@ -408,14 +576,20 @@ mod tests {
         [channel.log]
         type = "log"
 
-        [[approver]]
+        [[person]]
         id = "alice"
-        groups = ["ops"]
         identities = ["oidc:https://id.example.com#alice"]
+
+        [[group]]
+        name = "ops"
+        members = ["alice"]
+
+        [roles]
+        member = ["group:ops"]
 
         [[policy]]
         name = "agents"
-        match = { backend = "oct", requester_group = "agents" }
+        match = { backend = "oct", backend_group = "agents" }
         approvers = ["group:ops"]
         max_ttl = "30m"
     "#;
@@ -427,15 +601,20 @@ mod tests {
         assert_eq!(c.engine.unmatched, Unmatched::Deny);
         assert!(matches!(c.backends[&BackendName::from("oct")], BackendConfig::Octelium(_)));
         assert!(matches!(c.channels[&ChannelName::from("log")], ChannelConfig::Log {}));
-        assert_eq!(c.approvers.len(), 1);
+        assert_eq!(c.persons.len(), 1);
+        assert!(c.directory().actor(&"alice".into()).is_some());
         assert_eq!(c.policies.policies.len(), 1);
+        assert_eq!(c.server.idp_max_age(), c.server.session_ttl);
     }
 
     #[test]
-    fn defaults() {
-        let c = Config::from_toml("[server]\npublic_url = \"http://localhost:8080\"\n").unwrap();
-        assert_eq!(c.store.path, default_store_path());
-        assert_eq!(c.engine, EngineConfig::default());
+    fn needs_members() {
+        let ConfigError::Invalid(errs) =
+            Config::from_toml("[server]\npublic_url = \"http://localhost:8080\"\n").unwrap_err()
+        else {
+            panic!()
+        };
+        assert!(errs.join("\n").contains("roles.member"));
     }
 
     #[test]
@@ -444,30 +623,100 @@ mod tests {
             [server]
             public_url = "localhost"
 
-            [[approver]]
+            [[person]]
             id = "a"
-            [[approver]]
+            [[person]]
             id = "a"
+
+            [roles]
+            member = ["person:a"]
 
             [[policy]]
             name = "p"
             match = { backend = "missing" }
-            approvers = ["approver:ghost", "group:nobody"]
+            approvers = ["person:ghost", "group:nobody"]
             max_ttl = "1m"
+
+            [[question_policy]]
+            name = "q"
+            responders = ["person:nobody"]
         "#;
         let ConfigError::Invalid(errs) = Config::from_toml(text).unwrap_err() else { panic!() };
         let all = errs.join("\n");
-        for needle in
-            ["public_url", "duplicate id", "unknown backend missing", "unknown approver ghost", "group nobody"]
+        for needle in ["public_url", "duplicate", "unknown backend missing", "ghost", "nobody", "question_policy q"] {
+            assert!(all.contains(needle), "missing {needle:?} in:\n{all}");
+        }
+    }
+
+    #[test]
+    fn checks_clients() {
+        let base = "[server]\npublic_url = 'https://x'\n[[person]]\nid = 'a'\n[roles]\nmember = ['person:a']\n\
+             [intake]\nlisten = '127.0.0.1:9000'\nbehind_proxy = true\n[backend.h1]\ntype = 'host'\n"
+            .to_string();
+        let ok = format!(
+            "{base}[[client]]\nid = 'web-1'\nauth = {{ host_key_sha256 = '{KEY}' }}\n\
+             [[client]]\nid = 'agent'\nauth = {{ host_key_sha256 = '{}' }}\nscopes = ['question']\nactor = 'a'\n",
+            KEY.replace('1', "2")
+        );
+        let c = Config::from_toml(&ok).unwrap();
+        assert_eq!(c.client_backend(&c.clients[0]), Some("h1".into()), "the only host backend");
+        assert!(!c.clients[1].has_scope(Scope::Approval));
+
+        let bad = format!(
+            "{base}[backend.h2]\ntype = 'host'\n\
+             [[client]]\nid = 'web-1'\nauth = {{ host_key_sha256 = '{KEY}' }}\nactor = 'ghost'\n\
+             [[client]]\nid = 'web-1'\nauth = {{ host_key_sha256 = '{KEY}' }}\nbackend = 'h1'\n"
+        );
+        let ConfigError::Invalid(errs) = Config::from_toml(&bad).unwrap_err() else { panic!() };
+        let all = errs.join("\n");
+        for needle in ["set backend", "duplicate id", "used by another client", "unknown actor ghost", "question scope"]
         {
             assert!(all.contains(needle), "missing {needle:?} in:\n{all}");
         }
     }
 
     #[test]
+    fn public_url_must_be_https_except_on_this_machine() {
+        let text =
+            "[server]\npublic_url = 'http://cs.example.test'\n[[person]]\nid = 'a'\n[roles]\nmember = ['person:a']\n";
+        let ConfigError::Invalid(errs) = Config::from_toml(text).unwrap_err() else { panic!() };
+        assert!(errs.join("\n").contains("https://"), "{errs:?}");
+    }
+
+    #[test]
+    fn intake_must_be_https_or_behind_a_private_proxy() {
+        let base = "[server]\npublic_url = 'https://x'\n[[person]]\nid = 'a'\n[roles]\nmember = ['person:a']\n";
+        let client = format!(
+            "[[client]]\nid = 'web-1'\nauth = {{ host_key_sha256 = '{KEY}' }}\nscopes = ['question']\n\
+             actor = 'a'\nallowed_ips = ['192.0.2.1']\n"
+        );
+        let errors = |intake: &str| match Config::from_toml(&format!("{base}[intake]\n{intake}\n{client}")) {
+            Ok(_) => String::new(),
+            Err(ConfigError::Invalid(e)) => e.join("\n"),
+            Err(e) => panic!("{e}"),
+        };
+        assert!(errors("listen = '127.0.0.1:9000'").contains("set tls"));
+        assert!(errors("listen = '0.0.0.0:9000'\nbehind_proxy = true").contains("loopback or private"));
+        assert!(
+            errors("listen = '127.0.0.1:9000'\nbehind_proxy = true\ntls = { cert_file = 'c', key_file = 'k' }")
+                .contains("exclude each other")
+        );
+        assert!(errors("listen = '127.0.0.1:9000'\nbehind_proxy = true").contains("allowed_ips cannot be checked"));
+        assert!(errors("listen = '127.0.0.1:9000'\nclient_ip_header = 'x-forwarded-for'").contains("only used with"));
+        assert!(
+            errors("listen = '127.0.0.1:9000'\nbehind_proxy = true\nclient_ip_header = 'bad header'")
+                .contains("not a header name")
+        );
+        assert_eq!(errors("listen = '127.0.0.1:9000'\nbehind_proxy = true\nclient_ip_header = 'x-forwarded-for'"), "");
+        // Terminating TLS itself, it may listen anywhere; the files are read at startup.
+        assert_eq!(errors("listen = '0.0.0.0:9000'\ntls = { cert_file = 'c', key_file = 'k' }"), "");
+    }
+
+    #[test]
     fn rejects_unknown_keys_and_types() {
         assert!(Config::from_toml("[server]\npublic_url='http://x'\npublic_ulr='y'\n").is_err());
         assert!(Config::from_toml("[server]\npublic_url='http://x'\n[backend.b]\ntype='nope'\n").is_err());
+        assert!(Config::from_toml("[server]\npublic_url='http://x'\n[[approver]]\nid='a'\n").is_err(), "old tables");
     }
 
     #[test]
@@ -477,7 +726,12 @@ mod tests {
         std::fs::write(
             dir.join("config.toml"),
             "include = [\"policies.d/*.toml\"]\n[server]\npublic_url = \"http://localhost\"\n\
-             [[approver]]\nid = \"alice\"\ngroups = [\"ops\"]\n",
+             [roles]\nmember = [\"group:ops\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("policies.d").join("00-people.toml"),
+            "[[person]]\nid = \"alice\"\n[[group]]\nname = \"ops\"\nmembers = [\"alice\"]\n",
         )
         .unwrap();
         for (file, name) in [("20-b.toml", "second"), ("10-a.toml", "first")] {
@@ -492,6 +746,7 @@ mod tests {
         let c = Config::load(&dir.join("config.toml")).unwrap();
         let names: Vec<_> = c.policies.policies.iter().map(|p| p.name.as_str().to_owned()).collect();
         assert_eq!(names, ["first", "second"]);
+        assert_eq!(c.persons.len(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -500,23 +755,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("countersignd-config-{}", countersign_core::RequestId::new()));
         std::fs::create_dir_all(&dir).unwrap();
         let main = dir.join("config.toml");
-        std::fs::write(
-            &main,
-            "include = [\"policies.d/*.toml\"]
-[server]
-public_url = \"http://localhost\"
-",
-        )
-        .unwrap();
+        let head =
+            "[server]\npublic_url = \"http://localhost\"\n[[person]]\nid = \"a\"\n[roles]\nmember = [\"person:a\"]\n";
+        std::fs::write(&main, format!("include = [\"policies.d/*.toml\"]\n{head}")).unwrap();
         Config::load(&main).unwrap();
-        std::fs::write(
-            &main,
-            "include = [\"extra.toml\"]
-[server]
-public_url = \"http://localhost\"
-",
-        )
-        .unwrap();
+        std::fs::write(&main, format!("include = [\"extra.toml\"]\n{head}")).unwrap();
         assert!(matches!(Config::load(&main), Err(ConfigError::Read { .. })));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -525,7 +768,8 @@ public_url = \"http://localhost\"
     fn example_file_is_valid() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
         let c = Config::load(&path).unwrap();
-        assert_eq!(c.policies.policies.len(), 1);
+        assert_ne!(c.policies.policies, [] as [countersign_core::Policy; 0]);
+        assert_ne!(c.question_policies.policies, [] as [countersign_core::QuestionPolicy; 0]);
     }
 
     #[test]

@@ -19,10 +19,13 @@
 //! | `deny` | `{"subject"}` | `{}` |
 //! | `revoke` | `{"subject", "backend_ref"?}` | `{}` |
 //!
-//! `facts` is `{"requester": {"id", "display_name"?, "groups"?, "identities"?},
-//! "target"?, "requested_ttl"? (e.g. "30m"), "reason"?, "attributes"?}`.
-//! Only report facts the helper can vouch for; `reason` is shown, never trusted.
-//! Times are RFC 3339.
+//! `facts` is `{"requester": {"id", "display_name"?, "groups"?},
+//! "initiator"?: {"identity", "display_name"?}, "target"?, "requested_ttl"?
+//! (e.g. "30m"), "reason"?, "attributes"?, "sensitive"?}`. Unknown keys are
+//! refused. Only report facts the helper can vouch for; `reason` is shown,
+//! never trusted. countersign names the requester `exec:<backend>#<id>`; the
+//! initiator is a recognition identity such as `github:<user id>`, the person
+//! who caused the request. Times are RFC 3339.
 //!
 //! On failure, exit non-zero and optionally print
 //! `{"error": {"kind": "not-found" | "conflict" | "unavailable" | "unsupported" | "other", "message": "..."}}`.
@@ -133,11 +136,71 @@ struct WireSubject {
     id: String,
 }
 
+/// `facts` as the helper may write them.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireFacts {
+    requester: WireRequester,
+    #[serde(default)]
+    initiator: Option<WireInitiator>,
+    #[serde(default)]
+    target: Option<String>,
+    #[serde(default, with = "humantime_serde")]
+    requested_ttl: Option<Duration>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    attributes: BTreeMap<String, String>,
+    #[serde(default)]
+    sensitive: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireRequester {
+    id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    groups: std::collections::BTreeSet<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireInitiator {
+    identity: String,
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+impl From<WireFacts> for SubjectFacts {
+    fn from(w: WireFacts) -> Self {
+        Self {
+            initiator: w.initiator.map(|i| countersign_core::Initiator {
+                identity: i.identity,
+                display_name: i.display_name,
+                actor: None,
+            }),
+            target: w.target,
+            requested_ttl: w.requested_ttl,
+            reason: w.reason,
+            attributes: w.attributes,
+            sensitive: w.sensitive,
+            ..SubjectFacts::new(countersign_core::Requester {
+                id: w.requester.id,
+                display_name: w.requester.display_name,
+                groups: w.requester.groups,
+                ..countersign_core::Requester::default()
+            })
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct WirePending {
     kind: String,
     id: String,
-    facts: SubjectFacts,
+    facts: WireFacts,
     #[serde(default)]
     observed_at: Option<Timestamp>,
 }
@@ -149,7 +212,7 @@ struct DiscoverResponse {
 
 #[derive(Debug, Deserialize)]
 struct VerifyResponse {
-    facts: SubjectFacts,
+    facts: WireFacts,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -216,6 +279,10 @@ impl<R: Runner> AccessBackend for ExecBackend<R> {
         &self.name
     }
 
+    fn identity_scheme(&self) -> &'static str {
+        "exec"
+    }
+
     fn capabilities(&self) -> BackendCaps {
         self.caps
     }
@@ -228,7 +295,7 @@ impl<R: Runner> AccessBackend for ExecBackend<R> {
             .map(|p| {
                 Ok(PendingSubject {
                     subject: self.subject(p.kind, p.id)?,
-                    facts: p.facts,
+                    facts: p.facts.into(),
                     observed_at: p.observed_at.unwrap_or(now),
                 })
             })
@@ -237,7 +304,7 @@ impl<R: Runner> AccessBackend for ExecBackend<R> {
 
     async fn verify(&self, subject: &SubjectRef) -> Result<SubjectFacts, BackendError> {
         let res: VerifyResponse = self.call("verify", json!({ "subject": self.wire(subject)? })).await?;
-        Ok(res.facts)
+        Ok(res.facts.into())
     }
 
     async fn grant(&self, subject: &SubjectRef, ttl: Duration) -> Result<GrantHandle, BackendError> {

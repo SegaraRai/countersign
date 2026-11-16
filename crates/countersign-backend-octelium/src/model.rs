@@ -117,19 +117,4 @@ pub(crate) struct UserSpec {
     pub email: Option<String>,
     #[serde(default)]
     pub groups: Vec<String>,
-    #[serde(default)]
-    pub authentication: Option<UserAuthentication>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct UserAuthentication {
-    #[serde(default)]
-    pub identities: Vec<Identity>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Identity {
-    pub identity_provider: String,
-    pub identifier: String,
 }

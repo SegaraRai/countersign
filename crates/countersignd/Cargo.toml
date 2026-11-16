@@ -38,6 +38,7 @@ getrandom.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["signal", "time", "sync", "net"] }
+tokio-rustls.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

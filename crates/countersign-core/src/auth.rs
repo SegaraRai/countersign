@@ -22,12 +22,16 @@ pub struct LoginStart {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerifiedLogin {
     /// Globally namespaced identity, matched against
-    /// [`crate::Approver::identities`] (e.g. `oidc:<issuer>#<sub>`).
+    /// sign-in identities of persons (e.g. `oidc:<issuer>#<sub>`).
     pub identity: String,
     /// When the user actually authenticated at the identity provider, if it
     /// says so. Used to decide whether a decision is [`crate::Assurance::FreshAuth`].
     pub auth_time: Option<Timestamp>,
     pub display_name: Option<String>,
+    /// The provider (`oidc:<issuer>`) and the groups it reported, when it
+    /// sends a `groups` claim. Count only through mappings in the config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub groups: Option<(String, std::collections::BTreeSet<String>)>,
 }
 
 #[derive(Debug, thiserror::Error)]

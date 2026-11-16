@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}Admin · countersign{% endblock %}
+{% block content %}
+<p><a href="/">&larr; All requests</a></p>
+{% if let Some(e) = error %}<div class="flash flash-error">{{ e }}</div>{% endif %}
+<h1>People and workloads</h1>
+<p class="muted">Persons, workloads, groups and roles come from the configuration. Suspensions take effect at once:
+   a suspended person cannot sign in, decide or answer, their pending approvals stop counting, and a suspended
+   workload's open requests are withdrawn or revoked. Lifting a suspension needs a fresh sign-in.</p>
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Id</th><th>Kind</th><th>Status</th><th>Groups</th><th>Roles</th>{% if admin %}<th></th>{% endif %}</tr></thead>
+  <tbody>
+  {% for a in actors %}
+  <tr>
+    <td><strong>{{ a.id }}</strong>{% if a.name != a.id %} <span class="muted">{{ a.name }}</span>{% endif %}
+      {% if !a.owners.is_empty() %}<div class="muted">owners: {{ a.owners }}</div>{% endif %}</td>
+    <td>{{ a.kind }}</td>
+    <td>{% if a.suspended %}<span class="state state-denied">suspended</span> <span class="muted">{{ a.status }}</span>{% else %}{{ a.status }}{% endif %}</td>
+    <td>{{ a.groups }}</td>
+    <td>{{ a.roles }}</td>
+    {% if admin %}
+    <td>
+      <form method="post" action="/admin/action">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="actor" value="{{ a.id }}">
+        {% if a.suspended %}
+        <button type="submit" name="action" value="reinstate">Lift suspension</button>
+        {% else %}
+        <input type="text" name="reason" placeholder="Reason" maxlength="500" style="max-width: 12rem">
+        <button class="deny" type="submit" name="action" value="suspend">Suspend</button>
+        {% endif %}
+        {% if a.kind == "person" %}
+        <button type="submit" name="action" value="revoke-approved-by">Revoke what they approved</button>
+        {% endif %}
+      </form>
+    </td>
+    {% endif %}
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<h2>Chat links</h2>
+{% if links.is_empty() %}
+<p class="muted">No chat accounts are linked.</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Channel</th><th>Account</th><th>Person</th><th>Linked</th>{% if admin %}<th></th>{% endif %}</tr></thead>
+  <tbody>
+  {% for l in links %}
+  <tr>
+    <td>{{ l.channel }}</td><td><code>{{ l.external_id }}</code></td><td>{{ l.person }}</td><td class="muted">{{ l.linked }}</td>
+    {% if admin %}
+    <td>
+      <form method="post" action="/admin/action">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="channel" value="{{ l.channel }}">
+        <input type="hidden" name="external_id" value="{{ l.external_id }}">
+        <button type="submit" name="action" value="unlink">Unlink</button>
+      </form>
+    </td>
+    {% endif %}
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+
+<h2>Admin actions</h2>
+{% if actions.is_empty() %}
+<p class="muted">None yet.</p>
+{% else %}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>At</th><th>By</th><th>Action</th><th>Target</th><th>Detail</th></tr></thead>
+  <tbody>
+  {% for a in actions %}
+  <tr><td class="muted">{{ a.at }}</td><td>{{ a.by }}</td><td>{{ a.action }}</td><td>{{ a.target }}</td><td>{% if let Some(d) = a.detail %}{{ d }}{% endif %}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

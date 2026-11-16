@@ -1,22 +1,32 @@
 # countersignd configuration. Validate with: countersignd --config <file> check
 # Secrets never go in this file; components read them from *_file paths or
-# environment variables. SIGHUP reloads [[approver]] and [[policy]].
+# environment variables. SIGHUP reloads [[person]], [[workload]], [[group]],
+# [roles], [[client]], [[policy]] and [[question_policy]]; other sections need
+# a restart.
 
-# Extra files with [[approver]] / [[policy]] tables, relative to this file.
+# Extra files with [[person]] / [[workload]] / [[group]] / [[client]] /
+# [[policy]] / [[question_policy]] tables, relative to this file.
 include = ["policies.d/*.toml"]
 
 [server]
 # Base URL of the web UI, used in links sent to channels and for the login
 # callback (<public_url>/auth/callback).
-public_url = "https://countersign.example.ts.net"
-# Keep the listener private (loopback behind a proxy, or a tailnet address).
+# Must be https:// (http:// only for localhost while trying things out).
+public_url = "https://countersign.example.com"
+# Without `tls`, the web UI serves plain HTTP for a reverse proxy or tunnel
+# that terminates TLS: keep it on a loopback or private address.
 listen = "127.0.0.1:8080"
+# Or terminate TLS here (certificates are read at startup):
+# tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/countersign/tls/key.pem" }
 # 32+ random bytes, e.g. `head -c 64 /dev/urandom > session.key`. Without it,
 # web sessions end whenever the daemon restarts.
 session_key_file = "/etc/countersign/session.key"
 session_ttl = "12h"
 # A decision is `fresh-auth` while the IdP sign-in is at most this old.
 fresh_auth_window = "5m"
+# How long groups from the IdP's `groups` claim count after a sign-in
+# (only through [[group]] from_idp mappings). Defaults to session_ttl.
+# idp_groups_max_age = "12h"
 
 [auth.oidc]
 issuer = "https://id.example.com"
@@ -40,12 +50,14 @@ domain = "octelium.example.com"
 # command_timeout = "30s"
 # Log in again with this token when the Octelium session ends (clientDuration).
 # auth_token_file = "/etc/countersign/octelium-token"
-# Map Octelium identity providers to approver identities (self-approval checks).
-identity_providers = { pocket = "oidc:https://id.example.com" }
+# Requesters are named octelium:oct-main#<user>; list that identity on a
+# [[workload]] or [[person]] to recognize them.
 
 # Exec: any program speaking countersign's JSON protocol (see the
 # countersign-backend-exec crate docs). Runs without a shell and with a
 # cleared environment; only `env` (and a default PATH) is passed.
+# Requesters are named exec:<backend>#<id>; a helper may also report an
+# initiator (e.g. github:<user id> for a CI run).
 # [backend.helper]
 # type = "exec"
 # command = ["/usr/local/lib/countersign/helper"]
@@ -55,30 +67,48 @@ identity_providers = { pocket = "oidc:https://id.example.com" }
 # native_expiry = false  # countersign calls `revoke` when the TTL ends
 
 # Host: target hosts submit `sudo` invocations through the intake API and
-# wait for the outcome (see docs/design/sudo-approval.md). Needs [intake].
-# [backend.sudo]
-# type = "host"
-# # OS users whose sudo goes through countersign, with their requester groups.
-# users = { agent = ["agents"] }
-#
-# [[backend.sudo.host]]
-# name = "web-1"
-# # `countersign host-key /etc/countersign/host.key` on the host prints this
-# # line; the key file stays on the host.
-# key_sha256 = "<64 hex digits>"
-# allowed_ips = ["100.64.0.21"]   # optional
+# wait for the outcome (see docs/design/sudo-approval.md). The hosts are
+# [[client]] entries with the "approval" scope. Needs [intake].
+[backend.sudo]
+type = "host"
 
-# Intake API for hosts. Plain HTTP: bind it to a private (tailnet) address only.
-# [intake]
-# listen = "100.64.0.10:8443"
-# max_pending_per_host = 10
+# Intake API for clients: hosts asking for sudo approval, programs asking
+# questions. Clients authenticate with their key alone, and the API is always
+# HTTPS: either countersign terminates TLS itself ...
+[intake]
+listen = "0.0.0.0:8443"
+tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/countersign/tls/key.pem" }
+# ... or a reverse proxy or tunnel does, forwarding plain HTTP to a loopback
+# or private address:
+# listen = "127.0.0.1:8081"
+# behind_proxy = true
+# client_ip_header = "x-forwarded-for"  # only needed for allowed_ips; last entry counts
+max_pending_per_client = 10
+
+# A program that talks to the intake API with its own key.
+# `countersign host-key /etc/countersign/host.key` on the client prints the
+# auth line; the key file stays there.
+[[client]]
+id = "web-1"
+auth = { host_key_sha256 = "0000000000000000000000000000000000000000000000000000000000000001" }
+scopes = ["approval"]            # the default
+allowed_ips = ["192.0.2.21"]     # optional extra check, never a substitute for the key
+# backend = "sudo"               # needed only with more than one host backend
+
+# A client that asks questions for a workload (e.g. an AI agent's MCP bridge).
+[[client]]
+id = "agent-bridge"
+auth = { host_key_sha256 = "0000000000000000000000000000000000000000000000000000000000000002" }
+scopes = ["question"]
+actor = "deploy-agent"
 
 [channel.log]
 type = "log"
 
 # ntfy: push notifications with a button that opens the request in the web UI.
 # With details = true, requester, target and reason are sent to the ntfy
-# server; use a server you trust or set details = false.
+# server; use a server you trust or set details = false. Question text and
+# sensitive approvals are never sent.
 # [channel.phone]
 # type = "ntfy"
 # server = "https://ntfy.example.com"
@@ -88,8 +118,10 @@ type = "log"
 # priority = 4                                # for new requests (1-5)
 
 # Webhook: signed JSON events (Standard Webhooks headers webhook-id,
-# webhook-timestamp, webhook-signature) for new requests and outcomes.
-# webhook-id is stable across retries; deduplicate on it.
+# webhook-timestamp, webhook-signature) for new requests, questions and
+# outcomes. webhook-id is stable across retries; deduplicate on it.
+# Sensitive approvals, confidential questions and confidential answers are
+# withheld from the payload.
 # [channel.automation]
 # type = "webhook"
 # url = "https://hooks.example.com/countersign"
@@ -99,9 +131,11 @@ type = "log"
 # Discord: requests are posted with Approve/Deny buttons; presses arrive over
 # the bot's Gateway connection (outbound only). The bot needs View Channel,
 # Send Messages and Embed Links in the channel; no privileged intents.
-# Approvers link their Discord account from the web UI ("Link chat account")
+# Persons link their Discord account from the web UI ("Link chat account")
 # and `/countersign-link`. Buttons approve directly only when the policy's
 # min_assurance is "linked"; otherwise the approve button opens the web UI.
+# Questions with a single required yes/no or choice (up to 4 options) get
+# answer buttons; others, and confidential ones, are answered in the web UI.
 # [channel.discord]
 # type = "discord"
 # channel_id = "123456789012345678"
@@ -109,39 +143,101 @@ type = "log"
 # bot_token_file = "/etc/countersign/discord-token"  # or COUNTERSIGN_DISCORD_BOT_TOKEN
 # mention_roles = ["345678901234567890"]  # optional; pinged on new requests
 
-[[approver]]
+# ------------------------------------------------------------------ actors
+# Persons sign in and decide. "oidc:<issuer>#<sub>" identities sign in; other
+# identities (github:<id>, unix:<client>#<user>, ...) only recognize the
+# person as a requester or initiator.
+[[person]]
 id = "alice"
 display_name = "Alice"
-groups = ["approvers"]
-# Same person in other systems; used to refuse self-approval.
-identities = ["oidc:https://id.example.com#00000000-0000-0000-0000-000000000000"]
+identities = [
+  "oidc:https://id.example.com#00000000-0000-0000-0000-000000000000",
+  "github:1234567",
+]
 
+[[person]]
+id = "bob"
+identities = ["oidc:https://id.example.com#11111111-1111-1111-1111-111111111111"]
+
+# Workloads request and ask; they never sign in or decide. Their owners
+# answer for them (and are excluded from approving them by default policies
+# that list "owners").
+[[workload]]
+id = "deploy-agent"
+owners = ["alice"]
+identities = ["unix:web-1#agent", "octelium:oct-main#deploy-agent"]
+
+[[group]]
+name = "approvers"
+members = ["alice", "bob"]
+# Also count members of an IdP group, as reported at sign-in:
+# from_idp = [{ provider = "oidc:https://id.example.com", group = "countersign-approvers" }]
+
+[[group]]
+name = "agents"
+members = ["deploy-agent"]
+
+# What persons may do in countersign (not which requests they decide):
+# member: sign in, see and decide what they are eligible for, link chat
+# accounts; auditor: read everything (confidential content excepted);
+# admin: suspend/reinstate, revoke in bulk, unlink chat accounts.
+[roles]
+member = ["group:approvers"]
+admin = ["person:alice"]
+# auditor = ["group:security"]
+
+# ------------------------------------------------------------------ policies
 [[policy]]
 name = "elevated-agents"
-match = { backend = "oct-main", requester_group = "agents-elevated" }
+match = { backend = "oct-main", requester_group = "agents" }
 approvers = ["group:approvers"]
+# Who may not decide although selected: "requester" (default), "owners" of
+# the requesting workload, "initiator" of the request.
+exclude = ["requester", "owners", "initiator"]
 max_ttl = "30m"
 default_ttl = "15m"
 pending_timeout = "10m"
 min_assurance = "fresh-auth"
+# Keep requests out of chat when the requester asks ("honor"), never
+# ("ignore"), or always ("always"). The web UI and the record keep everything.
+# sensitive = "honor"
 
 # sudo on target hosts: package management opens a 15-minute window; anything
 # else needs one approval per command. Approving a command approves root on
 # that host while it runs.
-# [[policy]]
-# name = "sudo-packages"
-# match = { backend = "sudo", requester_group = "agents", attributes = { command = "apt *" } }
-# grant = "window"
-# max_ttl = "15m"
-# pending_timeout = "5m"
-# approvers = ["group:approvers"]
-# min_assurance = "linked"
-#
-# [[policy]]
-# name = "sudo"
-# match = { backend = "sudo", requester_group = "agents" }
-# grant = "once"
-# max_ttl = "1m"          # time for the host to pick up the answer
-# pending_timeout = "5m"
-# approvers = ["group:approvers"]
-# min_assurance = "linked"
+[[policy]]
+name = "sudo-packages"
+match = { backend = "sudo", requester_group = "agents", attributes = { command = "apt *" } }
+grant = "window"
+max_ttl = "15m"
+pending_timeout = "5m"
+approvers = ["group:approvers"]
+exclude = ["requester", "owners"]
+min_assurance = "linked"
+
+[[policy]]
+name = "sudo"
+match = { backend = "sudo", requester_group = "agents" }
+grant = "once"
+max_ttl = "1m"          # time for the host to pick up the answer
+pending_timeout = "5m"
+approvers = ["group:approvers"]
+exclude = ["requester", "owners"]
+min_assurance = "linked"
+sensitive = "honor"     # `countersign-sudo run --sensitive -- ...`
+
+# Questions from clients with the "question" scope. An answer is information
+# for the asker, never access: it grants nothing.
+[[question_policy]]
+name = "agent-questions"
+match = { asker = "agent-bridge" }
+responders = ["group:approvers"]
+min_assurance = "linked"
+answer_timeout = "30m"
+max_pending = 5
+# allow_self_answer = false     # let the person a client asks for answer its questions
+# Confidential questions: "deny" (default), "allow", or "require". Their text
+# and answers stay out of chat and logs and are removed once no longer needed.
+confidential = "allow"
+confidential_min_assurance = "fresh-auth"
+answer_retention = "24h"        # how long the asker can fetch a confidential answer

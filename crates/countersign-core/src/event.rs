@@ -3,7 +3,7 @@
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
-use crate::id::{ApproverId, RequestId};
+use crate::id::{ActorId, RequestId};
 use crate::request::Decision;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,7 +24,7 @@ pub enum DomainEvent {
     },
     Denied {
         request_id: RequestId,
-        by: ApproverId,
+        by: ActorId,
         at: Timestamp,
     },
     Granted {
@@ -49,12 +49,24 @@ pub enum DomainEvent {
     },
     Revoked {
         request_id: RequestId,
-        by: Option<ApproverId>,
+        by: Option<ActorId>,
         at: Timestamp,
     },
     /// An active grant reached its end.
     Ended {
         request_id: RequestId,
+        at: Timestamp,
+    },
+    /// A question was answered.
+    Answered {
+        request_id: RequestId,
+        by: ActorId,
+        at: Timestamp,
+    },
+    /// A responder declined to answer a question.
+    Declined {
+        request_id: RequestId,
+        by: ActorId,
         at: Timestamp,
     },
 }
@@ -71,7 +83,9 @@ impl DomainEvent {
             | Self::Expired { request_id, .. }
             | Self::Withdrawn { request_id, .. }
             | Self::Revoked { request_id, .. }
-            | Self::Ended { request_id, .. } => *request_id,
+            | Self::Ended { request_id, .. }
+            | Self::Answered { request_id, .. }
+            | Self::Declined { request_id, .. } => *request_id,
         }
     }
 
@@ -88,6 +102,8 @@ impl DomainEvent {
             Self::Withdrawn { .. } => "withdrawn",
             Self::Revoked { .. } => "revoked",
             Self::Ended { .. } => "ended",
+            Self::Answered { .. } => "answered",
+            Self::Declined { .. } => "declined",
         }
     }
 }

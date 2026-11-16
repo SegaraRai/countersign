@@ -9,13 +9,14 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode, header};
 use countersign_core::{
-    AccessBackend, ActionIntent, ActionSink, ApproverId, Assurance, AuthError, Authenticator, BackendCaps,
-    BackendError, BackendName, ChannelName, GrantHandle, LoginStart, PendingSubject, RequestState, Requester, Store,
-    SubjectFacts, SubjectRef, Verdict, VerifiedLogin,
+    AccessBackend, ActionIntent, ActionSink, ActorId, Asker, Assurance, AuthError, Authenticator, BackendCaps,
+    BackendError, BackendName, ChannelName, ClientId, Confidentiality, GrantHandle, LoginStart, PendingSubject,
+    QuestionOutcome, RequestState, Requester, Store, SubjectFacts, SubjectRef, Verdict, VerifiedLogin,
 };
 use countersign_store_sqlite::SqliteStore;
 use countersignd::Daemon;
 use countersignd::config::Config;
+use countersignd::engine::Ask;
 use http_body_util::BodyExt;
 use jiff::Timestamp;
 use tower::ServiceExt;
@@ -40,6 +41,7 @@ impl Authenticator for FakeIdp {
             identity: identity.into(),
             auth_time: at.parse().ok().map(|s| Timestamp::from_second(s).unwrap()),
             display_name: None,
+            groups: None,
         })
     }
 }
@@ -57,6 +59,9 @@ impl AccessBackend for OneSession {
     }
     fn capabilities(&self) -> BackendCaps {
         BackendCaps { discover: true, revoke: true, native_expiry: true }
+    }
+    fn identity_scheme(&self) -> &'static str {
+        "fake"
     }
     async fn discover_pending(&self) -> Result<Vec<PendingSubject>, BackendError> {
         Ok(if *self.state.lock().unwrap() == "pending" {
@@ -88,11 +93,13 @@ fn subject() -> SubjectRef {
 
 fn facts() -> SubjectFacts {
     SubjectFacts {
+        source: None,
+        initiator: None,
+        sensitive: false,
         requester: Requester {
             id: "agent".into(),
-            display_name: None,
             groups: BTreeSet::from(["agents".to_owned()]),
-            identities: BTreeSet::from(["oidc:idp#agent-owner".to_owned()]),
+            ..Requester::default()
         },
         target: Some("<script>alert(1)</script>".into()),
         requested_ttl: None,
@@ -106,21 +113,58 @@ const CONFIG: &str = r#"
     public_url = "https://cs.example.test"
     fresh_auth_window = "5m"
 
-    [[approver]]
+    [[person]]
     id = "bob"
     display_name = "Bob"
-    groups = ["ops"]
     identities = ["oidc:idp#bob"]
 
-    [[approver]]
+    [[person]]
     id = "owner"
-    groups = ["ops"]
     identities = ["oidc:idp#agent-owner"]
+
+    [[person]]
+    id = "carol"
+    identities = ["oidc:idp#carol"]
+
+    [[person]]
+    id = "viewer"
+    identities = ["oidc:idp#viewer"]
+
+    [[workload]]
+    id = "agent"
+    owners = ["owner"]
+    identities = ["fake:fake#agent"]
+
+    [[group]]
+    name = "ops"
+    members = ["bob", "owner"]
+
+    [roles]
+    member = ["group:ops"]
+    auditor = ["person:viewer"]
+    admin = ["person:carol"]
+
+    [intake]
+    listen = "127.0.0.1:0"
+    behind_proxy = true
+
+    [[client]]
+    id = "agent-host"
+    auth = { host_key_sha256 = "1111111111111111111111111111111111111111111111111111111111111111" }
+    scopes = ["question"]
+
+    [[question_policy]]
+    name = "deploys"
+    responders = ["person:bob"]
+    min_assurance = "web"
+    confidential = "allow"
+    confidential_min_assurance = "fresh-auth"
 
     [[policy]]
     name = "agents"
-    match = { requester_group = "agents" }
+    match = { backend_group = "agents" }
     approvers = ["group:ops"]
+    exclude = ["requester", "owners"]
     max_ttl = "30m"
 "#;
 
@@ -388,15 +432,134 @@ async fn json_api_reports_fresh_auth_requirement() {
 }
 
 #[tokio::test]
-async fn removing_an_approver_ends_their_session() {
+async fn suspending_a_person_ends_their_session_at_once() {
     let mut s = setup("fresh-auth").await;
     s.browser.login("oidc:idp%23bob", Some(1), "/").await;
     assert_eq!(s.browser.get("/").await.status, StatusCode::OK);
+    assert_eq!(s.browser.get("/admin").await.status, StatusCode::FORBIDDEN, "members do not oversee");
+    let mut auditor = Browser { app: s.browser.app.clone(), cookies: BTreeMap::new() };
+    auditor.login("oidc:idp%23viewer", Some(1), "/admin").await;
+    assert_eq!(auditor.get("/admin").await.status, StatusCode::OK, "auditors see the directory");
+    let csrf = auditor.csrf().await;
+    let p = auditor.post_form("/admin/action", &format!("csrf={csrf}&action=suspend&actor=owner")).await;
+    assert_eq!(p.status, StatusCode::FORBIDDEN, "only admins act");
 
-    let mut rules = (*s.daemon.engine.rules()).clone();
-    rules.approvers.remove(&"bob".into());
-    s.daemon.engine.set_rules(rules);
-    assert_eq!(s.browser.get("/").await.status, StatusCode::SEE_OTHER);
+    let mut admin = Browser { app: s.browser.app.clone(), cookies: BTreeMap::new() };
+    admin.login("oidc:idp%23carol", Some(1), "/admin").await;
+    let csrf = admin.csrf().await;
+    let p = admin.post_form("/admin/action", &format!("csrf={csrf}&action=suspend&actor=bob&reason=lost+phone")).await;
+    assert_eq!(p.status, StatusCode::SEE_OTHER, "{}", p.body);
+    assert_eq!(s.browser.get("/").await.status, StatusCode::SEE_OTHER, "bob is signed out");
+    let page = admin.get("/admin").await;
+    assert!(page.body.contains("lost phone") && page.body.contains("suspended by carol"), "{}", page.body);
+
+    // Lifting it needs a fresh sign-in.
+    let mut stale = Browser { app: s.browser.app.clone(), cookies: BTreeMap::new() };
+    stale.login("oidc:idp%23carol", Some(3600), "/admin").await;
+    let csrf = stale.csrf().await;
+    let p = stale.post_form("/admin/action", &format!("csrf={csrf}&action=reinstate&actor=bob")).await;
+    assert_eq!(p.location.as_deref(), Some("/login?next=/admin&fresh=1"));
+    let p = admin.post_form("/admin/action", &format!("csrf={csrf}&action=reinstate&actor=bob")).await;
+    assert_eq!(p.status, StatusCode::FORBIDDEN, "another session's token");
+    let csrf = admin.csrf().await;
+    let p = admin.post_form("/admin/action", &format!("csrf={csrf}&action=reinstate&actor=bob")).await;
+    assert_eq!(p.status, StatusCode::SEE_OTHER);
+    s.browser.login("oidc:idp%23bob", Some(1), "/").await;
+    assert_eq!(s.browser.get("/").await.status, StatusCode::OK);
+}
+
+impl Setup {
+    async fn ask(&self, message: &str, confidential: bool) -> String {
+        let ask = Ask {
+            asker: Asker { client: ClientId::new("agent-host"), actor: None },
+            message: message.into(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "env": { "type": "string", "enum": ["staging", "prod"], "title": "Environment" },
+                    "note": { "type": "string" }
+                },
+                "required": ["env"]
+            }),
+            context: BTreeMap::from([("ticket".to_owned(), "<OPS-1>".to_owned())]),
+            confidentiality: Confidentiality { question: confidential, answer_may_be: false },
+        };
+        self.daemon.engine.ask(ask, Timestamp::now()).await.unwrap().id.to_string()
+    }
+}
+
+#[tokio::test]
+async fn questions_are_answered_from_the_web_form() {
+    let mut s = setup("web").await;
+    let id = s.ask("Deploy <b>now</b>?", false).await;
+    s.browser.login("oidc:idp%23bob", None, "/").await;
+    let index = s.browser.get("/").await;
+    assert!(index.body.contains(&id) && index.body.contains("question"), "{}", index.body);
+    let page = s.browser.get(&format!("/requests/{id}")).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(page.body.contains("Deploy &#60;b&#62;now&#60;/b&#62;?"), "escaped: {}", page.body);
+    assert!(page.body.contains("Environment") && page.body.contains("f.env"), "{}", page.body);
+    assert!(page.body.contains("&#60;OPS-1&#62;"));
+
+    let csrf = s.browser.csrf().await;
+    let p = s.browser.post_form(&format!("/requests/{id}/answer"), &format!("csrf={csrf}&action=answer&f.env=")).await;
+    assert_eq!(p.status, StatusCode::BAD_REQUEST, "env is required");
+    let p = s
+        .browser
+        .post_form(&format!("/requests/{id}/answer"), &format!("csrf={csrf}&action=answer&f.env=prod&f.note=go"))
+        .await;
+    assert_eq!(p.status, StatusCode::SEE_OTHER, "{}", p.body);
+    let q = s.store.get_question(id.parse().unwrap()).await.unwrap().unwrap();
+    let Some(QuestionOutcome::Accepted { content: Some(c), by, confidential, .. }) = q.outcome else { panic!("{q:?}") };
+    assert_eq!(
+        (c["env"].as_str(), c["note"].as_str(), by.as_str(), confidential),
+        (Some("prod"), Some("go"), "bob", false)
+    );
+}
+
+#[tokio::test]
+async fn confidential_questions_are_only_for_their_responders() {
+    let mut s = setup("web").await;
+    let id = s.ask("Which vault key?", true).await;
+
+    // An auditor sees that it exists, not what it says.
+    let mut viewer = Browser { app: s.browser.app.clone(), cookies: BTreeMap::new() };
+    viewer.login("oidc:idp%23viewer", Some(1), "/").await;
+    let page = viewer.get(&format!("/requests/{id}")).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(!page.body.contains("vault") && !page.body.contains("OPS-1"), "{}", page.body);
+    let api = viewer.get(&format!("/api/questions/{id}")).await;
+    assert!(!api.body.contains("vault"), "{}", api.body);
+
+    // The responder needs a fresh sign-in to read it.
+    s.browser.login("oidc:idp%23bob", Some(3600), "/").await;
+    let page = s.browser.get(&format!("/requests/{id}")).await;
+    assert!(!page.body.contains("vault") && page.body.contains("fresh sign-in"), "{}", page.body);
+    s.browser.login("oidc:idp%23bob", Some(1), "/").await;
+    let page = s.browser.get(&format!("/requests/{id}")).await;
+    assert!(page.body.contains("Which vault key?"), "{}", page.body);
+
+    let csrf = s.browser.csrf().await;
+    let p =
+        s.browser.post_form(&format!("/requests/{id}/answer"), &format!("csrf={csrf}&action=answer&f.env=prod")).await;
+    assert_eq!(p.status, StatusCode::SEE_OTHER, "{}", p.body);
+    let q = s.store.get_question(id.parse().unwrap()).await.unwrap().unwrap();
+    assert!(q.message.is_empty() && q.content_removed, "the text goes once the question is closed");
+    assert!(matches!(q.outcome, Some(QuestionOutcome::Accepted { confidential: true, .. })));
+}
+
+#[tokio::test]
+async fn sensitive_approvals_still_show_everything_on_the_web() {
+    let mut s = setup("web").await;
+    let id = s.request_id().await;
+    let mut r = s.store.get_request(id.parse().unwrap()).await.unwrap().unwrap();
+    let v = r.version;
+    r.sensitive = true;
+    r.version += 1;
+    s.store.update_request(&r, v, &[]).await.unwrap();
+    s.browser.login("oidc:idp%23bob", None, "/").await;
+    let page = s.browser.get(&format!("/requests/{id}")).await;
+    assert!(page.body.contains("Sensitive") && page.body.contains("deploy"), "{}", page.body);
 }
 
 #[tokio::test]
@@ -441,15 +604,15 @@ async fn chat_accounts_link_with_one_time_codes_and_decide_at_linked_assurance()
 
     assert_eq!(sink.resolve_account(&discord, "42").await, Ok(None));
     assert!(sink.link_account(&discord, "42", "WRONG-CODE").await.is_err());
-    assert_eq!(sink.link_account(&discord, "42", &code.to_lowercase()).await, Ok(ApproverId::new("bob")));
+    assert_eq!(sink.link_account(&discord, "42", &code.to_lowercase()).await, Ok(ActorId::new("bob")));
     assert!(sink.link_account(&discord, "43", &code).await.is_err(), "codes are single-use");
-    assert_eq!(sink.resolve_account(&discord, "42").await, Ok(Some(ApproverId::new("bob"))));
+    assert_eq!(sink.resolve_account(&discord, "42").await, Ok(Some(ActorId::new("bob"))));
     assert_eq!(sink.resolve_account(&ChannelName::new("other"), "42").await, Ok(None), "links are per channel");
 
     let intent = ActionIntent {
         request_id: id,
         verdict: Verdict::Approve,
-        approver: ApproverId::new("bob"),
+        approver: ActorId::new("bob"),
         assurance: Assurance::Linked,
         via: discord,
         comment: None,
@@ -467,7 +630,7 @@ async fn chat_approvals_are_refused_when_the_policy_needs_more_than_linked() {
     let mut intent = ActionIntent {
         request_id: id,
         verdict: Verdict::Approve,
-        approver: ApproverId::new("bob"),
+        approver: ActorId::new("bob"),
         assurance: Assurance::Linked,
         via: ChannelName::new("discord"),
         comment: None,

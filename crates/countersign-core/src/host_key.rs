@@ -52,7 +52,7 @@ pub fn digest(key: &str) -> [u8; 32] {
     Sha256::digest(key.as_bytes()).into()
 }
 
-/// The `key_sha256` value for the configuration: 64 lowercase hex digits.
+/// The `auth.host_key_sha256` value for a `[[client]]`: 64 lowercase hex digits.
 #[must_use]
 pub fn digest_hex(key: &str) -> String {
     use std::fmt::Write as _;
@@ -62,7 +62,7 @@ pub fn digest_hex(key: &str) -> String {
     })
 }
 
-/// Parse a configured `key_sha256` (64 hex digits, either case).
+/// Parse a configured `host_key_sha256` (64 hex digits, either case).
 #[must_use]
 pub fn parse_digest_hex(s: &str) -> Option<[u8; 32]> {
     if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {

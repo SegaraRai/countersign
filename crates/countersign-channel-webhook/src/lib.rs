@@ -26,7 +26,8 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use countersign_core::{
-    Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, EventId, MessageRef, Notification, Request,
+    Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, EventId, Item, MessageRef, Notification, Question,
+    Request,
 };
 use hmac::{Hmac, Mac};
 use jiff::Timestamp;
@@ -59,13 +60,40 @@ pub struct Payload<'a> {
     pub id: EventId,
     /// The event kind, e.g. `requested`, `granted`, `denied`.
     #[serde(rename = "type")]
-    pub kind: &'static str,
+    pub event_type: &'static str,
     pub timestamp: Timestamp,
     /// The request's page in the web UI.
     pub url: &'a str,
     pub event: &'a DomainEvent,
-    /// Snapshot of the request after the event.
-    pub request: &'a Request,
+    /// `approval` or `question`.
+    pub kind: &'static str,
+    /// Snapshot of the approval after the event (for `approval`). A
+    /// sensitive one keeps only its source, policy and state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<Request>,
+    /// Snapshot of the question after the event (for `question`), without
+    /// confidential text or answers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<Question>,
+}
+
+impl<'a> Payload<'a> {
+    pub fn new(n: Notification<'a>, timestamp: Timestamp) -> Self {
+        let (request, question) = match n.item {
+            Item::Approval(r) => (Some(r.for_chat()), None),
+            Item::Question(q) => (None, Some(q.for_chat())),
+        };
+        Self {
+            id: n.event_id,
+            event_type: n.event.kind(),
+            timestamp,
+            url: n.web_url,
+            event: n.event,
+            kind: n.item.kind(),
+            request,
+            question,
+        }
+    }
 }
 
 pub struct WebhookChannel {
@@ -167,14 +195,7 @@ impl Channel for WebhookChannel {
 
     async fn notify(&self, n: Notification<'_>) -> Result<Option<MessageRef>, ChannelError> {
         let now = Timestamp::now();
-        let payload = Payload {
-            id: n.event_id,
-            kind: n.event.kind(),
-            timestamp: now,
-            url: n.web_url,
-            event: n.event,
-            request: n.request,
-        };
+        let payload = Payload::new(n, now);
         let body = serde_json::to_vec(&payload).map_err(|e| ChannelError::Other(Box::new(e)))?;
         let id = n.event_id.to_string();
         let ts = now.as_second();

@@ -5,6 +5,7 @@ pub mod dispatch;
 pub mod engine;
 pub mod intake;
 pub mod link;
+pub mod tls;
 pub mod web;
 
 use std::sync::Arc;
@@ -56,9 +57,27 @@ pub fn session_key(config: &Config) -> Result<axum_extra::extract::cookie::Key, 
     Ok(Key::derive_from(&bytes))
 }
 
-/// Policies and approvers from a configuration, as engine rules.
+/// The directory, policies and clients from a configuration, as engine rules.
 pub fn rules_from(config: &Config) -> Rules {
-    Rules { policies: config.policies.clone(), approvers: config.approver_map(), unmatched: config.engine.unmatched }
+    let clients = config
+        .clients
+        .iter()
+        .map(|c| {
+            let mut c = c.clone();
+            if c.has_scope(config::Scope::Approval) {
+                c.backend = config.client_backend(&c);
+            }
+            (c.id.clone(), c)
+        })
+        .collect();
+    Rules {
+        directory: config.directory().clone(),
+        policies: config.policies.clone(),
+        question_policies: config.question_policies.clone(),
+        clients,
+        unmatched: config.engine.unmatched,
+        idp_max_age: config.server.idp_max_age(),
+    }
 }
 
 /// Instantiate the configured backends. `host` backends keep their record
@@ -167,9 +186,8 @@ impl Daemon {
                 fresh_auth_window: config.server.fresh_auth_window,
             }),
         };
-        let intake = config.intake.as_ref().map(|i| {
-            intake::IntakeState::new(Arc::clone(&engine), &config.host_backends(), i, &config.server.public_url)
-        });
+        let intake =
+            config.intake.as_ref().map(|i| intake::IntakeState::new(Arc::clone(&engine), i, &config.server.public_url));
         Ok(Self { engine, dispatcher, web, interactive, sink, intake })
     }
 }

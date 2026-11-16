@@ -2,6 +2,10 @@
 //!
 //! Exit status 0 means approved; anything else fails authentication.
 //!
+//! `countersign-sudo run [--reason TEXT] [--sensitive] -- COMMAND...` is for
+//! people: it runs `sudo -- COMMAND...` with the reason and the sensitive
+//! flag in the environment, where the PAM side reads them.
+//!
 //! Messages (the approval link, the outcome) go to the calling `sudo`'s
 //! stderr when that is a terminal or a pipe. Do not use `pam_exec`'s `stdout`
 //! option: without a terminal (`sudo -n`) the PAM conversation fails and
@@ -12,7 +16,12 @@ use std::process::ExitCode;
 
 use countersign_sudo::{CONFIG_PATH, Error, Outcome};
 
+const RUN_USAGE: &str = "usage: countersign-sudo run [--reason TEXT] [--sensitive] -- COMMAND [ARG]...";
+
 fn main() -> ExitCode {
+    if std::env::args_os().nth(1).is_some_and(|a| a == "run") {
+        return run_sudo(std::env::args_os().skip(2).collect());
+    }
     #[cfg(unix)]
     {
         *OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -52,7 +61,7 @@ async fn run(path: PathBuf) -> Result<Outcome, Error> {
         &config.sudo_binaries,
     )?;
     let key = countersign_sudo::read_key(&config.key_file)?;
-    let client = countersign_sudo::Client::new(&config.server, key)?;
+    let client = countersign_sudo::Client::new(&config.server, key, config.ca_file.as_deref())?;
 
     let mut signals = Vec::new();
     for kind in [SignalKind::interrupt(), SignalKind::terminate(), SignalKind::hangup()] {
@@ -112,8 +121,95 @@ async fn futures_select_any<F: Future + Unpin>(futures: impl IntoIterator<Item =
     .await;
 }
 
+/// What `countersign-sudo run` was asked to do.
+#[derive(Debug, PartialEq, Eq)]
+struct RunArgs {
+    reason: Option<std::ffi::OsString>,
+    sensitive: bool,
+    command: Vec<std::ffi::OsString>,
+}
+
+fn parse_run_args(args: Vec<std::ffi::OsString>) -> Result<RunArgs, String> {
+    let mut it = args.into_iter();
+    let mut reason = None;
+    let mut sensitive = false;
+    while let Some(a) = it.next() {
+        match a.to_str() {
+            Some("--") => break,
+            Some("--sensitive") => sensitive = true,
+            Some("--reason") => reason = Some(it.next().ok_or("--reason needs a value")?),
+            Some(s) if s.starts_with("--reason=") => reason = Some(s["--reason=".len()..].into()),
+            _ => return Err(format!("unexpected argument {}", a.to_string_lossy())),
+        }
+    }
+    let command: Vec<_> = it.collect();
+    if command.is_empty() {
+        return Err("no command given".into());
+    }
+    Ok(RunArgs { reason, sensitive, command })
+}
+
+/// Replace this process with `sudo -- COMMAND...`. Returns only on failure.
+fn run_sudo(args: Vec<std::ffi::OsString>) -> ExitCode {
+    let args = match parse_run_args(args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("countersign-sudo: {e}\n{RUN_USAGE}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut cmd = std::process::Command::new("sudo");
+    cmd.arg("--").args(&args.command);
+    match &args.reason {
+        Some(r) => cmd.env(countersign_sudo::invocation::REASON_ENV, r),
+        None => cmd.env_remove(countersign_sudo::invocation::REASON_ENV),
+    };
+    if args.sensitive {
+        cmd.env(countersign_sudo::invocation::SENSITIVE_ENV, "1");
+    } else {
+        cmd.env_remove(countersign_sudo::invocation::SENSITIVE_ENV);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let e = cmd.exec();
+        eprintln!("countersign-sudo: cannot run sudo: {e}");
+        ExitCode::FAILURE
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+        eprintln!("countersign-sudo only runs on Linux");
+        ExitCode::FAILURE
+    }
+}
+
 #[cfg(not(unix))]
 #[allow(clippy::unused_async)] // same signature as the Unix version
 async fn run(_: PathBuf) -> Result<Outcome, Error> {
     Err(Error::Context("countersign-sudo only runs on Linux".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn os(v: &[&str]) -> Vec<std::ffi::OsString> {
+        v.iter().map(Into::into).collect()
+    }
+
+    #[test]
+    fn run_arguments_parse() {
+        let a = parse_run_args(os(&["--reason", "fix dns", "--sensitive", "--", "systemctl", "restart", "x"])).unwrap();
+        assert_eq!(a.reason, Some("fix dns".into()));
+        assert!(a.sensitive);
+        assert_eq!(a.command, os(&["systemctl", "restart", "x"]));
+        let a = parse_run_args(os(&["--reason=r", "--", "id"])).unwrap();
+        assert_eq!(a.reason, Some("r".into()));
+        assert!(!a.sensitive);
+        assert!(parse_run_args(os(&["--", ""])).is_ok());
+        assert!(parse_run_args(os(&["--"])).is_err());
+        assert!(parse_run_args(os(&["id"])).is_err());
+        assert!(parse_run_args(os(&["--reason"])).is_err());
+    }
 }

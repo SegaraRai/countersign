@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -8,6 +9,7 @@ use countersignd::config::Config;
 use countersignd::{Daemon, rules_from};
 use jiff::Timestamp;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 #[derive(Debug, Parser)]
@@ -53,12 +55,15 @@ async fn main() -> ExitCode {
     match cli.command.unwrap_or(Command::Run) {
         Command::Check => {
             println!(
-                "{}: ok ({} backends, {} channels, {} approvers, {} policies)",
+                "{}: ok ({} backends, {} channels, {} persons, {} workloads, {} clients, {} policies, {} question policies)",
                 cli.config.display(),
                 config.backends.len(),
                 config.channels.len(),
-                config.approvers.len(),
-                config.policies.policies.len()
+                config.persons.len(),
+                config.workloads.len(),
+                config.clients.len(),
+                config.policies.policies.len(),
+                config.question_policies.policies.len()
             );
             ExitCode::SUCCESS
         }
@@ -130,39 +135,23 @@ async fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Er
         })
         .collect();
 
-    let listener = tokio::net::TcpListener::bind(config.server.listen).await?;
-    info!(listen = %config.server.listen, url = %config.server.public_url, "web UI listening");
-    if !countersignd::config::is_private(config.server.listen.ip()) {
-        warn!(listen = %config.server.listen, "the web UI listens on a public or every address; keep it private and put it behind a proxy");
+    let web_tls = config.server.tls.as_ref().map(countersignd::tls::server_config).transpose()?;
+    if web_tls.is_none() && !countersignd::config::is_private(config.server.listen.ip()) {
+        warn!(
+            listen = %config.server.listen,
+            "the web UI serves plain HTTP on a public or every address; set server.tls or keep it on a private address behind a TLS proxy"
+        );
     }
-    let app = countersignd::web::router(daemon.web.clone());
-    let mut stop = stop_rx.clone();
-    let server = tokio::spawn(async move {
-        let shutdown = async move {
-            let _ = stop.changed().await;
-        };
-        if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown).await {
-            error!(error = %e, "web server failed");
-        }
-    });
+    let server =
+        serve("web UI", config.server.listen, web_tls, countersignd::web::router(daemon.web.clone()), stop_rx.clone())
+            .await?;
+    info!(url = %config.server.public_url, "web UI public URL");
 
     let intake = match (&config.intake, daemon.intake.clone()) {
         (Some(ic), Some(state)) => {
-            let listener = tokio::net::TcpListener::bind(ic.listen).await?;
-            info!(listen = %ic.listen, "intake API listening");
-            if !countersignd::config::is_private(ic.listen.ip()) {
-                warn!(listen = %ic.listen, "the intake API (plain HTTP) listens on a public or every address; bind it to a private (tailnet) address");
-            }
-            let app = countersignd::intake::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
-            let mut stop = stop_rx.clone();
-            Some(tokio::spawn(async move {
-                let shutdown = async move {
-                    let _ = stop.changed().await;
-                };
-                if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown).await {
-                    error!(error = %e, "intake server failed");
-                }
-            }))
+            // Config validation guarantees `tls`, or `behind_proxy` on a private address.
+            let tls = ic.tls.as_ref().map(countersignd::tls::server_config).transpose()?;
+            Some(serve("intake API", ic.listen, tls, countersignd::intake::router(state), stop_rx.clone()).await?)
         }
         _ => None,
     };
@@ -178,6 +167,42 @@ async fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Er
         let _ = r.await;
     }
     Ok(())
+}
+
+/// Bind `listen` and serve `app` until `stop` fires: over TLS when a server
+/// configuration is given, otherwise plain HTTP for a TLS-terminating proxy.
+async fn serve(
+    what: &'static str,
+    listen: SocketAddr,
+    tls: Option<Arc<tokio_rustls::rustls::ServerConfig>>,
+    app: axum::Router,
+    mut stop: watch::Receiver<bool>,
+) -> Result<JoinHandle<()>, Box<dyn std::error::Error>> {
+    use axum::serve::ListenerExt as _;
+
+    let tcp = tokio::net::TcpListener::bind(listen).await.map_err(|e| format!("{what}: binding {listen}: {e}"))?;
+    let app = app.into_make_service_with_connect_info::<SocketAddr>();
+    let shutdown = async move {
+        let _ = stop.changed().await;
+    };
+    let task = if let Some(config) = tls {
+        info!(%listen, "{what} listening (HTTPS)");
+        // `tap_io` makes the peer address available as `ConnectInfo<SocketAddr>`.
+        let listener = countersignd::tls::TlsListener::new(tcp, config)?.tap_io(|_| {});
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown).await {
+                error!(error = %e, "{what} failed");
+            }
+        })
+    } else {
+        info!(%listen, "{what} listening (HTTP, TLS terminated in front)");
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(tcp, app).with_graceful_shutdown(shutdown).await {
+                error!(error = %e, "{what} failed");
+            }
+        })
+    };
+    Ok(task)
 }
 
 /// Keep an interactive channel's receiver running, backing off on failure.
@@ -197,7 +222,8 @@ async fn receive(channel: Arc<dyn countersign_core::Channel>, sink: Arc<dyn coun
     }
 }
 
-/// Wait for SIGINT/SIGTERM. On Unix, SIGHUP reloads policies and approvers.
+/// Wait for SIGINT/SIGTERM. On Unix, SIGHUP reloads persons, workloads,
+/// groups, roles, clients and policies.
 #[cfg(unix)]
 async fn wait_for_shutdown(path: &std::path::Path, running: &Config, daemon: &Daemon) {
     use tokio::signal::unix::{SignalKind, signal};
@@ -220,8 +246,8 @@ async fn wait_for_shutdown(_: &std::path::Path, _: &Config, _: &Daemon) {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-/// Swap in new policies and approvers if the file is valid. Other sections
-/// need a restart.
+/// Swap in the new directory, clients and policies if the file is valid.
+/// Other sections need a restart.
 #[cfg_attr(not(unix), allow(dead_code))]
 fn reload(path: &std::path::Path, running: &Config, daemon: &Daemon) {
     match Config::load(path) {
@@ -236,7 +262,12 @@ fn reload(path: &std::path::Path, running: &Config, daemon: &Daemon) {
                 warn!("server, store, engine timing, backend, intake and channel changes take effect after a restart");
             }
             daemon.engine.set_rules(rules_from(&new));
-            info!(policies = new.policies.policies.len(), approvers = new.approvers.len(), "configuration reloaded");
+            info!(
+                persons = new.persons.len(),
+                clients = new.clients.len(),
+                policies = new.policies.policies.len(),
+                "configuration reloaded"
+            );
         }
         Err(e) => error!("reload failed; keeping the current configuration: {e}"),
     }

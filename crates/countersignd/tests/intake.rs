@@ -1,4 +1,5 @@
-//! The intake API: hosts submitting `sudo` invocations and waiting for the outcome.
+//! The intake API: hosts submitting `sudo` invocations and waiting for the
+//! outcome, and clients asking questions.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -9,7 +10,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request as HttpRequest, StatusCode, header};
 use countersign_core::host_key::digest_hex;
-use countersign_core::{ActionIntent, Assurance, RequestState, Store, Verdict};
+use countersign_core::{ActionIntent, AnswerIntent, Assurance, RequestState, Response, Store, Verdict};
 use countersign_store_sqlite::SqliteStore;
 use countersignd::config::Config;
 use countersignd::{Daemon, build_backends};
@@ -24,8 +25,19 @@ const WEB2: &str = "cshk_AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIOJxDvA";
 const UNKNOWN: &str = "cshk_AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMwVYYBQ";
 /// Configured for a host, but not in the host key format.
 const LEGACY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+/// A client that only asks questions.
+static AGENT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| countersign_core::host_key::from_random(&[4; 32]));
+
+/// The intake terminates TLS itself, so the peer address is the client's.
+/// The certificate files are only read when the daemon starts serving.
+const OWN_TLS: &str = r#"tls = { cert_file = "unused.pem", key_file = "unused.pem" }"#;
 
 fn config() -> Config {
+    config_with(OWN_TLS)
+}
+
+fn config_with(exposure: &str) -> Config {
     let text = format!(
         r#"
         [server]
@@ -33,28 +45,61 @@ fn config() -> Config {
 
         [intake]
         listen = "127.0.0.1:0"
-        max_pending_per_host = 3
+        {exposure}
+        max_pending_per_client = 3
 
         [backend.sudo]
         type = "host"
-        users = {{ agent = ["agents"], stranger = [] }}
 
-        [[backend.sudo.host]]
-        name = "web-1"
-        key_sha256 = "{}"
+        [[client]]
+        id = "web-1"
+        auth = {{ host_key_sha256 = "{}" }}
 
-        [[backend.sudo.host]]
-        name = "web-2"
-        key_sha256 = "{}"
+        [[client]]
+        id = "web-2"
+        auth = {{ host_key_sha256 = "{}" }}
         allowed_ips = ["100.64.0.22"]
 
-        [[backend.sudo.host]]
-        name = "legacy"
-        key_sha256 = "{}"
+        [[client]]
+        id = "legacy"
+        auth = {{ host_key_sha256 = "{}" }}
 
-        [[approver]]
+        [[client]]
+        id = "agent-host"
+        auth = {{ host_key_sha256 = "{}" }}
+        scopes = ["question"]
+        actor = "deployer"
+
+        [[person]]
         id = "bob"
-        groups = ["ops"]
+
+        [[person]]
+        id = "alice"
+
+        [[workload]]
+        id = "agent"
+        owners = ["alice"]
+        identities = ["unix:web-1#agent", "unix:web-2#agent", "unix:legacy#agent"]
+
+        [[workload]]
+        id = "stranger"
+        owners = ["alice"]
+        identities = ["unix:web-1#stranger"]
+
+        [[workload]]
+        id = "deployer"
+        owners = ["alice"]
+
+        [[group]]
+        name = "ops"
+        members = ["bob"]
+
+        [[group]]
+        name = "agents"
+        members = ["agent"]
+
+        [roles]
+        member = ["group:ops", "person:alice"]
 
         [[policy]]
         name = "packages"
@@ -70,10 +115,20 @@ fn config() -> Config {
         max_ttl = "1m"
         approvers = ["group:ops"]
         min_assurance = "linked"
+        sensitive = "honor"
+
+        [[question_policy]]
+        name = "deploys"
+        match = {{ asker = "agent-host" }}
+        responders = ["group:ops"]
+        min_assurance = "linked"
+        confidential = "allow"
+        confidential_min_assurance = "linked"
         "#,
         digest_hex(WEB1),
         digest_hex(WEB2).to_uppercase(),
         digest_hex(LEGACY),
+        digest_hex(&AGENT),
     );
     Config::from_toml(&text).unwrap()
 }
@@ -85,7 +140,10 @@ struct Setup {
 }
 
 async fn setup() -> Setup {
-    let config = config();
+    setup_with(config()).await
+}
+
+async fn setup_with(config: Config) -> Setup {
     let store: Arc<dyn Store> = Arc::new(SqliteStore::in_memory().await.unwrap());
     let backends = build_backends(&config, &store).unwrap();
     let daemon = Daemon::with_parts(&config, Arc::clone(&store), backends, vec![]).unwrap();
@@ -187,6 +245,31 @@ async fn hosts_must_present_a_known_key_from_an_allowed_address() {
 }
 
 #[tokio::test]
+async fn behind_a_proxy_the_client_address_comes_from_its_header() {
+    let s = setup_with(config_with("behind_proxy = true\nclient_ip_header = \"x-forwarded-for\"")).await;
+    let post = |forwarded: &[&str]| {
+        let mut req = HttpRequest::builder()
+            .method("POST")
+            .uri("/intake/v1/requests")
+            .header(header::AUTHORIZATION, format!("Bearer {WEB2}"));
+        for f in forwarded {
+            req = req.header("x-forwarded-for", *f);
+        }
+        let mut req = req.body(Body::from(json!({ "user": "agent", "argv": ["true"] }).to_string())).unwrap();
+        // The proxy itself connects from loopback.
+        req.extensions_mut().insert(ConnectInfo("127.0.0.1:40000".parse::<SocketAddr>().unwrap()));
+        let app = s.app.clone();
+        async move { app.oneshot(req).await.unwrap().status() }
+    };
+    assert_eq!(post(&[]).await, StatusCode::UNAUTHORIZED, "no header, no address");
+    assert_eq!(post(&["100.64.0.99"]).await, StatusCode::UNAUTHORIZED);
+    // Entries the client sent itself come first and do not count.
+    assert_eq!(post(&["100.64.0.22, 100.64.0.99"]).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(post(&["100.64.0.22", "100.64.0.99"]).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(post(&["100.64.0.99, 100.64.0.22"]).await, StatusCode::CREATED);
+}
+
+#[tokio::test]
 async fn a_single_use_approval_is_collected_once_and_covers_nothing_else() {
     let s = setup().await;
     let (status, v) = s.submit(WEB1, "agent", &["systemctl", "restart", "nginx"]).await;
@@ -197,6 +280,9 @@ async fn a_single_use_approval_is_collected_once_and_covers_nothing_else() {
 
     let r = s.request(&id).await;
     assert_eq!(r.facts.target.as_deref(), Some("web-1"), "the target comes from the key");
+    assert_eq!(r.facts.requester.identity, "unix:web-1#agent");
+    assert_eq!(r.facts.requester.actor.as_ref().map(countersign_core::ActorId::as_str), Some("agent"));
+    assert!(!r.sensitive);
     assert_eq!(r.facts.attributes["command"], "systemctl restart nginx");
     assert_eq!(r.facts.attributes["runas"], "root");
     assert_eq!(r.facts.reason.as_deref(), Some("deploy"));
@@ -353,26 +439,176 @@ async fn a_single_use_approval_that_runs_out_before_collection_is_not_approved()
 #[test]
 fn configuration_mistakes_are_reported() {
     let ok = config();
-    assert_eq!(ok.host_backends().len(), 1);
+    assert_eq!(ok.clients.len(), 4);
 
     let bad = r#"
         [server]
         public_url = "https://cs.example.test"
+        [[person]]
+        id = "bob"
+        [roles]
+        member = ["person:bob"]
         [backend.sudo]
         type = "host"
-        users = { agent = [] }
-        [[backend.sudo.host]]
-        name = "a"
-        key_sha256 = "abc"
-        [[backend.sudo.host]]
-        name = "a"
-        key_sha256 = "abc"
+        [[client]]
+        id = "a"
+        auth = { host_key_sha256 = "abc" }
+        actor = "bob"
+        [[client]]
+        id = "b"
+        auth = { host_key_sha256 = "1111111111111111111111111111111111111111111111111111111111111111" }
+        [[client]]
+        id = "b"
+        auth = { host_key_sha256 = "1111111111111111111111111111111111111111111111111111111111111111" }
     "#;
     let e = Config::from_toml(bad).unwrap_err().to_string();
     assert!(e.contains("64 hex digits"), "{e}");
-    assert!(e.contains("duplicate host a"), "{e}");
-    assert!(e.contains("used by another host"), "{e}");
+    assert!(e.contains("client b: duplicate id"), "{e}");
+    assert!(e.contains("client b: auth.host_key_sha256 is used by another client"), "{e}");
+    assert!(e.contains("actor is only used with the question scope"), "{e}");
     assert!(e.contains("need an [intake] section"), "{e}");
+}
+
+#[tokio::test]
+async fn sensitive_requests_are_marked_when_the_policy_honors_it() {
+    let s = setup().await;
+    let body = json!({ "user": "agent", "argv": ["cat", "/etc/shadow"], "sensitive": true });
+    let call =
+        Call { method: "POST", path: "/intake/v1/requests".into(), key: Some(WEB1), body: Some(body), peer: None };
+    let (status, v) = s.call(call).await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    assert!(s.request(&id_of(&v)).await.sensitive);
+}
+
+#[tokio::test]
+async fn keys_only_work_within_their_scopes() {
+    let s = setup().await;
+    let (status, v) = s.submit(&AGENT, "agent", &["id"]).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("scope")));
+    let ask = Call {
+        method: "POST",
+        path: "/intake/v1/questions".into(),
+        key: Some(WEB1),
+        body: Some(question("Go?", false)),
+        peer: None,
+    };
+    let (status, v) = s.call(ask).await;
+    assert_eq!((status, v["error"].as_str()), (StatusCode::FORBIDDEN, Some("scope")));
+}
+
+fn question(message: &str, confidential: bool) -> Value {
+    json!({
+        "message": message,
+        "requestedSchema": {
+            "type": "object",
+            "properties": { "token": { "type": "string", "title": "Token" } },
+            "required": ["token"]
+        },
+        "context": { "service": "api" },
+        "confidentiality": { "question": confidential }
+    })
+}
+
+impl Setup {
+    async fn ask(&self, body: Value) -> (StatusCode, Value) {
+        let call = Call {
+            method: "POST",
+            path: "/intake/v1/questions".into(),
+            key: Some(AGENT.as_str()),
+            body: Some(body),
+            peer: None,
+        };
+        self.call(call).await
+    }
+
+    async fn question_status(&self, id: &str, wait: u64) -> (StatusCode, Value) {
+        let path = format!("/intake/v1/questions/{id}?wait={wait}");
+        self.call(Call { method: "GET", path, key: Some(AGENT.as_str()), body: None, peer: None }).await
+    }
+
+    async fn answer(&self, id: &str, content: Value, confidential: bool) {
+        let intent = AnswerIntent {
+            question_id: id.parse().unwrap(),
+            responder: "bob".into(),
+            response: Response::Accept { content: content.as_object().unwrap().clone(), confidential },
+            assurance: Assurance::Linked,
+            via: "web".into(),
+        };
+        self.daemon.engine.answer(intent, Timestamp::now()).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn questions_are_asked_waited_on_and_answered() {
+    let s = Arc::new(setup().await);
+    let (status, v) = s.ask(question("Which token?", false)).await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    assert_eq!(v["state"], "pending");
+    let id = id_of(&v);
+    assert_eq!(v["url"], format!("https://cs.example.test/requests/{id}"));
+
+    let waiter = {
+        let s = Arc::clone(&s);
+        let id = id.clone();
+        tokio::spawn(async move { s.question_status(&id, 30).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    s.answer(&id, json!({ "token": "t-123" }), false).await;
+    let (status, v) = waiter.await.unwrap();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!((v["state"].as_str(), v["action"].as_str()), (Some("answered"), Some("accept")));
+    assert_eq!(v["content"]["token"], "t-123");
+    assert_eq!(v["answeredBy"], "bob");
+    // Not confidential: it can be read again.
+    assert_eq!(s.question_status(&id, 0).await.1["content"]["token"], "t-123");
+
+    // Only the asking client sees it.
+    let other =
+        Call { method: "GET", path: format!("/intake/v1/questions/{id}"), key: Some(WEB1), body: None, peer: None };
+    assert_ne!(s.call(other).await.0, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_confidential_answer_is_handed_over_once() {
+    let s = setup().await;
+    let (status, v) = s.ask(question("Recovery token for the vault?", true)).await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    let id = id_of(&v);
+    s.answer(&id, json!({ "token": "vault-777" }), true).await;
+
+    let (_, first) = s.question_status(&id, 0).await;
+    assert_eq!(first["content"]["token"], "vault-777");
+    assert_eq!(first["confidential"], true);
+    let (_, second) = s.question_status(&id, 0).await;
+    assert!(second.get("content").is_none(), "{second}");
+    assert_eq!(second["contentRemoved"], true);
+
+    let stored = s.store.get_question(id.parse().unwrap()).await.unwrap().unwrap();
+    let raw = serde_json::to_string(&stored).unwrap();
+    assert!(!raw.contains("vault-777") && !raw.contains("Recovery token"), "{raw}");
+}
+
+#[tokio::test]
+async fn askers_withdraw_their_questions_and_bad_questions_are_refused() {
+    let s = setup().await;
+    let (_, v) = s.ask(question("Still needed?", false)).await;
+    let id = id_of(&v);
+    let delete = Call {
+        method: "DELETE",
+        path: format!("/intake/v1/questions/{id}"),
+        key: Some(AGENT.as_str()),
+        body: None,
+        peer: None,
+    };
+    assert_eq!(s.call(delete).await.0, StatusCode::NO_CONTENT);
+    let (_, v) = s.question_status(&id, 0).await;
+    assert_eq!((v["state"].as_str(), v["action"].as_str()), (Some("withdrawn"), Some("cancel")));
+
+    let mut bad = question("Pick", false);
+    bad["requestedSchema"]["properties"]["token"] = json!({ "type": "array" });
+    assert_eq!(s.ask(bad).await.0, StatusCode::BAD_REQUEST);
+    let (status, _) = s.ask(json!({ "message": "", "requestedSchema": question("x", false)["requestedSchema"] })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use countersign_core::{Channel, ChannelError, DomainEvent, Notification, OutboxItem, Store, StoreError};
+use countersign_core::{Channel, ChannelError, DomainEvent, Item, Notification, OutboxItem, Store, StoreError};
 use jiff::{SignedDuration, Timestamp};
 use tracing::{debug, warn};
 
@@ -40,6 +40,8 @@ fn worth_a_new_message(ev: &DomainEvent) -> bool {
             | DomainEvent::GrantFailed { .. }
             | DomainEvent::Expired { .. }
             | DomainEvent::Revoked { .. }
+            | DomainEvent::Answered { .. }
+            | DomainEvent::Declined { .. }
     )
 }
 
@@ -76,13 +78,20 @@ impl Dispatcher {
     /// Returns whether a retry is needed.
     async fn deliver(&self, item: &OutboxItem) -> Result<bool, StoreError> {
         let request_id = item.event.request_id();
-        let Some(request) = self.store.get_request(request_id).await? else {
+        let (request, question);
+        let subject = if let Some(r) = self.store.get_request(request_id).await? {
+            request = r;
+            Item::Approval(&request)
+        } else if let Some(q) = self.store.get_question(request_id).await? {
+            question = q;
+            Item::Question(&question)
+        } else {
             warn!(request = %request_id, "outbox event for a missing request");
             return Ok(false);
         };
         let refs = self.store.message_refs(request_id).await?;
         let web_url = format!("{}/requests/{}", self.public_url, request_id);
-        let n = Notification { request: &request, event_id: item.id, event: &item.event, web_url: &web_url };
+        let n = Notification { item: subject, event_id: item.id, event: &item.event, web_url: &web_url };
         let is_new = matches!(item.event, DomainEvent::Requested { .. });
         let done = self.store.delivered_channels(item.id).await?;
 
@@ -144,13 +153,12 @@ impl Channel for LogChannel {
     }
 
     async fn notify(&self, n: Notification<'_>) -> Result<Option<countersign_core::MessageRef>, ChannelError> {
-        let r = n.request;
+        // Ids and states only: never question or answer text.
         tracing::info!(
             channel = %self.name,
             event = n.event.kind(),
-            request = %r.id,
-            requester = %r.facts.requester.id,
-            state = r.state.name(),
+            request = %n.item.id(),
+            state = n.item.state(),
             url = n.web_url,
             "notification"
         );

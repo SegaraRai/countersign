@@ -1,16 +1,19 @@
 //! SQLite implementation of [`countersign_core::Store`].
 //!
-//! Requests are stored as JSON next to the indexed columns used for lookups.
-//! A partial unique index enforces at most one open request per subject, and
-//! request changes and their outbox events are written in one transaction.
+//! Approvals and questions are stored as JSON next to the indexed columns used
+//! for lookups. A partial unique index enforces at most one open request per
+//! subject, and changes and their outbox events are written in one
+//! transaction. `secure_delete` is on, so overwritten confidential content
+//! does not linger in free pages.
 
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use countersign_core::{
-    AccountLink, ApproverId, ChannelName, DomainEvent, EventId, MessageRef, OutboxItem, Request, RequestFilter,
-    RequestId, Store, StoreError, SubjectRef,
+    AccountLink, ActorId, AdminAction, ChannelName, DomainEvent, EventId, IdpSnapshot, MessageRef, OutboxItem,
+    Question, Request, RequestFilter, RequestId, Store, StoreError, SubjectRef, Suspension,
 };
 use jiff::Timestamp;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
@@ -34,6 +37,7 @@ impl SqliteStore {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
+            .pragma("secure_delete", "ON")
             .busy_timeout(Duration::from_secs(5));
         let pool = SqlitePoolOptions::new().max_connections(8).connect_with(opts).await.map_err(other)?;
         Self::from_pool(pool).await
@@ -41,7 +45,10 @@ impl SqliteStore {
 
     /// A private in-memory database, mainly for tests.
     pub async fn in_memory() -> Result<Self, StoreError> {
-        let opts = SqliteConnectOptions::from_str("sqlite::memory:").map_err(other)?.foreign_keys(true);
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .map_err(other)?
+            .foreign_keys(true)
+            .pragma("secure_delete", "ON");
         // Each in-memory connection is its own database: keep exactly one.
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -81,6 +88,16 @@ fn decode_request(body: &str) -> Result<Request, StoreError> {
     serde_json::from_str(body).map_err(other)
 }
 
+fn decode_question(body: &str) -> Result<Question, StoreError> {
+    serde_json::from_str(body).map_err(other)
+}
+
+fn at(ms: i64) -> Result<Timestamp, StoreError> {
+    Timestamp::from_millisecond(ms).map_err(other)
+}
+
+const QUESTION: &str = "question";
+
 async fn enqueue(
     tx: &mut Transaction<'_, sqlx::Sqlite>,
     events: &[DomainEvent],
@@ -111,8 +128,8 @@ impl Store for SqliteStore {
         let mut tx = self.pool.begin().await.map_err(other)?;
         sqlx::query(
             "INSERT INTO requests
-               (id, backend, subject_kind, subject_id, state, is_open, version, created_at_ms, updated_at_ms, body)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               (id, kind, backend, subject_kind, subject_id, state, is_open, version, created_at_ms, updated_at_ms, body)
+             VALUES (?, 'approval', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(request.id.to_string())
         .bind(request.subject.backend.as_str())
@@ -142,7 +159,7 @@ impl Store for SqliteStore {
         let res = sqlx::query(
             "UPDATE requests
                 SET state = ?, is_open = ?, version = ?, updated_at_ms = ?, body = ?
-              WHERE id = ? AND version = ?",
+              WHERE id = ? AND version = ? AND kind = 'approval'",
         )
         .bind(request.state.name())
         .bind(!request.state.is_terminal())
@@ -155,7 +172,7 @@ impl Store for SqliteStore {
         .await
         .map_err(other)?;
         if res.rows_affected() == 0 {
-            let exists = sqlx::query("SELECT 1 FROM requests WHERE id = ?")
+            let exists = sqlx::query("SELECT 1 FROM requests WHERE id = ? AND kind = 'approval'")
                 .bind(request.id.to_string())
                 .fetch_optional(&mut *tx)
                 .await
@@ -168,7 +185,7 @@ impl Store for SqliteStore {
     }
 
     async fn get_request(&self, id: RequestId) -> Result<Option<Request>, StoreError> {
-        let row = sqlx::query("SELECT body FROM requests WHERE id = ?")
+        let row = sqlx::query("SELECT body FROM requests WHERE id = ? AND kind = 'approval'")
             .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
@@ -179,7 +196,7 @@ impl Store for SqliteStore {
     async fn find_open_by_subject(&self, subject: &SubjectRef) -> Result<Option<Request>, StoreError> {
         let row = sqlx::query(
             "SELECT body FROM requests
-              WHERE backend = ? AND subject_kind = ? AND subject_id = ? AND is_open = 1",
+              WHERE kind = 'approval' AND backend = ? AND subject_kind = ? AND subject_id = ? AND is_open = 1",
         )
         .bind(subject.backend.as_str())
         .bind(&subject.kind)
@@ -193,7 +210,7 @@ impl Store for SqliteStore {
     async fn find_latest_by_subject(&self, subject: &SubjectRef) -> Result<Option<Request>, StoreError> {
         let row = sqlx::query(
             "SELECT body FROM requests
-              WHERE backend = ? AND subject_kind = ? AND subject_id = ?
+              WHERE kind = 'approval' AND backend = ? AND subject_kind = ? AND subject_id = ?
               ORDER BY created_at_ms DESC, id DESC
               LIMIT 1",
         )
@@ -210,7 +227,7 @@ impl Store for SqliteStore {
         let limit = filter.limit.map_or(-1, i64::from);
         let rows = sqlx::query(
             "SELECT body FROM requests
-              WHERE (? = 0 OR is_open = 1)
+              WHERE kind = 'approval' AND (? = 0 OR is_open = 1)
               ORDER BY created_at_ms DESC, id DESC
               LIMIT ?",
         )
@@ -220,6 +237,105 @@ impl Store for SqliteStore {
         .await
         .map_err(other)?;
         rows.iter().map(|r| decode_request(r.get("body"))).collect()
+    }
+
+    async fn insert_question(&self, question: &Question, events: &[DomainEvent]) -> Result<(), StoreError> {
+        let body = serde_json::to_string(question).map_err(other)?;
+        let mut tx = self.pool.begin().await.map_err(other)?;
+        sqlx::query(
+            "INSERT INTO requests
+               (id, kind, backend, subject_kind, subject_id, state, is_open, holds_content, version,
+                created_at_ms, updated_at_ms, body)
+             VALUES (?, 'question', ?, 'question', ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(question.id.to_string())
+        .bind(question.asker.client.as_str())
+        .bind(question.id.to_string())
+        .bind(question.state())
+        .bind(question.is_pending())
+        .bind(question.holds_content())
+        .bind(version_to_db(question.version)?)
+        .bind(ms(question.created_at))
+        .bind(ms(question.updated_at))
+        .bind(body)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| if is_unique_violation(&e) { StoreError::Duplicate } else { other(e) })?;
+        enqueue(&mut tx, events, question.updated_at).await?;
+        tx.commit().await.map_err(other)
+    }
+
+    async fn update_question(
+        &self,
+        question: &Question,
+        expected_version: u64,
+        events: &[DomainEvent],
+    ) -> Result<(), StoreError> {
+        let body = serde_json::to_string(question).map_err(other)?;
+        let mut tx = self.pool.begin().await.map_err(other)?;
+        let res = sqlx::query(
+            "UPDATE requests
+                SET state = ?, is_open = ?, holds_content = ?, version = ?, updated_at_ms = ?, body = ?
+              WHERE id = ? AND version = ? AND kind = 'question'",
+        )
+        .bind(question.state())
+        .bind(question.is_pending())
+        .bind(question.holds_content())
+        .bind(version_to_db(question.version)?)
+        .bind(ms(question.updated_at))
+        .bind(body)
+        .bind(question.id.to_string())
+        .bind(version_to_db(expected_version)?)
+        .execute(&mut *tx)
+        .await
+        .map_err(other)?;
+        if res.rows_affected() == 0 {
+            let exists = sqlx::query("SELECT 1 FROM requests WHERE id = ? AND kind = 'question'")
+                .bind(question.id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(other)?
+                .is_some();
+            return Err(if exists { StoreError::Conflict(question.id) } else { StoreError::NotFound(question.id) });
+        }
+        enqueue(&mut tx, events, question.updated_at).await?;
+        tx.commit().await.map_err(other)
+    }
+
+    async fn get_question(&self, id: RequestId) -> Result<Option<Question>, StoreError> {
+        let row = sqlx::query("SELECT body FROM requests WHERE id = ? AND kind = ?")
+            .bind(id.to_string())
+            .bind(QUESTION)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(other)?;
+        row.map(|r| decode_question(r.get("body"))).transpose()
+    }
+
+    async fn list_questions(&self, filter: &RequestFilter) -> Result<Vec<Question>, StoreError> {
+        let limit = filter.limit.map_or(-1, i64::from);
+        let rows = sqlx::query(
+            "SELECT body FROM requests
+              WHERE kind = 'question' AND (? = 0 OR is_open = 1)
+              ORDER BY created_at_ms DESC, id DESC
+              LIMIT ?",
+        )
+        .bind(filter.open_only)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(other)?;
+        rows.iter().map(|r| decode_question(r.get("body"))).collect()
+    }
+
+    async fn questions_holding_content(&self) -> Result<Vec<Question>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT body FROM requests WHERE kind = 'question' AND holds_content = 1 AND is_open = 0 ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(other)?;
+        rows.iter().map(|r| decode_question(r.get("body"))).collect()
     }
 
     async fn claim_outbox(&self, limit: u32, lease: Duration, now: Timestamp) -> Result<Vec<OutboxItem>, StoreError> {
@@ -332,20 +448,15 @@ impl Store for SqliteStore {
             .collect())
     }
 
-    async fn link_account(
-        &self,
-        channel: &ChannelName,
-        external_id: &str,
-        approver: &ApproverId,
-    ) -> Result<(), StoreError> {
+    async fn link_account(&self, channel: &ChannelName, external_id: &str, person: &ActorId) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO account_links (channel, external_id, approver_id, linked_at_ms) VALUES (?, ?, ?, ?)
+            "INSERT INTO account_links (channel, external_id, actor_id, linked_at_ms) VALUES (?, ?, ?, ?)
              ON CONFLICT (channel, external_id)
-             DO UPDATE SET approver_id = excluded.approver_id, linked_at_ms = excluded.linked_at_ms",
+             DO UPDATE SET actor_id = excluded.actor_id, linked_at_ms = excluded.linked_at_ms",
         )
         .bind(channel.as_str())
         .bind(external_id)
-        .bind(approver.as_str())
+        .bind(person.as_str())
         .bind(ms(Timestamp::now()))
         .execute(&self.pool)
         .await
@@ -353,23 +464,19 @@ impl Store for SqliteStore {
         Ok(())
     }
 
-    async fn resolve_account(
-        &self,
-        channel: &ChannelName,
-        external_id: &str,
-    ) -> Result<Option<ApproverId>, StoreError> {
-        let row = sqlx::query("SELECT approver_id FROM account_links WHERE channel = ? AND external_id = ?")
+    async fn resolve_account(&self, channel: &ChannelName, external_id: &str) -> Result<Option<ActorId>, StoreError> {
+        let row = sqlx::query("SELECT actor_id FROM account_links WHERE channel = ? AND external_id = ?")
             .bind(channel.as_str())
             .bind(external_id)
             .fetch_optional(&self.pool)
             .await
             .map_err(other)?;
-        Ok(row.map(|r| ApproverId::new(r.get::<String, _>("approver_id"))))
+        Ok(row.map(|r| ActorId::new(r.get::<String, _>("actor_id"))))
     }
 
     async fn list_account_links(&self) -> Result<Vec<AccountLink>, StoreError> {
         let rows = sqlx::query(
-            "SELECT channel, external_id, approver_id, linked_at_ms FROM account_links ORDER BY channel, external_id",
+            "SELECT channel, external_id, actor_id, linked_at_ms FROM account_links ORDER BY channel, external_id",
         )
         .fetch_all(&self.pool)
         .await
@@ -379,8 +486,8 @@ impl Store for SqliteStore {
                 Ok(AccountLink {
                     channel: ChannelName::new(r.get::<String, _>("channel")),
                     external_id: r.get("external_id"),
-                    approver: ApproverId::new(r.get::<String, _>("approver_id")),
-                    linked_at: Timestamp::from_millisecond(r.get("linked_at_ms")).map_err(other)?,
+                    person: ActorId::new(r.get::<String, _>("actor_id")),
+                    linked_at: at(r.get("linked_at_ms"))?,
                 })
             })
             .collect()
@@ -394,6 +501,95 @@ impl Store for SqliteStore {
             .await
             .map_err(other)?;
         Ok(done.rows_affected() > 0)
+    }
+
+    async fn suspend(&self, actor: &ActorId, suspension: &Suspension) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO suspensions (actor_id, body) VALUES (?, ?)
+             ON CONFLICT (actor_id) DO UPDATE SET body = excluded.body",
+        )
+        .bind(actor.as_str())
+        .bind(serde_json::to_string(suspension).map_err(other)?)
+        .execute(&self.pool)
+        .await
+        .map_err(other)?;
+        Ok(())
+    }
+
+    async fn reinstate(&self, actor: &ActorId) -> Result<bool, StoreError> {
+        let done = sqlx::query("DELETE FROM suspensions WHERE actor_id = ?")
+            .bind(actor.as_str())
+            .execute(&self.pool)
+            .await
+            .map_err(other)?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn suspensions(&self) -> Result<BTreeMap<ActorId, Suspension>, StoreError> {
+        let rows = sqlx::query("SELECT actor_id, body FROM suspensions").fetch_all(&self.pool).await.map_err(other)?;
+        rows.iter()
+            .map(|r| {
+                let body: String = r.get("body");
+                Ok((ActorId::new(r.get::<String, _>("actor_id")), serde_json::from_str(&body).map_err(other)?))
+            })
+            .collect()
+    }
+
+    async fn save_idp_snapshot(&self, person: &ActorId, snapshot: &IdpSnapshot) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO idp_snapshots (person_id, body) VALUES (?, ?)
+             ON CONFLICT (person_id) DO UPDATE SET body = excluded.body",
+        )
+        .bind(person.as_str())
+        .bind(serde_json::to_string(snapshot).map_err(other)?)
+        .execute(&self.pool)
+        .await
+        .map_err(other)?;
+        Ok(())
+    }
+
+    async fn idp_snapshots(&self) -> Result<BTreeMap<ActorId, IdpSnapshot>, StoreError> {
+        let rows =
+            sqlx::query("SELECT person_id, body FROM idp_snapshots").fetch_all(&self.pool).await.map_err(other)?;
+        rows.iter()
+            .map(|r| {
+                let body: String = r.get("body");
+                Ok((ActorId::new(r.get::<String, _>("person_id")), serde_json::from_str(&body).map_err(other)?))
+            })
+            .collect()
+    }
+
+    async fn record_admin_action(&self, action: &AdminAction) -> Result<(), StoreError> {
+        sqlx::query("INSERT INTO admin_actions (at_ms, by_id, action, target, detail) VALUES (?, ?, ?, ?, ?)")
+            .bind(ms(action.at))
+            .bind(action.by.as_str())
+            .bind(&action.action)
+            .bind(&action.target)
+            .bind(action.detail.as_deref())
+            .execute(&self.pool)
+            .await
+            .map_err(other)?;
+        Ok(())
+    }
+
+    async fn admin_actions(&self, limit: u32) -> Result<Vec<AdminAction>, StoreError> {
+        let rows =
+            sqlx::query("SELECT at_ms, by_id, action, target, detail FROM admin_actions ORDER BY seq DESC LIMIT ?")
+                .bind(i64::from(limit))
+                .fetch_all(&self.pool)
+                .await
+                .map_err(other)?;
+        rows.iter()
+            .map(|r| {
+                Ok(AdminAction {
+                    at: at(r.get("at_ms"))?,
+                    by: ActorId::new(r.get::<String, _>("by_id")),
+                    action: r.get("action"),
+                    target: r.get("target"),
+                    detail: r.get("detail"),
+                })
+            })
+            .collect()
     }
 }
 

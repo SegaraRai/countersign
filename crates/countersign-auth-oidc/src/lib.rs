@@ -1,9 +1,14 @@
 //! `OpenID Connect` [`Authenticator`] for the countersign web UI.
 //!
-//! Uses the authorization-code flow with PKCE and a nonce. Approver identities
+//! Uses the authorization-code flow with PKCE and a nonce. Sign-in identities
 //! are `oidc:<issuer>#<sub>`. A "fresh" login adds `prompt=login`; whether the
 //! provider actually re-authenticated is judged by the caller from
 //! [`VerifiedLogin::auth_time`], never assumed.
+//!
+//! A `groups` claim in the verified ID token (an array of strings) is passed
+//! on as [`VerifiedLogin::groups`]; it counts only through `from_idp` mappings
+//! in the configuration. Many providers send it only when a `groups` scope
+//! is requested.
 //!
 //! The client secret is read from `client_secret_file` or, failing that, the
 //! `COUNTERSIGN_OIDC_CLIENT_SECRET` environment variable. Without either, the
@@ -178,12 +183,28 @@ impl Authenticator for OidcAuthenticator {
             .preferred_username()
             .map(|u| u.as_str().to_owned())
             .or_else(|| claims.email().map(|e| e.as_str().to_owned()));
+        let provider = format!("oidc:{}", claims.issuer().as_str());
+        // The signature and claims were verified above; read the one extra
+        // claim from the same token.
+        let groups = groups_claim(&id_token.to_string()).map(|g| (provider.clone(), g));
         Ok(VerifiedLogin {
-            identity: format!("oidc:{}#{}", claims.issuer().as_str(), claims.subject().as_str()),
+            identity: format!("{provider}#{}", claims.subject().as_str()),
             auth_time,
             display_name,
+            groups,
         })
     }
+}
+
+/// The `groups` claim of a compact JWT, if it is an array of strings. Only
+/// call this on a token whose signature has been verified.
+fn groups_claim(jwt: &str) -> Option<std::collections::BTreeSet<String>> {
+    use base64::Engine as _;
+    let payload = jwt.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let groups = value.get("groups")?.as_array()?;
+    groups.iter().map(|g| g.as_str().map(str::to_owned)).collect()
 }
 
 #[cfg(test)]
@@ -229,6 +250,18 @@ mod tests {
         assert!(matches!(a.complete(&saved, "forged", "code").await, Err(AuthError::StateMismatch)));
         assert!(matches!(a.complete("garbage", "expected", "code").await, Err(AuthError::StateMismatch)));
         assert!(a.client.get().is_none(), "no discovery happened");
+    }
+
+    #[test]
+    fn reads_groups_claim() {
+        use base64::Engine as _;
+        let enc = |v: serde_json::Value| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string());
+        let jwt = |claims| format!("{}.{}.sig", enc(serde_json::json!({"alg": "RS256"})), enc(claims));
+        let g = groups_claim(&jwt(serde_json::json!({"sub": "x", "groups": ["ops", "dev"]}))).unwrap();
+        assert_eq!(g.into_iter().collect::<Vec<_>>(), ["dev", "ops"]);
+        assert_eq!(groups_claim(&jwt(serde_json::json!({"sub": "x"}))), None);
+        assert_eq!(groups_claim(&jwt(serde_json::json!({"groups": ["ok", 1]}))), None, "all or nothing");
+        assert_eq!(groups_claim("garbage"), None);
     }
 
     #[test]

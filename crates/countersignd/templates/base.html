@@ -7,10 +7,10 @@
 <title>{% block title %}countersign{% endblock %}</title>
 <style>
 :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fafafa; --muted: #6b6b70; --line: #d9d9de; --card: #fff;
-        --ok: #1a7f37; --done: #4f7d5c; --bad: #b42318; --warn: #9a6700; --accent: #2457d6; }
+        --ok: #1a7f37; --done: #4f7d5c; --bad: #b42318; --warn: #9a6700; --accent: #2457d6; --q: #6f42c1; }
 @media (prefers-color-scheme: dark) {
   :root { --fg: #e8e8ea; --bg: #141416; --muted: #9b9ba3; --line: #2e2e33; --card: #1c1c1f;
-          --ok: #4ac26b; --done: #7fa98a; --bad: #f47067; --warn: #d4a72c; --accent: #6d9bff; }
+          --ok: #4ac26b; --done: #7fa98a; --bad: #f47067; --warn: #d4a72c; --accent: #6d9bff; --q: #a371f7; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; font: 15px/1.5 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
@@ -31,6 +31,21 @@ th { color: var(--muted); font-weight: 500; font-size: .85rem; }
 .state-denied, .state-failed, .state-revoked { color: var(--bad); }
 .state-ended { color: var(--done); }
 .state-expired, .state-withdrawn { color: var(--muted); }
+.state-q-pending { color: var(--warn); }
+.state-q-answered { color: var(--done); }
+.state-q-declined { color: var(--bad); }
+.state-q-expired, .state-q-withdrawn { color: var(--muted); }
+.kind { display: inline-block; padding: 0 .4rem; border-radius: 4px; font-size: .75rem; font-weight: 600;
+        text-transform: uppercase; letter-spacing: .03em; vertical-align: middle; }
+.kind-approval { background: var(--line); color: var(--fg); }
+.kind-question { background: var(--q); color: #fff; }
+.card.question { border-left: 4px solid var(--q); }
+.message { white-space: pre-wrap; overflow-wrap: anywhere; padding: .75rem; border: 1px dashed var(--line); border-radius: 6px; margin: 0 0 .75rem; }
+.field { margin: 0 0 .9rem; }
+.field label.opt { display: block; }
+select, input[type=number], input[type=email], input[type=url], input[type=date] { font: inherit; padding: .4rem .6rem;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: inherit; max-width: 28rem; width: 100%; }
+button.answer { background: var(--q); border-color: var(--q); color: #fff; }
 .flash { padding: .6rem .8rem; border-radius: 6px; margin: 0 0 1rem; border: 1px solid; }
 .flash-error { color: var(--bad); }
 .flash-info { color: var(--accent); }
@@ -53,7 +68,7 @@ code { font-size: .9em; }
 <header>
   <a class="brand" href="/">countersign</a>
   {% if let Some(user) = user %}
-  <span class="muted"><a href="/link">Link chat account</a> · {{ user.name }}
+  <span class="muted">{% if user.admin %}<a href="/admin">Admin</a> · {% endif %}<a href="/link">Link chat account</a> · {{ user.name }}
     <form class="inline" method="post" action="/logout">
       <input type="hidden" name="csrf" value="{{ user.csrf }}">
       <button type="submit">Log out</button>

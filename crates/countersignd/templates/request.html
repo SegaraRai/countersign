@@ -5,17 +5,21 @@
 {% if let Some(e) = error %}<div class="flash flash-error">{{ e }}</div>{% endif %}
 
 <div class="card">
-  <h1>{{ r.requester }} <span class="state state-{{ r.state }}">{{ r.state }}</span></h1>
+  <h1><span class="kind kind-approval">Approval</span> {{ r.requester }} <span class="state state-{{ r.state }}">{{ r.state }}</span></h1>
+  {% if r.sensitive %}<p class="flash flash-info">Sensitive: chat channels show only that this request exists. The record keeps everything.</p>{% endif %}
   <dl>
     {% if let Some(d) = r.display_name %}<dt>Name</dt><dd>{{ d }}</dd>{% endif %}
-    <dt>Groups</dt><dd>{% if r.groups.is_empty() %}<span class="muted">none</span>{% else %}{{ r.groups }}{% endif %}</dd>
+    {% if let Some(s) = r.source %}<dt>Source</dt><dd>{{ s }}</dd>{% endif %}
+    <dt>Requester</dt><dd><code>{{ r.identity }}</code> · {% if let Some(a) = r.actor %}{{ a }}{% else %}<span class="muted">not a known actor</span>{% endif %}</dd>
+    {% if let Some(i) = r.initiator %}<dt>Initiated by</dt><dd>{{ i }} <span class="muted">(as reported by the source)</span></dd>{% endif %}
+    <dt>Source groups</dt><dd>{% if r.groups.is_empty() %}<span class="muted">none</span>{% else %}{{ r.groups }}{% endif %}</dd>
     {% if let Some(t) = r.target %}<dt>Target</dt><dd>{{ t }}</dd>{% endif %}
     {% if let Some(reason) = r.reason %}<dt>Reason</dt><dd>{{ reason }} <span class="muted">(from the requester, unverified)</span></dd>{% endif %}
     <dt>Subject</dt><dd><code>{{ r.subject }}</code></dd>
     {% for (k, v) in r.attributes %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}
     <dt>Policy</dt><dd>{{ r.policy }}</dd>
     <dt>Grant length</dt><dd>{{ r.ttl }}{% if r.window %} <span class="muted">(window: later matching requests from the same requester and target are approved without asking)</span>{% endif %}</dd>
-    <dt>Needs</dt><dd>{{ r.quorum }} approval(s) at <code>{{ r.min_assurance }}</code></dd>
+    <dt>Needs</dt><dd>{{ r.quorum }} approval(s) by different persons at <code>{{ r.min_assurance }}</code>{% if !r.exclude.is_empty() %} <span class="muted">(excluded: {{ r.exclude }})</span>{% endif %}</dd>
     <dt>Created</dt><dd>{{ r.created }}</dd>
     {% if let Some(u) = r.pending_until %}<dt>Decide by</dt><dd>{{ u }}</dd>{% endif %}
     {% if let Some(u) = r.active_until %}<dt>Access until</dt><dd>{{ u }}</dd>{% endif %}

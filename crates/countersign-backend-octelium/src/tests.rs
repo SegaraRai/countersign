@@ -45,7 +45,6 @@ fn config() -> OcteliumConfig {
         octeliumctl: "octeliumctl".into(),
         homedir: None,
         command_timeout: Duration::from_secs(5),
-        identity_providers: BTreeMap::from([("pocket".to_owned(), "oidc:https://id.example.com".to_owned())]),
         auth_token_file: None,
     }
 }
@@ -72,9 +71,10 @@ fn session(name: &str, user: &str, state: &str) -> serde_json::Value {
     })
 }
 
-fn user(groups: &[&str], identities: &serde_json::Value) -> serde_json::Value {
+fn user(groups: &[&str]) -> serde_json::Value {
     json!({ "kind": "User", "metadata": { "name": "u" },
-            "spec": { "type": "WORKLOAD", "groups": groups, "authentication": { "identities": identities } } })
+            "spec": { "type": "WORKLOAD", "groups": groups,
+                      "authentication": { "identities": [{ "identityProvider": "pocket", "identifier": "sub-1" }] } } })
 }
 
 fn list(items: &[serde_json::Value]) -> serde_json::Value {
@@ -96,10 +96,7 @@ async fn discover_returns_pending_sessions_with_user_facts() {
                 session("human-ccc", "human", "ACTIVE"),
             ]),
         )
-        .ok_json(
-            &format!("get user -o json {D} -- agent"),
-            &user(&["agents-elevated"], &json!([{ "identityProvider": "pocket", "identifier": "sub-1" }])),
-        );
+        .ok_json(&format!("get user -o json {D} -- agent"), &user(&["agents-elevated"]));
     let b = backend(r);
     let found = b.discover_pending().await.unwrap();
 
@@ -107,13 +104,8 @@ async fn discover_returns_pending_sessions_with_user_facts() {
     let f = &found[0].facts;
     assert_eq!(f.requester.id, "agent");
     assert!(f.requester.groups.contains("agents-elevated"));
-    assert_eq!(
-        f.requester.identities,
-        BTreeSet::from([
-            "octelium:oct.example.com:user:agent".to_owned(),
-            "oidc:https://id.example.com#sub-1".to_owned()
-        ])
-    );
+    assert_eq!(f.requester.identity, "", "countersign sets the identity, not the backend");
+    assert_eq!(b.identity_scheme(), "octelium");
     assert_eq!(f.attributes["user_type"], "WORKLOAD");
     assert_eq!(f.attributes["auth_type"], "CREDENTIAL");
     assert_eq!(f.attributes["credential"], "agent-token");
@@ -134,22 +126,10 @@ async fn discover_pages_through_long_lists() {
             &format!("get session -o json --page 2 --items-per-page 200 {D}"),
             &list(&[session("s-last", "agent", "PENDING")]),
         )
-        .ok_json(&format!("get user -o json {D} -- agent"), &user(&[], &json!([])));
+        .ok_json(&format!("get user -o json {D} -- agent"), &user(&[]));
     let found = backend(r).discover_pending().await.unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].subject.id, "s-last");
-}
-
-#[tokio::test]
-async fn unmapped_idp_gets_a_backend_scoped_identity() {
-    let r = FakeRunner::default()
-        .ok_json(&format!("get session -o json {D} -- s1"), &session("s1", "agent", "PENDING"))
-        .ok_json(
-            &format!("get user -o json {D} -- agent"),
-            &user(&[], &json!([{ "identityProvider": "github", "identifier": "42" }])),
-        );
-    let facts = backend(r).verify(&subject("s1")).await.unwrap();
-    assert!(facts.requester.identities.contains("octelium:oct.example.com:idp:github#42"));
 }
 
 #[tokio::test]

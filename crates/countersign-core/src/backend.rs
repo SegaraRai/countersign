@@ -66,6 +66,12 @@ impl BackendError {
 pub trait AccessBackend: Send + Sync {
     fn name(&self) -> &BackendName;
 
+    /// The provider part of requester identities from this backend, e.g.
+    /// `octelium`. countersign writes requester identities as
+    /// `<scheme>:<backend name>#<requester id>`, so a backend can only vouch
+    /// for identities in its own namespace.
+    fn identity_scheme(&self) -> &'static str;
+
     fn capabilities(&self) -> BackendCaps;
 
     /// Subjects currently waiting for a decision. Only called when

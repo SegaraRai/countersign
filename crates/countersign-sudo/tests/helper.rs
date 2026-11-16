@@ -160,8 +160,15 @@ fn reads_the_invocation_from_the_calling_sudo() {
             cwd: Some("/home/agent/app".into()),
             tty: Some("/dev/pts/3".into()),
             reason: Some("install jq for the deploy script".into()),
+            sensitive: false,
         }
     );
+
+    let host = FakeHost { environ: b"COUNTERSIGN_SENSITIVE=1\0", ..FakeHost::default() };
+    let inv = read(&host, 42, &pam_env("agent"), &binaries()).unwrap();
+    assert!(inv.sensitive && inv.reason.is_none());
+    let host = FakeHost { environ: b"COUNTERSIGN_SENSITIVE=0\0", ..FakeHost::default() };
+    assert!(!read(&host, 42, &pam_env("agent"), &binaries()).unwrap().sensitive);
 }
 
 #[test]
@@ -186,13 +193,34 @@ fn refuses_anything_but_sudo_authenticating_its_own_caller() {
 
 #[test]
 fn config_defaults_and_validation() {
-    let c = Config::parse(r#"server = "http://100.64.0.10:8443""#).unwrap();
+    let c = Config::parse(r#"server = "https://cs.example.test:8443""#).unwrap();
     assert_eq!(c.key_file, PathBuf::from("/etc/countersign/host.key"));
     assert_eq!(c.timeout, Duration::from_secs(300));
+    assert_eq!(c.ca_file, None);
     assert!(c.sudo_binaries.contains(&PathBuf::from("/usr/bin/sudo")));
-    assert!(matches!(Config::parse(r#"server = "100.64.0.10:8443""#), Err(Error::Config(_))));
-    assert!(matches!(Config::parse("server = \"http://x\"\ntimeout = \"0s\""), Err(Error::Config(_))));
-    assert!(matches!(Config::parse("server = \"http://x\"\nkey = \"inline\""), Err(Error::Config(_))));
+    assert!(Config::parse(r#"server = "http://127.0.0.1:8081""#).is_ok(), "plain HTTP to this machine");
+    for bad in [
+        r#"server = "cs.example.test:8443""#,
+        r#"server = "http://cs.example.test:8443""#,
+        "server = \"https://x\"\ntimeout = \"0s\"",
+        "server = \"https://x\"\nkey = \"inline\"",
+    ] {
+        assert!(matches!(Config::parse(bad), Err(Error::Config(_))), "{bad}");
+    }
+}
+
+#[test]
+fn a_ca_file_must_hold_certificates() {
+    let dir = std::env::temp_dir().join(format!("cs-sudo-ca-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let garbage = dir.join("garbage.pem");
+    std::fs::write(&garbage, "not a certificate").unwrap();
+    let err = |p: &std::path::Path| match Client::new("https://x", KEY.to_owned(), Some(p)) {
+        Err(Error::Config(e)) => e,
+        other => panic!("{other:?}"),
+    };
+    assert!(err(&dir.join("missing.pem")).contains("missing.pem"));
+    assert!(err(&garbage).contains("no certificate"));
 }
 
 #[cfg(unix)]
@@ -231,15 +259,23 @@ async fn server() -> Server {
         public_url = "https://cs.example.test"
         [intake]
         listen = "127.0.0.1:0"
+        behind_proxy = true
         [backend.sudo]
         type = "host"
-        users = {{ agent = ["agents"] }}
-        [[backend.sudo.host]]
-        name = "web-1"
-        key_sha256 = "{}"
-        [[approver]]
+        [[client]]
+        id = "web-1"
+        auth = {{ host_key_sha256 = "{}" }}
+        [[person]]
         id = "bob"
-        groups = ["ops"]
+        [[workload]]
+        id = "agent"
+        owners = ["bob"]
+        identities = ["unix:web-1#agent"]
+        [[group]]
+        name = "ops"
+        members = ["bob"]
+        [roles]
+        member = ["group:ops"]
         [[policy]]
         name = "packages"
         match = {{ backend = "sudo", attributes = {{ command = "apt *" }} }}
@@ -253,6 +289,7 @@ async fn server() -> Server {
         max_ttl = "1m"
         approvers = ["group:ops"]
         min_assurance = "linked"
+        sensitive = "honor"
         "#,
         countersign_core::host_key::digest_hex(KEY)
     );
@@ -307,11 +344,12 @@ fn invocation(argv: &[&str]) -> Invocation {
         cwd: Some("/home/agent".into()),
         tty: None,
         reason: Some("testing".into()),
+        sensitive: false,
     }
 }
 
 async fn ask(s: &Server, key: &str, argv: &[&str], timeout: Duration) -> (Outcome, Vec<String>) {
-    let client = Client::new(&s.url, key.to_owned()).unwrap();
+    let client = Client::new(&s.url, key.to_owned(), None).unwrap();
     let mut said = Vec::new();
     let outcome =
         client.ask(&invocation(argv), timeout, std::future::pending(), &mut |m: &str| said.push(m.to_owned())).await;
@@ -357,7 +395,7 @@ async fn denial_timeout_and_bad_keys_fail_closed() {
     else {
         panic!("a wrong key must not be approved")
     };
-    assert!(why.contains("unknown host key"), "{why}");
+    assert!(why.contains("unknown client key"), "{why}");
 
     let Outcome::Refused(why) = ask(&s, KEY, &[], Duration::from_secs(5)).await.0 else { panic!() };
     assert!(why.contains("bad-request"), "{why}");
@@ -366,7 +404,7 @@ async fn denial_timeout_and_bad_keys_fail_closed() {
 #[tokio::test]
 async fn cancelling_withdraws_the_request() {
     let s = server().await;
-    let client = Client::new(&s.url, KEY.to_owned()).unwrap();
+    let client = Client::new(&s.url, KEY.to_owned(), None).unwrap();
     let cancel = tokio::time::sleep(Duration::from_millis(300));
     let outcome = client.ask(&invocation(&["reboot"]), Duration::from_secs(30), cancel, &mut |_: &str| {}).await;
     assert_eq!(outcome, Outcome::Refused("interrupted; request withdrawn".into()));
@@ -375,7 +413,7 @@ async fn cancelling_withdraws_the_request() {
 
 #[tokio::test]
 async fn an_unreachable_server_fails_closed() {
-    let client = Client::new("http://127.0.0.1:9", KEY.to_owned()).unwrap();
+    let client = Client::new("http://127.0.0.1:9", KEY.to_owned(), None).unwrap();
     let outcome =
         client.ask(&invocation(&["reboot"]), Duration::from_secs(5), std::future::pending(), &mut |_: &str| {}).await;
     assert!(matches!(outcome, Outcome::Refused(m) if m.contains("network")));

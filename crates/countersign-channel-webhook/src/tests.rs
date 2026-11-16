@@ -7,12 +7,12 @@ use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use countersign_core::{
-    ApproverId, ApproverSelector, Assurance, Channel, ChannelError, ChannelName, DomainEvent, EventId, Notification,
-    PendingSubject, PolicyName, Request, Requester, Requirements, SubjectFacts, SubjectRef,
+    ActorId, Assurance, Channel, ChannelError, ChannelName, DomainEvent, EventId, Notification, PendingSubject,
+    PolicyName, Request, Requester, Requirements, Selector, SubjectFacts, SubjectRef,
 };
 use jiff::Timestamp;
 
-use super::{WebhookChannel, WebhookConfig, parse_secret, sign};
+use super::{Payload, WebhookChannel, WebhookConfig, parse_secret, sign};
 
 /// The example from the Standard Webhooks specification.
 #[test]
@@ -70,11 +70,14 @@ fn request() -> Request {
     let pending = PendingSubject {
         subject: SubjectRef { backend: "oct".into(), kind: "session".into(), id: "s-1".into() },
         facts: SubjectFacts {
+            source: None,
+            initiator: None,
+            sensitive: false,
             requester: Requester {
                 id: "agent-7".into(),
                 display_name: None,
                 groups: BTreeSet::new(),
-                identities: BTreeSet::new(),
+                ..Requester::default()
             },
             target: Some("db-prod".into()),
             requested_ttl: None,
@@ -85,15 +88,16 @@ fn request() -> Request {
     };
     let reqs = Requirements {
         policy: PolicyName::new("ops"),
-        approvers: vec![ApproverSelector::Approver(ApproverId::new("bob"))],
+        approvers: vec![Selector::Person(ActorId::new("bob"))],
         quorum: 1,
         min_assurance: Assurance::FreshAuth,
         ttl: Duration::from_secs(1800),
         pending_timeout: Duration::from_secs(600),
-        allow_self_approval: false,
+        exclude: BTreeSet::from([countersign_core::Exclusion::Requester]),
+        require_initiator: false,
         grant: countersign_core::GrantMode::Once,
     };
-    Request::open(pending, reqs, Timestamp::UNIX_EPOCH).0
+    Request::open(pending, reqs, false, Timestamp::UNIX_EPOCH).0
 }
 
 struct Hit {
@@ -136,7 +140,12 @@ async fn posts_signed_events_that_receivers_can_verify() {
     let r = request();
     let ev = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
     let event_id = EventId::new();
-    let n = Notification { request: &r, event_id, event: &ev, web_url: "https://cs.example/requests/x" };
+    let n = Notification {
+        item: countersign_core::Item::Approval(&r),
+        event_id,
+        event: &ev,
+        web_url: "https://cs.example/requests/x",
+    };
     assert_eq!(ch.notify(n).await.unwrap(), None);
     assert_eq!(ch.notify(n).await.unwrap(), None, "a retry");
 
@@ -173,7 +182,12 @@ async fn posts_signed_events_that_receivers_can_verify() {
 async fn unsigned_hooks_send_no_signature_and_errors_are_classified() {
     let r = request();
     let ev = DomainEvent::Expired { request_id: r.id, at: Timestamp::UNIX_EPOCH };
-    let n = Notification { request: &r, event_id: EventId::new(), event: &ev, web_url: "https://cs.example/r" };
+    let n = Notification {
+        item: countersign_core::Item::Approval(&r),
+        event_id: EventId::new(),
+        event: &ev,
+        web_url: "https://cs.example/r",
+    };
     let unsigned = |url: String| {
         WebhookChannel::new(
             ChannelName::new("w"),
@@ -196,4 +210,56 @@ async fn unsigned_hooks_send_no_signature_and_errors_are_classified() {
     // Redirects are not followed (and not success).
     let (url, _) = server(StatusCode::FOUND).await;
     assert!(unsigned(url).notify(n).await.is_err());
+}
+
+fn question(confidential: bool) -> countersign_core::Question {
+    let policy: countersign_core::QuestionPolicy =
+        toml::from_str("name = \"deploys\"\nresponders = [\"person:bob\"]\nconfidential = \"allow\"").unwrap();
+    let asker = countersign_core::Asker { client: countersign_core::ClientId::new("agent-host"), actor: None };
+    let schema = serde_json::json!({"type": "object", "properties": {"go": {"type": "boolean"}}});
+    let confidentiality = countersign_core::Confidentiality { question: confidential, answer_may_be: false };
+    countersign_core::Question::ask(
+        asker,
+        "Rotate the TOP-SECRET key?".into(),
+        schema,
+        BTreeMap::from([("ticket".to_owned(), "OPS-42".to_owned())]),
+        &policy,
+        confidentiality,
+        Timestamp::UNIX_EPOCH,
+    )
+    .0
+}
+
+#[test]
+fn payloads_say_what_they_are_about_and_withhold_what_chat_may_not_see() {
+    let mut r = request();
+    r.sensitive = true;
+    let ev = DomainEvent::Requested { request_id: r.id, at: Timestamp::UNIX_EPOCH };
+    let n =
+        Notification { item: countersign_core::Item::Approval(&r), event_id: EventId::new(), event: &ev, web_url: "u" };
+    let v = serde_json::to_value(Payload::new(n, Timestamp::UNIX_EPOCH)).unwrap();
+    assert_eq!(v["kind"], "approval");
+    assert_eq!(v["request"]["sensitive"], true);
+    assert_eq!(v["request"]["requirements"]["policy"], "ops");
+    let text = v.to_string();
+    for secret in ["agent-7", "db-prod", "rotate"] {
+        assert!(!text.contains(secret), "{secret} leaked: {text}");
+    }
+
+    for confidential in [false, true] {
+        let q = question(confidential);
+        let ev = DomainEvent::Requested { request_id: q.id, at: Timestamp::UNIX_EPOCH };
+        let n = Notification {
+            item: countersign_core::Item::Question(&q),
+            event_id: EventId::new(),
+            event: &ev,
+            web_url: "u",
+        };
+        let v = serde_json::to_value(Payload::new(n, Timestamp::UNIX_EPOCH)).unwrap();
+        assert_eq!(v["kind"], "question");
+        assert!(v.get("request").is_none());
+        assert_eq!(v["question"]["asker"]["client"], "agent-host");
+        assert_eq!(v.to_string().contains("TOP-SECRET"), !confidential);
+        assert_eq!(v.to_string().contains("OPS-42"), !confidential);
+    }
 }

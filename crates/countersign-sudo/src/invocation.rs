@@ -9,6 +9,10 @@ use crate::Error;
 /// reason shown to approvers.
 pub const REASON_ENV: &str = "COUNTERSIGN_REASON";
 
+/// Environment variable, in the caller's environment: `1` asks to keep the
+/// details out of chat channels (the policy decides whether that is honoured).
+pub const SENSITIVE_ENV: &str = "COUNTERSIGN_SENSITIVE";
+
 /// Binaries accepted as the calling `sudo` when the configuration does not
 /// list any.
 pub const DEFAULT_SUDO_BINARIES: &[&str] = &[
@@ -32,6 +36,8 @@ pub struct Invocation {
     pub tty: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub sensitive: bool,
 }
 
 /// Access to the calling process and the user database. Abstracted for tests.
@@ -125,11 +131,12 @@ pub fn read(
 
     let args = nul_split(&host.cmdline(pid).map_err(io("command line"))?);
     let parsed = parse_sudo_args(&args);
-    let reason = nul_split(&host.environ(pid).unwrap_or_default())
-        .into_iter()
-        .find_map(|kv| kv.strip_prefix(REASON_ENV).and_then(|r| r.strip_prefix('=')).map(str::to_owned))
-        .map(|r| r.trim().to_owned())
-        .filter(|r| !r.is_empty());
+    let environ = nul_split(&host.environ(pid).unwrap_or_default());
+    let env_value = |name: &str| {
+        environ.iter().find_map(|kv| kv.strip_prefix(name).and_then(|r| r.strip_prefix('=')).map(str::trim))
+    };
+    let reason = env_value(REASON_ENV).filter(|r| !r.is_empty()).map(str::to_owned);
+    let sensitive = env_value(SENSITIVE_ENV).is_some_and(|v| matches!(v, "1" | "true" | "yes"));
 
     Ok(Invocation {
         user: user.to_owned(),
@@ -138,6 +145,7 @@ pub fn read(
         cwd: host.cwd(pid).ok().map(|p| p.display().to_string()),
         tty: Some(var("PAM_TTY")).filter(|t| !t.is_empty()).map(str::to_owned),
         reason,
+        sensitive,
     })
 }
 

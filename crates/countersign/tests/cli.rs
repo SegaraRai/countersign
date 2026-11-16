@@ -26,11 +26,14 @@ fn subject() -> SubjectRef {
 
 fn facts() -> SubjectFacts {
     SubjectFacts {
+        source: None,
+        initiator: None,
+        sensitive: false,
         requester: Requester {
             id: "agent\u{1b}[31m-7".into(),
             display_name: None,
             groups: BTreeSet::from(["agents".to_owned()]),
-            identities: BTreeSet::new(),
+            ..Requester::default()
         },
         target: Some("db-prod".into()),
         requested_ttl: None,
@@ -72,6 +75,10 @@ impl AccessBackend for OneSession {
         Ok(())
     }
 
+    fn identity_scheme(&self) -> &'static str {
+        "oct"
+    }
+
     async fn revoke(&self, _: &GrantHandle) -> Result<(), BackendError> {
         *self.state.lock().unwrap() = "revoked";
         Ok(())
@@ -82,16 +89,26 @@ const CONFIG: &str = r#"
     [server]
     public_url = "https://cs.example.test"
 
-    [[approver]]
+    [[person]]
     id = "bob"
-    groups = ["ops"]
 
-    [[approver]]
+    [[person]]
     id = "mallory"
+
+    [[person]]
+    id = "carol"
+
+    [[group]]
+    name = "ops"
+    members = ["bob", "carol"]
+
+    [roles]
+    member = ["group:ops", "person:mallory"]
+    admin = ["person:carol"]
 
     [[policy]]
     name = "agents"
-    match = { requester_group = "agents" }
+    match = { backend_group = "agents" }
     approvers = ["group:ops"]
     max_ttl = "30m"
     min_assurance = "linked"
@@ -139,13 +156,14 @@ async fn lists_and_shows_requests_without_terminal_escapes() {
     let s = setup().await;
     let out = s.run(Command::Requests { all: false, limit: 50, json: false }).await.unwrap();
     let lines: Vec<&str> = out.lines().collect();
-    assert!(lines[0].starts_with("ID") && lines[0].contains("REQUESTER"), "{out}");
+    assert!(lines[0].starts_with("ID") && lines[0].contains("KIND") && lines[0].contains("FROM"), "{out}");
     assert!(lines[1].starts_with(&s.id) && lines[1].contains("pending") && lines[1].contains("db-prod"), "{out}");
     assert!(!out.contains('\u{1b}'), "escape sequences are neutralized");
 
     let json = s.run(Command::Requests { all: true, limit: 50, json: true }).await.unwrap();
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(v[0]["id"], s.id);
+    assert_eq!(v["approvals"][0]["id"], s.id);
+    assert_eq!(v["questions"].as_array().unwrap().len(), 0);
 
     let out = s.run(Command::Show { id: s.id.clone(), json: false }).await.unwrap();
     assert!(out.contains("reason        rotate keys"), "{out}");
@@ -161,14 +179,14 @@ async fn lists_and_shows_requests_without_terminal_escapes() {
 #[tokio::test]
 async fn deny_is_recorded_under_an_eligible_approver() {
     let s = setup().await;
-    let e = s.run(Command::Deny { id: s.id.clone(), approver: "mallory".into(), comment: None }).await.unwrap_err();
+    let e = s.run(Command::Deny { id: s.id.clone(), person: "mallory".into(), comment: None }).await.unwrap_err();
     assert!(e.to_string().contains("not eligible"), "{e}");
-    let e = s.run(Command::Deny { id: s.id.clone(), approver: "nobody".into(), comment: None }).await.unwrap_err();
-    assert!(e.to_string().contains("unknown approver"), "{e}");
+    let e = s.run(Command::Deny { id: s.id.clone(), person: "nobody".into(), comment: None }).await.unwrap_err();
+    assert!(e.to_string().contains("member role"), "{e}");
     assert!(s.state().await.is_pending());
 
     let out =
-        s.run(Command::Deny { id: s.id.clone(), approver: "bob".into(), comment: Some(" looks off ".into()) }).await;
+        s.run(Command::Deny { id: s.id.clone(), person: "bob".into(), comment: Some(" looks off ".into()) }).await;
     assert_eq!(out.unwrap(), format!("{}: denied\n", s.id));
     assert_eq!(*s.backend.state.lock().unwrap(), "rejected");
     let r = &s.store.list_requests(&RequestFilter::default()).await.unwrap()[0];
@@ -196,9 +214,59 @@ async fn revoke_ends_an_active_grant() {
     engine.decide(intent, Timestamp::now()).await.unwrap();
     assert!(matches!(s.state().await, RequestState::Active { .. }));
 
-    let out = s.run(Command::Revoke { id: s.id.clone(), approver: "bob".into() }).await.unwrap();
+    let out = s.run(Command::Revoke { id: s.id.clone(), person: "bob".into() }).await.unwrap();
     assert_eq!(out, format!("{}: revoked\n", s.id));
     assert_eq!(*s.backend.state.lock().unwrap(), "revoked");
+}
+
+async fn approve(s: &Setup, person: &str) {
+    let engine = Engine::new(
+        Arc::clone(&s.store),
+        vec![Arc::clone(&s.backend) as Arc<dyn AccessBackend>],
+        countersignd::rules_from(&Config::from_toml(CONFIG).unwrap()),
+    );
+    let intent = countersign_core::ActionIntent {
+        request_id: s.id.parse().unwrap(),
+        verdict: countersign_core::Verdict::Approve,
+        approver: person.into(),
+        assurance: countersign_core::Assurance::Linked,
+        via: "discord".into(),
+        comment: None,
+    };
+    engine.decide(intent, Timestamp::now()).await.unwrap();
+}
+
+#[tokio::test]
+async fn admins_suspend_reinstate_and_revoke_what_a_person_approved() {
+    let s = setup().await;
+    approve(&s, "bob").await;
+    assert!(matches!(s.state().await, RequestState::Active { .. }));
+
+    let e = s.run(Command::Suspend { actor: "bob".into(), admin: "mallory".into(), reason: None }).await.unwrap_err();
+    assert!(e.to_string().contains("admin"), "only admins: {e}");
+    let e = s.run(Command::Suspend { actor: "carol".into(), admin: "carol".into(), reason: None }).await.unwrap_err();
+    assert!(e.to_string().contains("themselves"), "{e}");
+
+    let out = s.run(Command::RevokeApprovedBy { person: "bob".into(), admin: "carol".into() }).await.unwrap();
+    assert!(out.contains(&format!("{}: revoked", s.id)) && out.ends_with("1 grant(s) revoked\n"), "{out}");
+    assert_eq!(*s.backend.state.lock().unwrap(), "revoked");
+
+    let out =
+        s.run(Command::Suspend { actor: "bob".into(), admin: "carol".into(), reason: Some("lost laptop".into()) });
+    assert_eq!(out.await.unwrap(), "suspended bob\n");
+    s.store.link_account(&"discord".into(), "123", &"bob".into()).await.unwrap();
+    let links = s.run(Command::Links { json: false }).await.unwrap();
+    assert!(links.contains("bob (inactive)"), "{links}");
+    let out = s.run(Command::Reinstate { actor: "bob".into(), admin: "carol".into() }).await.unwrap();
+    assert_eq!(out, "reinstated bob\n");
+    let out = s.run(Command::Reinstate { actor: "bob".into(), admin: "carol".into() }).await.unwrap();
+    assert_eq!(out, "bob was not suspended\n");
+
+    let actions = s.store.admin_actions(10).await.unwrap();
+    let names: Vec<&str> = actions.iter().map(|a| a.action.as_str()).collect();
+    for name in ["suspend", "reinstate", "revoke-approved-by"] {
+        assert!(names.contains(&name), "{names:?}");
+    }
 }
 
 #[tokio::test]
@@ -209,11 +277,15 @@ async fn links_can_be_listed_and_removed() {
     s.store.link_account(&"discord".into(), "456", &"gone".into()).await.unwrap();
     let out = s.run(Command::Links { json: false }).await.unwrap();
     assert!(out.contains("discord  123      bob"), "{out}");
-    assert!(out.contains("gone (unknown)"), "approvers no longer configured are flagged: {out}");
+    assert!(out.contains("gone (inactive)"), "persons no longer configured are flagged: {out}");
 
-    let out = s.run(Command::Unlink { channel: "discord".into(), external_id: "123".into() }).await.unwrap();
+    let unlink =
+        |admin: &str| Command::Unlink { channel: "discord".into(), external_id: "123".into(), admin: admin.into() };
+    let e = s.run(unlink("bob")).await.unwrap_err();
+    assert!(e.to_string().contains("admin"), "{e}");
+    let out = s.run(unlink("carol")).await.unwrap();
     assert_eq!(out, "unlinked 123 on discord\n");
-    assert!(s.run(Command::Unlink { channel: "discord".into(), external_id: "123".into() }).await.is_err());
+    assert!(s.run(unlink("carol")).await.is_err());
     let v: serde_json::Value = serde_json::from_str(&s.run(Command::Links { json: true }).await.unwrap()).unwrap();
     assert_eq!(v.as_array().unwrap().len(), 1);
 }
@@ -249,7 +321,7 @@ fn keygen_writes_usable_secrets_and_refuses_to_overwrite() {
     let key = std::fs::read_to_string(&host).unwrap();
     let key = key.trim();
     assert!(countersign_core::host_key::is_well_formed(key), "{key}");
-    assert_eq!(line, format!("key_sha256 = \"{}\"", countersign_core::host_key::digest_hex(key)));
+    assert_eq!(line, format!("auth = {{ host_key_sha256 = \"{}\" }}", countersign_core::host_key::digest_hex(key)));
     assert!(!line.contains(key), "the key itself is not printed");
     assert!(matches!(host_key(&host, false), Err(CliError::Usage(_))));
     host_key(&host, true).unwrap();
