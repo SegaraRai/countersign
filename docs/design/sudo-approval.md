@@ -51,6 +51,8 @@ both `sudo` and `sudo-rs`. Both read `/etc/pam.d/sudo` (and `sudo-i` for
 # The agent must authenticate for every sudo, so every sudo reaches PAM.
 agent   ALL=(ALL) ALL
 Defaults:agent timestamp_timeout=0
+# sudo -n (and sudo without a terminal) only reaches PAM with this.
+Defaults:agent noninteractive_auth
 ```
 
 A `NOPASSWD` entry for the agent would skip PAM entirely and must not exist.
@@ -64,7 +66,7 @@ Prepended to the `auth` section of `/etc/pam.d/sudo` and `/etc/pam.d/sudo-i`:
 ```pam
 # The agent: countersign decides, and nothing else is tried.
 auth [success=ignore default=1] pam_succeed_if.so quiet user = agent
-auth [success=done default=die]  pam_exec.so quiet stdout seteuid /usr/local/libexec/countersign-sudo
+auth [success=done default=die]  pam_exec.so quiet seteuid /usr/local/libexec/countersign-sudo
 # Everyone else falls through to the normal stack.
 @include common-auth
 ```
@@ -74,8 +76,13 @@ the `pam_exec` line, and authentication proceeds as before. The helper is
 never run for them, so countersign's availability cannot affect them.
 
 `seteuid` runs the helper with root as its real uid too, so the calling user
-cannot signal or inspect it; `stdout` shows its messages (the approval link,
-the outcome) to the user.
+cannot signal or inspect it. `pam_exec`'s `stdout` option must not be used:
+without a terminal the PAM conversation fails and `pam_exec` fails
+authentication even after an approval (seen with `sudo-rs` and `sudo -n`).
+`pam_exec` gives the helper unread pipes and no controlling terminal, so the
+helper writes its messages to the calling `sudo`'s stderr (`/proc/$PPID/fd/2`),
+reopened only when it is a pipe or a terminal — never a regular file, which
+the caller could point at a file only root may write.
 
 ### Helper (`countersign-sudo`)
 

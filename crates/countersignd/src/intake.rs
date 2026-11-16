@@ -37,6 +37,8 @@ use crate::engine::{Engine, EngineError, Submitted};
 pub const KIND_SUDO: &str = "sudo";
 
 const MAX_WAIT: Duration = Duration::from_secs(60);
+/// While long-polling, re-read the request at least this often.
+const RECHECK: Duration = Duration::from_secs(2);
 const MAX_ARGV_BYTES: usize = 8 * 1024;
 const MAX_FIELD: usize = 1024;
 const MAX_REASON: usize = 500;
@@ -520,10 +522,14 @@ async fn status(
         changes.borrow_and_update();
         let r = state.owned(id, &raw).await?;
         if host_state(&r) == "pending" {
-            if let Ok(Ok(())) = tokio::time::timeout_at(deadline, changes.changed()).await {
-                continue;
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(Json(status_body(&state, &r)));
             }
-            return Ok(Json(status_body(&state, &r)));
+            // Wake on changes made by this process, and re-read now and then
+            // for changes made elsewhere (e.g. the CLI deciding).
+            let _ = tokio::time::timeout_at(deadline.min(now + RECHECK), changes.changed()).await;
+            continue;
         }
         if matches!(r.state, RequestState::Active { .. }) && r.requirements.grant == GrantMode::Once {
             // The host has the answer; a single-use approval ends here.

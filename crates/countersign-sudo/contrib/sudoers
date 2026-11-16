@@ -6,3 +6,6 @@
 
 agent   ALL=(ALL:ALL) ALL
 Defaults:agent timestamp_timeout=0
+# Let `sudo -n` (and sudo without a terminal, as agents usually run it) go
+# through PAM: the helper needs no input from the user.
+Defaults:agent noninteractive_auth

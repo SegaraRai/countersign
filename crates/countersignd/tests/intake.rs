@@ -327,3 +327,37 @@ fn configuration_mistakes_are_reported() {
     assert!(e.contains("used by another host"), "{e}");
     assert!(e.contains("need an [intake] section"), "{e}");
 }
+
+#[tokio::test]
+async fn decisions_made_by_another_process_reach_waiting_hosts() {
+    let s = Arc::new(setup().await);
+    let (_, v) = s.submit(WEB1, "agent", &["reboot"]).await;
+    let id = id_of(&v);
+    let waiter = {
+        let s = Arc::clone(&s);
+        let id = id.clone();
+        tokio::spawn(async move { s.status(WEB1, &id, 30).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The CLI decides through its own engine on the same database.
+    let config = config();
+    let other = countersignd::engine::Engine::new(
+        Arc::clone(&s.store),
+        build_backends(&config, &s.store).unwrap(),
+        countersignd::rules_from(&config),
+    );
+    let started = std::time::Instant::now();
+    let intent = ActionIntent {
+        request_id: id.parse().unwrap(),
+        verdict: Verdict::Deny,
+        approver: "bob".into(),
+        assurance: Assurance::Linked,
+        via: "cli".into(),
+        comment: None,
+    };
+    other.decide(intent, Timestamp::now()).await.unwrap();
+    let (_, v) = waiter.await.unwrap();
+    assert_eq!(v["state"], "denied");
+    assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+}
