@@ -16,7 +16,7 @@
     <td><strong>{{ a.id }}</strong>{% if a.name != a.id %} <span class="muted">{{ a.name }}</span>{% endif %}
       {% if !a.owners.is_empty() %}<div class="muted">owners: {{ a.owners }}</div>{% endif %}</td>
     <td>{{ a.kind }}</td>
-    <td>{% if a.suspended %}<span class="state state-denied">suspended</span> <span class="muted">{{ a.status }}</span>{% else %}{{ a.status }}{% endif %}</td>
+    <td>{% if a.suspended %}<span class="state tone-bad">suspended</span> <span class="muted">{{ a.status }}</span>{% else %}{{ a.status }}{% endif %}</td>
     <td>{{ a.groups }}</td>
     <td>{{ a.roles }}</td>
     {% if admin %}

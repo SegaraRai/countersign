@@ -37,6 +37,7 @@ fn open_request(subject_id: &str, now: Timestamp) -> (Request, Vec<countersign_c
         pending_timeout: Duration::from_secs(300),
         grant: countersign_core::GrantMode::Once,
         require_initiator: false,
+        scope: std::collections::BTreeMap::default(),
     };
     Request::open(pending, reqs, false, now)
 }

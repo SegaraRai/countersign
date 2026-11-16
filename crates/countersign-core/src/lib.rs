@@ -27,10 +27,12 @@ mod glob;
 pub mod host_key;
 pub mod id;
 pub mod policy;
+pub mod present;
 pub mod question;
 pub mod request;
 pub mod store;
 pub mod subject;
+pub mod sudo;
 pub mod text;
 mod time;
 pub mod url;
@@ -56,4 +58,4 @@ pub use question::{
 };
 pub use request::{Decision, Request, RequestState, TransitionError, Use, Verdict};
 pub use store::{AccountLink, AdminAction, OutboxItem, RequestFilter, Store, StoreError};
-pub use subject::{Initiator, PendingSubject, Requester, Source, SubjectFacts, SubjectRef};
+pub use subject::{Action, Detail, Initiator, PendingSubject, Requester, Source, SubjectFacts, SubjectRef};

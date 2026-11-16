@@ -194,7 +194,8 @@ impl Setup {
     }
 
     async fn submit(&self, key: &str, user: &str, argv: &[&str]) -> (StatusCode, Value) {
-        let body = json!({ "user": user, "argv": argv, "cwd": "/home/agent", "reason": "deploy", "nonce": NONCE });
+        let line: Vec<&str> = std::iter::once("sudo").chain(argv.iter().copied()).collect();
+        let body = json!({ "user": user, "sudo_argv": line, "cwd": "/home/agent", "reason": "deploy", "nonce": NONCE });
         self.call(Call {
             method: "POST",
             path: "/intake/v1/requests".into(),
@@ -238,7 +239,7 @@ async fn hosts_must_present_a_known_key_from_an_allowed_address() {
         method: "POST",
         path: "/intake/v1/requests".into(),
         key,
-        body: Some(json!({ "user": "agent", "argv": ["true"], "nonce": NONCE })),
+        body: Some(json!({ "user": "agent", "sudo_argv": ["sudo", "true"], "nonce": NONCE })),
         peer,
     };
     assert_eq!(s.call(post(None, None)).await.0, StatusCode::UNAUTHORIZED);
@@ -272,8 +273,9 @@ async fn behind_a_proxy_the_client_address_comes_from_its_header() {
         for f in forwarded {
             req = req.header("x-forwarded-for", *f);
         }
-        let mut req =
-            req.body(Body::from(json!({ "user": "agent", "argv": ["true"], "nonce": NONCE }).to_string())).unwrap();
+        let mut req = req
+            .body(Body::from(json!({ "user": "agent", "sudo_argv": ["sudo", "true"], "nonce": NONCE }).to_string()))
+            .unwrap();
         // The proxy itself connects from loopback.
         req.extensions_mut().insert(ConnectInfo("127.0.0.1:40000".parse::<SocketAddr>().unwrap()));
         let app = s.app.clone();
@@ -300,12 +302,12 @@ async fn approvals_are_signed_for_the_submission_and_the_client() {
     let v = s.status(WEB1, &id, 0).await.1;
     assert_eq!(v["state"], "approved");
     let sig = v["signature"].as_str().unwrap();
-    let argv: Vec<String> = ["systemctl", "restart", "nginx"].map(String::from).to_vec();
-    let digest = invocation_digest("agent", None, &argv);
+    let line: Vec<String> = ["sudo", "systemctl", "restart", "nginx"].map(String::from).to_vec();
+    let digest = invocation_digest("agent", Some("/home/agent"), &line);
     let client = countersign_core::host_key::digest_hex(WEB1);
     let approval = Approval { request: &id, client: &client, invocation: &digest, nonce: NONCE };
     assert!(verify(&public, &approval, sig));
-    let other = invocation_digest("agent", None, &["reboot".to_owned()]);
+    let other = invocation_digest("agent", Some("/home/agent"), &["sudo".to_owned(), "reboot".to_owned()]);
     assert!(!verify(&public, &Approval { invocation: &other, ..approval }, sig));
     let web2 = countersign_core::host_key::digest_hex(WEB2);
     assert!(!verify(&public, &Approval { client: &web2, ..approval }, sig));
@@ -317,7 +319,7 @@ async fn approvals_are_signed_for_the_submission_and_the_client() {
     assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["server_key"], public[0].as_str());
 
     // Without a usable nonce there is nothing to bind an approval to.
-    let body = json!({ "user": "agent", "argv": ["true"], "nonce": "short" });
+    let body = json!({ "user": "agent", "sudo_argv": ["sudo", "true"], "nonce": "short" });
     let (status, _) = s
         .call(Call {
             method: "POST",
@@ -328,7 +330,7 @@ async fn approvals_are_signed_for_the_submission_and_the_client() {
         })
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let body = json!({ "user": "agent", "argv": ["true"] });
+    let body = json!({ "user": "agent", "sudo_argv": ["sudo", "true"] });
     let (status, _) = s
         .call(Call {
             method: "POST",
@@ -357,6 +359,16 @@ async fn a_single_use_approval_is_collected_once_and_covers_nothing_else() {
     assert!(!r.sensitive);
     assert_eq!(r.facts.attributes["command"], "systemctl restart nginx");
     assert_eq!(r.facts.attributes["runas"], "root");
+    assert_eq!(
+        r.facts.action,
+        Some(countersign_core::Action::Command {
+            line: ["sudo", "systemctl", "restart", "nginx"].map(String::from).to_vec(),
+            runas: "root".into(),
+            cwd: Some("/home/agent".into()),
+            notes: vec![],
+        }),
+        "approvers see the line as typed"
+    );
     assert_eq!(r.facts.reason.as_deref(), Some("deploy"));
     assert_eq!(r.requirements.policy.as_str(), "other");
 
@@ -416,7 +428,7 @@ async fn a_window_approves_later_matching_commands_and_records_them() {
         method: "POST",
         path: "/intake/v1/requests".into(),
         key: Some(WEB2),
-        body: Some(json!({ "user": "agent", "argv": ["apt", "install", "jq"], "nonce": NONCE })),
+        body: Some(json!({ "user": "agent", "sudo_argv": ["sudo", "apt", "install", "jq"], "nonce": NONCE })),
         peer: Some("100.64.0.22"),
     };
     assert_eq!(s.call(peer).await.0, StatusCode::CREATED);
@@ -473,7 +485,7 @@ async fn commands_are_quoted_and_control_characters_neutralized() {
     let (_, v) = s.submit(WEB1, "agent", &["sh", "-c", "echo 'hi' \u{1b}[31m"]).await;
     let r = s.request(&id_of(&v)).await;
     let command = &r.facts.attributes["command"];
-    assert_eq!(command, r"sh -c 'echo '\''hi'\'' \u{1b}[31m'");
+    assert_eq!(command, r"sh -c $'echo \'hi\' \e[31m'");
     assert!(!command.contains('\u{1b}'));
 }
 
@@ -484,14 +496,39 @@ async fn commands_cannot_hide_what_they_are() {
     // something other than what runs; a zero-width space is not seen at all.
     let (_, v) = s.submit(WEB1, "agent", &["echo", "\u{202e}rm -rf /", "x\u{200b}y"]).await;
     let r = s.request(&id_of(&v)).await;
-    assert_eq!(r.facts.attributes["command"], r"echo '\u{202e}rm -rf /' 'x\u{200b}y'");
+    assert_eq!(r.facts.attributes["command"], r"echo $'\u202Erm -rf /' $'x\u200By'");
 
     // Commands too long to show in full are not offered for approval at all.
     let long = "a".repeat(countersignd::intake::MAX_COMMAND_CHARS);
     let (status, v) = s.submit(WEB1, "agent", &["echo", &long]).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
-    let (status, v) = s.submit(WEB1, "agent", &["echo", &long[5..]]).await;
+    let (status, v) = s.submit(WEB1, "agent", &["echo", &long[10..]]).await;
     assert_eq!(status, StatusCode::CREATED, "exactly the limit: {v}");
+}
+
+#[tokio::test]
+async fn countersign_reads_who_runs_what_from_the_sudo_line() {
+    let s = setup().await;
+    let (_, v) = s.submit(WEB1, "agent", &["-u", "postgres", "psql"]).await;
+    let r = s.request(&id_of(&v)).await;
+    assert_eq!((r.facts.attributes["runas"].as_str(), r.facts.attributes["command"].as_str()), ("postgres", "psql"));
+    let Some(countersign_core::Action::Command { runas, notes, .. }) = &r.facts.action else { panic!() };
+    assert_eq!((runas.as_str(), notes.len()), ("postgres", 0));
+
+    // Options countersign does not interpret: the raw arguments, with a note.
+    let (_, v) = s.submit(WEB1, "agent", &["-E", "apt", "install", "jq"]).await;
+    let r = s.request(&id_of(&v)).await;
+    assert_eq!(r.facts.attributes["command"], "-E apt install jq");
+    let Some(countersign_core::Action::Command { notes, .. }) = &r.facts.action else { panic!() };
+    assert!(notes[0].starts_with("-E keeps the caller's environment"), "{notes:?}");
+
+    // Only sudo command lines.
+    for line in [json!(["apt", "install"]), json!(["sudo"]), json!([])] {
+        let body = json!({ "user": "agent", "sudo_argv": line, "nonce": NONCE });
+        let call =
+            Call { method: "POST", path: "/intake/v1/requests".into(), key: Some(WEB1), body: Some(body), peer: None };
+        assert_eq!(s.call(call).await.0, StatusCode::BAD_REQUEST, "{line}");
+    }
 }
 
 #[tokio::test]
@@ -544,7 +581,8 @@ fn configuration_mistakes_are_reported() {
 #[tokio::test]
 async fn sensitive_requests_are_marked_when_the_policy_honors_it() {
     let s = setup().await;
-    let body = json!({ "user": "agent", "argv": ["cat", "/etc/shadow"], "sensitive": true, "nonce": NONCE });
+    let body =
+        json!({ "user": "agent", "sudo_argv": ["sudo", "cat", "/etc/shadow"], "sensitive": true, "nonce": NONCE });
     let call =
         Call { method: "POST", path: "/intake/v1/requests".into(), key: Some(WEB1), body: Some(body), peer: None };
     let (status, v) = s.call(call).await;

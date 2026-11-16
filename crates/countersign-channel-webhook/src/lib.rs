@@ -25,6 +25,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use countersign_core::present::{Audience, Presentation};
 use countersign_core::{
     Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, EventId, Item, MessageRef, Notification, Question,
     Request,
@@ -75,6 +76,10 @@ pub struct Payload<'a> {
     /// confidential text or answers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question: Option<Question>,
+    /// How countersign shows it to people (headline, grant, action, status
+    /// in words), withheld like the snapshot, so receivers need not rebuild
+    /// the wording.
+    pub presentation: Presentation,
 }
 
 impl<'a> Payload<'a> {
@@ -92,6 +97,7 @@ impl<'a> Payload<'a> {
             kind: n.item.kind(),
             request,
             question,
+            presentation: Presentation::of(n.item, Audience::Chat),
         }
     }
 }

@@ -65,6 +65,7 @@ impl FakeBackend {
             source: None,
             sensitive: false,
             binding: None,
+            action: None,
             requester: Requester {
                 id: user.into(),
                 display_name: None,

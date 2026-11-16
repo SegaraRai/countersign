@@ -83,6 +83,7 @@ fn request() -> Request {
             target: Some("db-prod".into()),
             requested_ttl: None,
             reason: None,
+            action: None,
             attributes: BTreeMap::new(),
         },
         observed_at: Timestamp::UNIX_EPOCH,
@@ -96,6 +97,7 @@ fn request() -> Request {
         pending_timeout: Duration::from_secs(600),
         exclude: BTreeSet::from([countersign_core::Exclusion::Requester]),
         require_initiator: false,
+        scope: std::collections::BTreeMap::default(),
         grant: countersign_core::GrantMode::Once,
     };
     Request::open(pending, reqs, false, Timestamp::UNIX_EPOCH).0
@@ -169,6 +171,8 @@ async fn posts_signed_events_that_receivers_can_verify() {
         assert_eq!(v["event"]["type"], "requested");
         assert_eq!(v["request"]["facts"]["requester"]["id"], "agent-7");
         assert_eq!(v["request"]["state"]["state"], "pending");
+        assert_eq!(v["presentation"]["status"]["label"], "Waiting for approval");
+        assert!(v["presentation"]["headline"].as_str().unwrap().starts_with("agent-7 wants"), "{v}");
     }
     // Tampering is detectable.
     let hit = &hits[0];

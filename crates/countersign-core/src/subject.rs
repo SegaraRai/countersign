@@ -83,6 +83,61 @@ pub struct Initiator {
     pub actor: Option<ActorId>,
 }
 
+/// What a request asks to do, as its source describes it, for showing to
+/// approvers. Policies match on [`SubjectFacts::attributes`], not on this.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum Action {
+    /// A command line, exactly as the program that asks received it (for
+    /// `sudo`: the whole `sudo` command line).
+    Command {
+        line: Vec<String>,
+        /// Who the command runs as.
+        runas: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        /// Remarks for approvers from countersign's reading of the line
+        /// (e.g. why command-specific policies did not apply).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notes: Vec<String>,
+    },
+    /// A network session waiting to be let through (Octelium).
+    Session {
+        /// Backend-defined session type (`client`, `clientless`, ...).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+        /// The user agent of the connecting program.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client: Option<String>,
+        /// The credential the session authenticated with.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        credential: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        browser: bool,
+    },
+    /// Anything else: a title and a few labelled lines (exec backends).
+    Generic {
+        title: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        lines: Vec<Detail>,
+    },
+}
+
+/// A labelled value, as shown to approvers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Detail {
+    pub label: String,
+    pub value: String,
+}
+
+impl Detail {
+    pub fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self { label: label.into(), value: value.into() }
+    }
+}
+
 /// Facts about a subject that its source vouches for. Never taken from the
 /// requester's own claims.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +156,9 @@ pub struct SubjectFacts {
     /// Free text supplied by the requester. Displayed, never trusted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// What the request asks to do, for approvers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<Action>,
     /// Additional backend-defined attributes, usable in policy matchers.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attributes: BTreeMap<String, String>,
@@ -124,6 +182,7 @@ impl SubjectFacts {
             target: None,
             requested_ttl: None,
             reason: None,
+            action: None,
             attributes: BTreeMap::new(),
             sensitive: false,
             binding: None,

@@ -109,7 +109,7 @@ On the same host, `countersign` reads the daemon's configuration and database:
 
 ```sh
 countersign requests                  # open approvals and questions (--all, --json)
-countersign show <id>
+countersign show <id>                 # --verbose adds the audit details, --json the raw record
 countersign deny <id> --as alice      # recorded as alice, via "cli"
 countersign revoke <id> --as alice
 countersign suspend bob --as alice --reason "lost laptop"   # admins only

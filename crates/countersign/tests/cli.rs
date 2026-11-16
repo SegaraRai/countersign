@@ -39,6 +39,7 @@ fn facts() -> SubjectFacts {
         target: Some("db-prod".into()),
         requested_ttl: None,
         reason: Some("rotate keys".into()),
+        action: None,
         attributes: BTreeMap::from([("session_type".to_owned(), "CLIENT".to_owned())]),
     }
 }
@@ -157,8 +158,11 @@ async fn lists_and_shows_requests_without_terminal_escapes() {
     let s = setup().await;
     let out = s.run(Command::Requests { all: false, limit: 50, json: false }).await.unwrap();
     let lines: Vec<&str> = out.lines().collect();
-    assert!(lines[0].starts_with("ID") && lines[0].contains("KIND") && lines[0].contains("FROM"), "{out}");
-    assert!(lines[1].starts_with(&s.id) && lines[1].contains("pending") && lines[1].contains("db-prod"), "{out}");
+    assert!(lines[0].starts_with("ID") && lines[0].contains("KIND") && lines[0].contains("REQUEST"), "{out}");
+    assert!(
+        lines[1].starts_with(&s.id) && lines[1].contains("Waiting for approval") && lines[1].contains("db-prod"),
+        "{out}"
+    );
     assert!(!out.contains('\u{1b}'), "escape sequences are neutralized");
 
     let json = s.run(Command::Requests { all: true, limit: 50, json: true }).await.unwrap();
@@ -166,15 +170,26 @@ async fn lists_and_shows_requests_without_terminal_escapes() {
     assert_eq!(v["approvals"][0]["id"], s.id);
     assert_eq!(v["questions"].as_array().unwrap().len(), 0);
 
-    let out = s.run(Command::Show { id: s.id.clone(), json: false }).await.unwrap();
-    assert!(out.contains("reason        rotate keys"), "{out}");
-    assert!(out.contains("policy        agents"), "{out}");
-    assert!(out.lines().all(|l| l.contains(' ')), "every key is separated from its value: {out}");
+    let out = s.run(Command::Show { id: s.id.clone(), verbose: false, json: false }).await.unwrap();
+    assert!(out.contains("Reason        rotate keys   (from the requester, unverified)"), "{out}");
+    assert!(!out.contains("Policy"), "audit details only with --verbose: {out}");
+    assert!(out.lines().filter(|l| !l.is_empty()).all(|l| l.contains(' ')), "keys separated from values: {out}");
     assert!(!out.contains('\u{1b}'));
+    let out = s.run(Command::Show { id: s.id.clone(), verbose: true, json: false }).await.unwrap();
+    assert!(out.contains("Policy        agents"), "{out}");
+    let json = s.run(Command::Show { id: s.id.clone(), verbose: false, json: true }).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        (v["approval"]["id"].as_str(), v["presentation"]["kind"].as_str()),
+        (Some(s.id.as_str()), Some("approval"))
+    );
 
-    assert!(matches!(s.run(Command::Show { id: "nope".into(), json: false }).await, Err(CliError::Usage(_))));
+    assert!(matches!(
+        s.run(Command::Show { id: "nope".into(), verbose: false, json: false }).await,
+        Err(CliError::Usage(_))
+    ));
     let missing = countersign_core::RequestId::new().to_string();
-    assert!(matches!(s.run(Command::Show { id: missing, json: true }).await, Err(CliError::Usage(_))));
+    assert!(matches!(s.run(Command::Show { id: missing, verbose: false, json: true }).await, Err(CliError::Usage(_))));
 }
 
 #[tokio::test]

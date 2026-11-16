@@ -1,14 +1,15 @@
 {% extends "base.html" %}
-{% block title %}Question · countersign{% endblock %}
+{% block title %}{{ headline }} · countersign{% endblock %}
 {% block content %}
 <p><a href="/">&larr; All requests</a></p>
 {% if let Some(e) = error %}<div class="flash flash-error">{{ e }}</div>{% endif %}
 
 <div class="card question">
-  <h1><span class="kind kind-question">Question</span> from {{ q.asker }}
-    <span class="state state-q-{{ q.state }}">{% if q.state == "expired" %}no answer{% else %}{{ q.state }}{% endif %}</span></h1>
+  <h1><span class="kind kind-question">Question</span> {{ headline }}</h1>
+  <p><span class="state tone-{{ tone }}">{{ label }}</span>{% if let Some(d) = detail %} <span class="muted">· {{ d }}</span>{% endif %}{% if let Some(w) = when %} · {{ w.label }} {{ w.at }} <span class="muted">({{ w.relative }})</span>{% endif %}</p>
+  <div class="grant">{{ grant }}.</div>
   <p class="muted">Asked by client <code>{{ q.asker }}</code>{% if let Some(a) = q.asker_actor %} for <code>{{ a }}</code>{% endif %}.
-     The text below comes from the asker and is unverified. A question never grants access.</p>
+     The text below comes from the asker and is unverified.</p>
   {% if q.confidential_question %}<p class="flash flash-info">Confidential question: its text and answer are removed once they are no longer needed, and it is never shown in chat.</p>{% endif %}
   {% if let Some(m) = q.message %}
   <div class="message">{{ m }}</div>

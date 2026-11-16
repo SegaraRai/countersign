@@ -218,6 +218,10 @@ pub struct Requirements {
     pub grant: GrantMode,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_initiator: bool,
+    /// The attribute globs the policy matched on (e.g. `command = "apt*"`):
+    /// for a window, what later subjects must match to be covered.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scope: BTreeMap<String, String>,
 }
 
 impl Policy {
@@ -240,6 +244,7 @@ impl Policy {
             pending_timeout: self.pending_timeout,
             grant: self.grant,
             require_initiator: self.require_initiator,
+            scope: self.matcher.attributes.clone(),
         }
     }
 

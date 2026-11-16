@@ -26,15 +26,13 @@ th { color: var(--muted); font-weight: 500; font-size: .85rem; }
 .card h1, .card h2 { margin-top: 0; }
 .muted { color: var(--muted); }
 .state { display: inline-block; padding: 0 .5rem; border-radius: 999px; font-size: .85rem; border: 1px solid currentColor; }
-.state-pending { color: var(--warn); }
-.state-active, .state-approved { color: var(--ok); }
-.state-denied, .state-failed, .state-revoked { color: var(--bad); }
-.state-ended { color: var(--done); }
-.state-expired, .state-withdrawn { color: var(--muted); }
-.state-q-pending { color: var(--warn); }
-.state-q-answered { color: var(--done); }
-.state-q-declined { color: var(--bad); }
-.state-q-expired, .state-q-withdrawn { color: var(--muted); }
+.tone-waiting, .tone-asking { color: var(--warn); }
+.tone-good { color: var(--ok); }
+.tone-done { color: var(--done); }
+.tone-bad { color: var(--bad); }
+.tone-muted { color: var(--muted); }
+.grant { padding: .6rem .75rem; border-left: 4px solid var(--warn); background: var(--line); border-radius: 4px; margin: .5rem 0; }
+pre.command { white-space: pre-wrap; overflow-wrap: anywhere; padding: .75rem; border: 1px solid var(--line); border-radius: 6px; }
 .kind { display: inline-block; padding: 0 .4rem; border-radius: 4px; font-size: .75rem; font-weight: 600;
         text-transform: uppercase; letter-spacing: .03em; vertical-align: middle; }
 .kind-approval { background: var(--line); color: var(--fg); }

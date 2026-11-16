@@ -10,12 +10,9 @@
 //! never shown here, only who answered.
 
 use std::fmt::Write as _;
-use std::time::Duration;
 
-use countersign_core::{
-    ApproveMode, ChannelCaps, FieldKind, GrantMode, Item, Notification, Question, QuestionOutcome, Request,
-    RequestState, Verdict,
-};
+use countersign_core::present::{Audience, Presentation, Shown, Tone, When};
+use countersign_core::{ApproveMode, ChannelCaps, FieldKind, Item, Notification, Question, Request, Verdict};
 use twilight_model::channel::message::Component;
 use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle};
 use twilight_model::channel::message::embed::{Embed, EmbedField, EmbedFooter};
@@ -44,6 +41,8 @@ const MAX_OPTION_BUTTONS: usize = 4;
 const MAX_MESSAGE: usize = 2000;
 const MAX_CONTEXT_SHOWN: usize = 2400;
 const MAX_DECISIONS: usize = 10;
+/// Most window uses listed.
+const MAX_USES: usize = 5;
 /// Longest command and reason shown in full. Together they stay within
 /// Discord's 4096-character embed description.
 const MAX_COMMAND: usize = 3200;
@@ -52,10 +51,14 @@ const MAX_REASON: usize = 600;
 pub fn view(n: Notification<'_>, caps: ChannelCaps) -> View {
     let web = web_link(n.web_url);
     match n.item {
-        Item::Approval(r) if r.sensitive => {
-            View { embeds: vec![withheld_approval_embed(r, web)], components: link_only(r.state.is_pending(), web) }
+        Item::Approval(r) => {
+            let p = Presentation::approval(r, Audience::Chat);
+            if p.withheld {
+                View { embeds: vec![withheld_embed(r, &p, web)], components: link_only(r.state.is_pending(), web) }
+            } else {
+                View { embeds: vec![embed(r, &p, web)], components: components(r, web, caps, shown_in_full(&p)) }
+            }
         }
-        Item::Approval(r) => View { embeds: vec![embed(r, web)], components: components(r, web, caps) },
         Item::Question(q) => {
             let (embed, complete) = question_embed(q, web);
             View { embeds: vec![embed], components: question_components(q, web, caps, complete) }
@@ -87,22 +90,32 @@ fn field(e: &mut Embed, name: &str, value: String, inline: bool) {
 }
 
 /// A sensitive approval: no requester, target, command or reason.
-fn withheld_approval_embed(r: &Request, web: Option<&str>) -> Embed {
-    let item = Item::Approval(r);
-    let mut e = base_embed(format!("Sensitive access request — {}", r.state.name()), color(&r.state), r.id, web);
-    e.description = Some(format!("{}\nThe details are only in the web UI.", code(&item.safe_title())));
-    field(&mut e, "From", code(&item.origin()), true);
-    field(&mut e, "Policy", code(item.policy()), true);
-    field(
-        &mut e,
-        "Approvals",
-        format!("{}/{} (min. assurance: {})", r.approvals().len(), r.requirements.quorum, r.requirements.min_assurance),
-        true,
-    );
-    if r.state.is_pending() {
-        field(&mut e, "Decide by", format!("<t:{0}:f> (<t:{0}:R>)", r.pending_until.as_second()), false);
+fn withheld_embed(r: &Request, p: &Presentation, web: Option<&str>) -> Embed {
+    let mut e = base_embed(title(p), tone_color(p.status.tone), r.id, web);
+    e.description = Some("The details are only in the web UI.".to_owned());
+    for d in &p.facts {
+        field(&mut e, &d.label, code(&d.value), true);
     }
+    status_fields(&mut e, p);
     e
+}
+
+/// `<state> — <headline>`, within Discord's title limit.
+fn title(p: &Presentation) -> String {
+    truncate(&markdown(&format!("{} — {}", p.status.label, p.headline)), 250)
+}
+
+/// Needs, the time that matters, and how it stands.
+fn status_fields(e: &mut Embed, p: &Presentation) {
+    if let Some(needs) = &p.status.needs {
+        field(e, "Needs", markdown(needs), true);
+    }
+    if let Some(When { label, at }) = p.status.time {
+        field(e, label, format!("<t:{0}:f> (<t:{0}:R>)", at.as_second()), true);
+    }
+    if let Some(detail) = &p.status.detail {
+        field(e, "Status", markdown(detail), false);
+    }
 }
 
 fn link_only(pending: bool, web: Option<&str>) -> Vec<Component> {
@@ -119,21 +132,12 @@ fn row(buttons: Vec<Component>) -> Vec<Component> {
     vec![Component::ActionRow(ActionRow { components: buttons, id: None })]
 }
 
-pub(crate) fn question_color(q: &Question) -> u32 {
-    match &q.outcome {
-        None => QUESTION,
-        Some(QuestionOutcome::Accepted { .. }) => DONE,
-        Some(QuestionOutcome::Declined { .. }) => BAD,
-        Some(QuestionOutcome::Expired { .. } | QuestionOutcome::Withdrawn { .. }) => MUTED,
-    }
-}
-
 /// The question's embed, and whether everything a responder needs to answer
 /// is on it.
 fn question_embed(q: &Question, web: Option<&str>) -> (Embed, bool) {
     let item = Item::Question(q);
-    let state = if q.state() == "expired" { "no answer" } else { q.state() };
-    let mut e = base_embed(format!("Question — {state}"), question_color(q), q.id, web);
+    let p = Presentation::question(q, Audience::Chat);
+    let mut e = base_embed(title(&p), tone_color(p.status.tone), q.id, web);
     let mut complete = true;
     if q.question_confidential() {
         e.description = Some(format!("{}\nConfidential: read and answer it in the web UI.", code(&item.safe_title())));
@@ -243,71 +247,44 @@ fn question_components(q: &Question, web: Option<&str>, caps: ChannelCaps, compl
     row(buttons)
 }
 
-fn embed(r: &Request, web: Option<&str>) -> Embed {
-    let facts = &r.facts;
-    let mut fields = Vec::new();
-    let mut field = |name: &str, value: String, inline: bool| {
-        fields.push(EmbedField { inline, name: name.to_owned(), value });
-    };
-
-    let mut requester = code(&facts.requester.id);
-    if let Some(name) = &facts.requester.display_name {
-        let _ = write!(requester, " ({})", code(name));
+fn embed(r: &Request, p: &Presentation, web: Option<&str>) -> Embed {
+    let mut e = base_embed(title(p), tone_color(p.status.tone), r.id, web);
+    e.description = Some(description(p));
+    for d in &p.facts {
+        field(&mut e, &d.label, code(&d.value), true);
     }
-    field("Requester", requester, true);
-    if let Some(target) = &facts.target {
-        field("Target", code(target), true);
-    }
-    if let Some(runas) = facts.attributes.get("runas") {
-        field("Run as", code(runas), true);
-    }
-    let window = if r.requirements.grant == GrantMode::Window { " (window)" } else { "" };
-    field("Duration", format!("{}{window}", duration(r.requirements.ttl)), true);
-    field("Policy", code(r.requirements.policy.as_str()), true);
-    field(
-        "Approvals",
-        format!("{}/{} (min. assurance: {})", r.approvals().len(), r.requirements.quorum, r.requirements.min_assurance),
-        true,
-    );
-    field("Subject", code(&format!("{}/{}/{}", r.subject.backend, r.subject.kind, r.subject.id)), true);
-    match &r.state {
-        RequestState::Pending => {
-            field("Decide by", format!("<t:{0}:f> (<t:{0}:R>)", r.pending_until.as_second()), false);
-        }
-        RequestState::Active { until } => {
-            field("Active until", format!("<t:{0}:f> (<t:{0}:R>)", until.as_second()), false);
-        }
-        RequestState::Failed { error } => field("Error", code(error), false),
-        _ => {}
-    }
-    if !r.decisions.is_empty() {
+    status_fields(&mut e, p);
+    if !p.status.decisions.is_empty() {
         let mut lines = String::new();
-        for d in r.decisions.iter().take(MAX_DECISIONS) {
-            let mark = match d.verdict {
-                Verdict::Approve => "✅",
-                Verdict::Deny => "⛔",
-            };
-            let _ =
-                writeln!(lines, "{mark} {} via {} ({})", code(d.approver.as_str()), code(d.via.as_str()), d.assurance);
+        for d in p.status.decisions.iter().take(MAX_DECISIONS) {
+            let mark = if d.approved { "✅" } else { "⛔" };
+            let _ = writeln!(lines, "{mark} {} via {} ({})", code(&d.who), code(&d.via), d.assurance);
         }
-        if r.decisions.len() > MAX_DECISIONS {
-            let _ = writeln!(lines, "… and {} more", r.decisions.len() - MAX_DECISIONS);
+        if p.status.decisions.len() > MAX_DECISIONS {
+            let _ = writeln!(lines, "… and {} more", p.status.decisions.len() - MAX_DECISIONS);
         }
-        field("Decisions", lines, false);
+        field(&mut e, "Decisions", lines, false);
     }
-
-    let mut e = base_embed(format!("Access request — {}", r.state.name()), color(&r.state), r.id, web);
-    e.description = description(facts);
-    e.fields = fields;
+    if !p.status.uses.is_empty() {
+        let mut lines = String::new();
+        let skipped = p.status.uses.len().saturating_sub(MAX_USES);
+        if skipped > 0 {
+            let _ = writeln!(lines, "… {skipped} earlier");
+        }
+        for u in p.status.uses.iter().skip(skipped) {
+            let _ = writeln!(lines, "<t:{}:t> {}", u.at.as_second(), code(&u.what));
+        }
+        field(&mut e, "Used for", lines, false);
+    }
     e
 }
 
-fn components(r: &Request, web: Option<&str>, caps: ChannelCaps) -> Vec<Component> {
+fn components(r: &Request, web: Option<&str>, caps: ChannelCaps, complete: bool) -> Vec<Component> {
     let mut buttons = Vec::new();
     let mode = match ApproveMode::for_request(caps, r) {
         // Approving here needs everything the approver is approving to be
         // on screen; otherwise send them to the web UI.
-        ApproveMode::Direct if !shown_in_full(&r.facts) => ApproveMode::WebLink,
+        ApproveMode::Direct if !complete => ApproveMode::WebLink,
         mode => mode,
     };
     match mode {
@@ -366,14 +343,37 @@ fn web_link(url: &str) -> Option<&str> {
     (url.starts_with("https://") || url.starts_with("http://")).then_some(url)
 }
 
-pub(crate) fn color(state: &RequestState) -> u32 {
-    match state {
-        RequestState::Pending => PENDING,
-        RequestState::Approved | RequestState::Active { .. } => GOOD,
-        RequestState::Denied | RequestState::Failed { .. } | RequestState::Revoked => BAD,
-        RequestState::Ended => DONE,
-        RequestState::Expired | RequestState::Withdrawn => MUTED,
+pub(crate) fn tone_color(tone: Tone) -> u32 {
+    match tone {
+        Tone::Waiting => PENDING,
+        Tone::Asking => QUESTION,
+        Tone::Good => GOOD,
+        Tone::Done => DONE,
+        Tone::Bad => BAD,
+        Tone::Muted => MUTED,
     }
+}
+
+/// Text that may contain names, with Discord markdown escaped outside the
+/// code spans countersign itself wrote (globs in the grant sentence).
+pub(crate) fn markdown(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for (i, part) in s.split('`').enumerate() {
+        if i > 0 {
+            out.push('`');
+        }
+        if i % 2 == 1 {
+            out.push_str(part);
+            continue;
+        }
+        for c in part.chars() {
+            if "\\*_~|>#[]()<".contains(c) {
+                out.push('\\');
+            }
+            out.push(if c.is_control() { ' ' } else { c });
+        }
+    }
+    out
 }
 
 /// Longest inline code span.
@@ -399,23 +399,39 @@ pub(crate) fn code(s: &str) -> String {
     if cleaned.is_empty() { "—".to_owned() } else { format!("`{cleaned}`") }
 }
 
-/// The command (if the backend reports one) and the requester's reason.
-fn description(facts: &countersign_core::SubjectFacts) -> Option<String> {
-    let mut parts = Vec::new();
-    if let Some(command) = facts.attributes.get("command") {
-        parts.push(format!("**Command**\n{}", code_block(command, MAX_COMMAND)));
+/// What approving allows, then the action, countersign's notes and the
+/// requester's claims.
+fn description(p: &Presentation) -> String {
+    let mut parts = vec![format!("**If you approve:** {}", markdown(&p.grant))];
+    match &p.action {
+        Some(Shown::Command { line }) => parts.push(code_block(&format!("$ {line}"), MAX_COMMAND)),
+        Some(Shown::Lines { title, lines }) => {
+            let mut s = format!("**{}**", markdown(title));
+            for d in lines {
+                let _ = write!(s, "\n{}: {}", markdown(&d.label), code(&d.value));
+            }
+            parts.push(s);
+        }
+        Some(Shown::Question { .. }) | None => {}
     }
-    if let Some(reason) = &facts.reason {
-        parts.push(format!("**Reason**\n{}", code_block(reason, MAX_REASON)));
+    for note in &p.notes {
+        parts.push(format!("⚠️ {}", markdown(note)));
     }
-    (!parts.is_empty()).then(|| parts.join("\n"))
+    for c in &p.claims {
+        parts.push(format!("**{}** _({})_\n{}", markdown(&c.label), p.claims_note(), code_block(&c.value, MAX_REASON)));
+    }
+    parts.join("\n")
 }
 
-/// Whether [`description`] shows the command and reason without cutting them.
-fn shown_in_full(facts: &countersign_core::SubjectFacts) -> bool {
+/// Whether [`description`] shows the action and claims without cutting them.
+fn shown_in_full(p: &Presentation) -> bool {
     let fits = |s: &str, max: usize| block_text(s).chars().count() <= max;
-    facts.attributes.get("command").is_none_or(|c| fits(c, MAX_COMMAND))
-        && facts.reason.as_deref().is_none_or(|r| fits(r, MAX_REASON))
+    let action = match &p.action {
+        Some(Shown::Command { line }) => fits(&format!("$ {line}"), MAX_COMMAND),
+        Some(Shown::Lines { lines, .. }) => lines.iter().all(|d| d.value.chars().count() <= CODE_MAX),
+        Some(Shown::Question { .. }) | None => true,
+    };
+    action && p.claims.iter().all(|c| fits(&c.value, MAX_REASON))
 }
 
 /// Untrusted multi-line text as it appears inside a code block: no way out of
@@ -443,19 +459,4 @@ fn truncate(s: &str, max_chars: usize) -> String {
         Some((i, _)) => format!("{}…", &s[..i]),
         None => s.to_owned(),
     }
-}
-
-pub(crate) fn duration(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs < 60 {
-        return format!("{secs}s");
-    }
-    let (days, hours, mins) = (secs / 86_400, secs / 3600 % 24, secs / 60 % 60);
-    let mut out = String::new();
-    for (n, unit) in [(days, "d"), (hours, "h"), (mins, "m")] {
-        if n > 0 {
-            let _ = write!(out, "{}{n}{unit}", if out.is_empty() { "" } else { " " });
-        }
-    }
-    out
 }

@@ -97,6 +97,7 @@ fn facts() -> SubjectFacts {
         initiator: None,
         sensitive: false,
         binding: None,
+        action: None,
         requester: Requester {
             id: "agent".into(),
             groups: BTreeSet::from(["agents".to_owned()]),

@@ -371,7 +371,8 @@ impl Client {
             return Outcome::Refused(format!("no random numbers from the OS: {e}"));
         }
         let nonce = countersign_core::approval_signing::nonce(&random);
-        let digest = countersign_core::approval_signing::invocation_digest(&inv.user, inv.runas.as_deref(), &inv.argv);
+        let digest =
+            countersign_core::approval_signing::invocation_digest(&inv.user, inv.cwd.as_deref(), &inv.sudo_argv);
         let forged = || Outcome::Refused("the approval is not signed by countersign; refusing".into());
         let (status, body) = match self.submit(inv, &nonce).await {
             Ok(r) => r,

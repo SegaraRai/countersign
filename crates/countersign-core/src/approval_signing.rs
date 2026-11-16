@@ -147,13 +147,12 @@ impl Approval<'_> {
 }
 
 /// The hex SHA-256 of a sudo invocation as submitted: the JSON array
-/// `[user, runas, argv...]`, with `runas` defaulting to `root`. Client and
-/// server compute it from the same raw values.
+/// `[user, cwd, sudo_argv]` (`cwd` is `null` when unknown), where
+/// `sudo_argv` is the whole `sudo` command line that approvers see. Client
+/// and server compute it from the same raw values.
 #[must_use]
-pub fn invocation_digest(user: &str, runas: Option<&str>, argv: &[String]) -> String {
-    let mut parts = vec![user, runas.unwrap_or("root")];
-    parts.extend(argv.iter().map(String::as_str));
-    let json = serde_json::to_vec(&parts).unwrap_or_default();
+pub fn invocation_digest(user: &str, cwd: Option<&str>, sudo_argv: &[String]) -> String {
+    let json = serde_json::to_vec(&serde_json::json!([user, cwd, sudo_argv])).unwrap_or_default();
     hex(&Sha256::digest(json))
 }
 
@@ -215,11 +214,12 @@ mod tests {
 
     #[test]
     fn invocation_digest_separates_arguments() {
-        let a = invocation_digest("u", None, &["echo".into(), "a b".into()]);
-        let b = invocation_digest("u", None, &["echo".into(), "a".into(), "b".into()]);
-        assert_ne!(a, b);
-        assert_eq!(a, invocation_digest("u", Some("root"), &["echo".into(), "a b".into()]));
-        assert_ne!(a, invocation_digest("u", Some("www-data"), &["echo".into(), "a b".into()]));
+        let line = |s: &[&str]| s.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        let a = invocation_digest("u", None, &line(&["sudo", "echo", "a b"]));
+        assert_ne!(a, invocation_digest("u", None, &line(&["sudo", "echo", "a", "b"])));
+        assert_ne!(a, invocation_digest("u", Some("/"), &line(&["sudo", "echo", "a b"])));
+        assert_ne!(a, invocation_digest("v", None, &line(&["sudo", "echo", "a b"])));
+        assert_ne!(a, invocation_digest("u", None, &line(&["sudo", "-u", "www-data", "echo", "a b"])));
         assert_eq!(a.len(), 64);
     }
 

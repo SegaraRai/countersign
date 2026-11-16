@@ -62,7 +62,8 @@ fn subject() -> SubjectRef {
 
 fn facts() -> Value {
     json!({ "requester": { "id": "alice", "groups": ["dev"] }, "target": "staging-1", "requested_ttl": "15m",
-            "reason": "deploy", "attributes": { "cmd": "systemctl" } })
+            "reason": "deploy", "attributes": { "cmd": "systemctl" },
+            "summary": { "title": "a restart of nginx", "lines": [{ "label": "Unit", "value": "nginx.service" }] } })
 }
 
 #[tokio::test]
@@ -77,6 +78,14 @@ async fn discover_maps_subjects_and_facts() {
     assert_eq!(pending[0].facts.requester.id, "alice");
     assert_eq!(pending[0].facts.requested_ttl, Some(Duration::from_secs(900)));
     assert_eq!(pending[0].facts.attributes["cmd"], "systemctl");
+    assert_eq!(
+        pending[0].facts.action,
+        Some(countersign_core::Action::Generic {
+            title: "a restart of nginx".into(),
+            lines: vec![countersign_core::Detail::new("Unit", "nginx.service")],
+        })
+    );
+    assert_eq!(pending[1].facts.action, None);
     assert_eq!(pending[0].observed_at.to_string(), "2026-01-02T03:04:05Z");
     assert_eq!(pending[1].facts.target, None);
 

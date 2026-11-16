@@ -17,9 +17,10 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use clap::{Subcommand, ValueEnum};
+use countersign_core::present::{self, Audience, Presentation, Shown};
 use countersign_core::{
-    AccessBackend, ActionIntent, ActorId, Assurance, ChannelName, Item, Question, QuestionOutcome, Request,
-    RequestFilter, RequestId, RequestState, Store, StoreError, Verdict,
+    AccessBackend, ActionIntent, ActorId, Assurance, ChannelName, Item, Question, QuestionOutcome, RequestFilter,
+    RequestId, Store, StoreError, Verdict,
 };
 use countersignd::config::Config;
 use countersignd::engine::{Engine, EngineError};
@@ -42,6 +43,11 @@ pub enum Command {
     /// Show one approval or question.
     Show {
         id: String,
+        /// Also print the audit details (identifiers, identities, policy
+        /// match, attributes).
+        #[arg(long, short)]
+        verbose: bool,
+        /// The stored record and its presentation as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -183,23 +189,27 @@ pub async fn execute(cmd: Command, ctx: Context, out: &mut dyn Write) -> Result<
                     approvals.iter().map(Item::Approval).chain(questions.iter().map(Item::Question)).collect();
                 items.sort_by_key(|i| std::cmp::Reverse(created(i)));
                 items.truncate(limit as usize);
-                out.write_all(table(&items).as_bytes())?;
+                out.write_all(table(&items, now).as_bytes())?;
             }
         }
-        Command::Show { id, json: as_json } => {
+        Command::Show { id, verbose, json: as_json } => {
             let rid = parse_id(&id)?;
             if let Some(r) = ctx.store.get_request(rid).await? {
+                let p = Presentation::approval(&r, Audience::Full);
                 if as_json {
-                    json(out, &serde_json::to_value(r).map_err(std::io::Error::other)?)?;
+                    json(out, &serde_json::json!({ "approval": r, "presentation": p }))?;
                 } else {
-                    out.write_all(details(&r).as_bytes())?;
+                    out.write_all(details(&p, now, verbose).as_bytes())?;
                 }
             } else if let Some(q) = ctx.store.get_question(rid).await? {
                 let q = q.for_chat();
+                let p = Presentation::question(&q, Audience::Chat);
                 if as_json {
-                    json(out, &serde_json::to_value(q).map_err(std::io::Error::other)?)?;
+                    json(out, &serde_json::json!({ "question": q, "presentation": p }))?;
                 } else {
-                    out.write_all(question_details(&q).as_bytes())?;
+                    let mut text = details(&p, now, verbose);
+                    text.push_str(&answer_lines(&q));
+                    out.write_all(text.as_bytes())?;
                 }
             } else {
                 return Err(not_found(&id));
@@ -323,28 +333,22 @@ fn render_table(header: &[&str], rows: &[Vec<String>]) -> String {
 }
 
 /// One line per approval or question, newest first.
-pub fn table(items: &[Item<'_>]) -> String {
+pub fn table(items: &[Item<'_>], now: Timestamp) -> String {
     let rows: Vec<Vec<String>> = items
         .iter()
         .map(|i| {
-            let from = match i {
-                Item::Approval(r) => {
-                    let target = r.facts.target.as_deref().map(|t| format!(" ({})", clean(t))).unwrap_or_default();
-                    format!("{}{target}", clean(&r.facts.requester.id))
-                }
-                Item::Question(q) => clean(q.asker.client.as_str()),
+            let p = match i {
+                Item::Approval(r) => Presentation::approval(r, Audience::Full),
+                Item::Question(q) => Presentation::question(q, Audience::Chat),
             };
-            vec![
-                i.id().to_string(),
-                i.kind().to_owned(),
-                i.state().to_owned(),
-                from,
-                i.policy().to_owned(),
-                short_time(created(i)),
-            ]
+            let when = match p.status.time.filter(|_| i.is_pending()) {
+                Some(w) => format!("{} {}", w.label, present::relative(w.at, now)),
+                None => short_time(created(i)),
+            };
+            vec![i.id().to_string(), i.kind().to_owned(), p.status.label.clone(), p.headline.clone(), when]
         })
         .collect();
-    render_table(&["ID", "KIND", "STATE", "FROM", "POLICY", "CREATED"], &rows)
+    render_table(&["ID", "KIND", "STATE", "REQUEST", "WHEN"], &rows)
 }
 
 fn kv(s: &mut String, k: &str, v: &str) {
@@ -352,121 +356,83 @@ fn kv(s: &mut String, k: &str, v: &str) {
     let _ = writeln!(s, "{k:<13} {v}");
 }
 
-/// Everything about one approval.
-pub fn details(r: &Request) -> String {
-    let f = &r.facts;
+/// An approval or question as text: headline, what approving allows, the
+/// action, facts, claims, status, and with `verbose` the audit details.
+/// Everything in a [`Presentation`] has its hidden characters written out.
+pub fn details(p: &Presentation, now: Timestamp, verbose: bool) -> String {
     let mut s = String::new();
-    kv(&mut s, "id", &r.id.to_string());
-    kv(&mut s, "kind", "approval");
-    kv(&mut s, "state", r.state.name());
-    match &r.state {
-        RequestState::Active { until } => kv(&mut s, "active until", &short_time(*until)),
-        RequestState::Failed { error } => kv(&mut s, "error", &clean(error)),
-        RequestState::Pending => kv(&mut s, "decide by", &short_time(r.pending_until)),
-        _ => {}
+    let _ = writeln!(s, "{} — {}", p.status.label, p.headline);
+    let _ = writeln!(s, "  {}", p.grant);
+    match &p.action {
+        Some(Shown::Command { line }) => {
+            let _ = writeln!(s, "  $ {line}");
+        }
+        Some(Shown::Lines { title, lines }) => {
+            let _ = writeln!(s, "  {title}");
+            for d in lines {
+                let _ = writeln!(s, "    {}: {}", d.label, d.value);
+            }
+        }
+        Some(Shown::Question { message, fields }) => {
+            for line in message.lines() {
+                let _ = writeln!(s, "  > {line}");
+            }
+            for d in fields {
+                let _ = writeln!(s, "    {}: {}", d.label, d.value);
+            }
+        }
+        None => {}
     }
-    if r.sensitive {
-        kv(&mut s, "sensitive", "yes (chat channels show only that it exists)");
+    s.push('\n');
+    for d in &p.facts {
+        kv(&mut s, &d.label, &d.value);
     }
-    if let Some(source) = &f.source {
-        kv(&mut s, "source", &source.to_string());
+    for c in &p.claims {
+        kv(&mut s, &c.label, &format!("{}   ({})", c.value.replace('\n', " / "), p.claims_note()));
     }
-    kv(&mut s, "subject", &format!("{}/{}/{}", r.subject.backend, clean(&r.subject.kind), clean(&r.subject.id)));
-    let name = f.requester.display_name.as_deref().map(|n| format!(" ({})", clean(n))).unwrap_or_default();
-    kv(&mut s, "requester", &format!("{}{name}", clean(&f.requester.id)));
-    if !f.requester.identity.is_empty() {
-        let actor = f.requester.actor.as_ref().map_or_else(|| "not a known actor".to_owned(), ToString::to_string);
-        kv(&mut s, "identity", &format!("{} ({actor})", clean(&f.requester.identity)));
+    for n in &p.notes {
+        kv(&mut s, "Note", n);
     }
-    if let Some(i) = &f.initiator {
-        let actor = i.actor.as_ref().map_or_else(|| "not a known person".to_owned(), ToString::to_string);
-        kv(&mut s, "initiator", &format!("{} ({actor})", clean(&i.identity)));
+    if let Some(d) = &p.status.detail {
+        kv(&mut s, "Status", d);
     }
-    if !f.requester.groups.is_empty() {
-        kv(&mut s, "groups", &f.requester.groups.iter().map(|g| clean(g)).collect::<Vec<_>>().join(", "));
+    if let Some(n) = &p.status.needs {
+        kv(&mut s, "Needs", n);
     }
-    if let Some(t) = &f.target {
-        kv(&mut s, "target", &clean(t));
+    if let Some(w) = p.status.time {
+        kv(&mut s, w.label, &format!("{} ({})", short_time(w.at), present::relative(w.at, now)));
     }
-    if let Some(reason) = &f.reason {
-        kv(&mut s, "reason", &clean(reason));
-    }
-    for (k, v) in &f.attributes {
-        kv(&mut s, &format!("attr.{}", clean(k)), &clean(v));
-    }
-    let q = &r.requirements;
-    kv(&mut s, "policy", q.policy.as_str());
-    let exclude: Vec<String> = q
-        .exclude
-        .iter()
-        .filter_map(|e| serde_json::to_value(e).ok().and_then(|v| v.as_str().map(str::to_owned)))
-        .collect();
-    kv(
-        &mut s,
-        "needs",
-        &format!(
-            "{} approval(s) at {}, {} for {}s{}",
-            q.quorum,
-            q.min_assurance,
-            q.grant.as_str(),
-            q.ttl.as_secs(),
-            if exclude.is_empty() { String::new() } else { format!(", excluding {}", exclude.join(", ")) }
-        ),
-    );
-    kv(&mut s, "created", &short_time(r.created_at));
-    for d in &r.decisions {
-        let verdict = match d.verdict {
-            Verdict::Approve => "approve",
-            Verdict::Deny => "deny",
-        };
-        let comment = d.comment.as_deref().map(|c| format!(": {}", clean(c))).unwrap_or_default();
+    for d in &p.status.decisions {
+        let comment = d.comment.as_deref().map(|c| format!(": {c}")).unwrap_or_default();
         kv(
             &mut s,
-            "decision",
-            &format!("{verdict} by {} via {} ({}) at {}{comment}", d.approver, d.via, d.assurance, short_time(d.at)),
+            "Decision",
+            &format!("{} by {} via {} ({}) at {}{comment}", d.verdict(), d.who, d.via, d.assurance, short_time(d.at)),
         );
     }
-    for u in &r.uses {
-        let what = u.attributes.get("command").map_or_else(|| clean(&u.subject.id), |c| clean(c));
-        kv(&mut s, "used", &format!("{} {what}", short_time(u.at)));
+    for u in &p.status.uses {
+        kv(&mut s, "Used", &format!("{} {}", short_time(u.at), u.what));
+    }
+    if verbose && !p.audit.is_empty() {
+        s.push('\n');
+        for d in &p.audit {
+            kv(&mut s, &d.label, &d.value);
+        }
     }
     s
 }
 
-/// One question, as [`Question::for_chat`] leaves it: no confidential text
-/// or answers.
-pub fn question_details(q: &Question) -> String {
+/// The answer of a question, as [`Question::for_chat`] leaves it (never a
+/// confidential one).
+fn answer_lines(q: &Question) -> String {
     let mut s = String::new();
-    kv(&mut s, "id", &q.id.to_string());
-    kv(&mut s, "kind", "question");
-    kv(&mut s, "state", q.state());
-    if q.is_pending() {
-        kv(&mut s, "answer by", &short_time(q.pending_until));
-    }
-    let actor = q.asker.actor.as_ref().map(|a| format!(" for {a}")).unwrap_or_default();
-    kv(&mut s, "asker", &format!("{}{actor}", q.asker.client));
-    kv(&mut s, "policy", q.requirements.policy.as_str());
-    let responders: Vec<String> = q.requirements.responders.iter().map(ToString::to_string).collect();
-    kv(&mut s, "responders", &responders.join(", "));
-    if q.question_confidential() {
-        kv(&mut s, "message", "(confidential: read it in the web UI)");
-    } else {
-        kv(&mut s, "message", &clean(&q.message));
-        for (k, v) in &q.context {
-            kv(&mut s, &format!("context.{}", clean(k)), &clean(v));
-        }
-    }
-    kv(&mut s, "created", &short_time(q.created_at));
-    if let Some(result) = Item::question_result(q) {
-        kv(&mut s, "result", &result);
-    }
     match &q.outcome {
         Some(QuestionOutcome::Accepted { content: Some(c), .. }) => {
             for (k, v) in c {
-                kv(&mut s, &format!("answer.{}", clean(k)), &clean(&v.to_string()));
+                kv(&mut s, &format!("Answer {}", clean(k)), &clean(&v.to_string()));
             }
         }
-        Some(QuestionOutcome::Declined { note: Some(n), .. }) => kv(&mut s, "note", &clean(n)),
+        Some(QuestionOutcome::Declined { note: Some(n), .. }) => kv(&mut s, "Note", &clean(n)),
         _ => {}
     }
     s

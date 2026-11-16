@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use countersign_core::present::{Audience, Presentation, Shown};
 use countersign_core::{
     Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, Item, MessageRef, Notification, Question, Request,
 };
@@ -226,47 +227,50 @@ fn question(config: &NtfyConfig, event: &DomainEvent, q: &Question) -> (String, 
 }
 
 fn approval(config: &NtfyConfig, event: &DomainEvent, r: &Request) -> (String, &'static str, u8, String) {
-    let details = config.details && !r.sensitive;
-    let who = if details { clean(&r.facts.requester.id, 80) } else { String::new() };
-    let about = |what: &str| if who.is_empty() { what.to_owned() } else { format!("{what}: {who}") };
-    let (title, tag, priority) = match event {
-        DomainEvent::Requested { .. } => (about("Access request"), "key", config.priority),
-        DomainEvent::Granted { .. } => (about("Access granted"), "white_check_mark", 3),
-        DomainEvent::Denied { .. } => (about("Access denied"), "no_entry", 3),
-        DomainEvent::GrantFailed { .. } => (about("Grant failed"), "warning", 4),
-        DomainEvent::Expired { .. } => (about("Request expired"), "hourglass", 3),
-        DomainEvent::Revoked { .. } => (about("Access revoked"), "x", 3),
-        DomainEvent::Withdrawn { .. } => (about("Request withdrawn"), "leftwards_arrow_with_hook", 2),
-        DomainEvent::Ended { .. } => (about("Access ended"), "checkered_flag", 2),
+    let p = Presentation::approval(r, Audience::Chat);
+    let details = config.details && !p.withheld;
+    let (what, tag, priority) = match event {
+        DomainEvent::Requested { .. } => ("Access request", "key", config.priority),
+        DomainEvent::Granted { .. } => ("Access granted", "white_check_mark", 3),
+        DomainEvent::Denied { .. } => ("Access denied", "no_entry", 3),
+        DomainEvent::GrantFailed { .. } => ("Grant failed", "warning", 4),
+        DomainEvent::Expired { .. } => ("Request expired", "hourglass", 3),
+        DomainEvent::Revoked { .. } => ("Access revoked", "x", 3),
+        DomainEvent::Withdrawn { .. } => ("Request withdrawn", "leftwards_arrow_with_hook", 2),
+        DomainEvent::Ended { .. } => ("Access ended", "checkered_flag", 2),
         DomainEvent::Approved { .. }
         | DomainEvent::DecisionRecorded { .. }
         | DomainEvent::Answered { .. }
-        | DomainEvent::Declined { .. } => (about("Request updated"), "memo", 2),
+        | DomainEvent::Declined { .. } => ("Request updated", "memo", 2),
     };
-    let (title, priority) = match event {
-        DomainEvent::Requested { .. } if r.sensitive => (Item::Approval(r).safe_title(), config.priority),
-        DomainEvent::Requested { .. } => (title, config.priority),
-        _ => (title, priority),
+    let requested = matches!(event, DomainEvent::Requested { .. });
+    let title = if details && requested {
+        clean(&p.headline, 200)
+    } else if details {
+        format!("{what}: {}", clean(&p.headline, 200))
+    } else if requested && p.withheld {
+        clean(&p.headline, 200)
+    } else {
+        what.to_owned()
     };
 
     let mut message = String::new();
     if details {
-        let f = &r.facts;
-        if let Some(name) = &f.requester.display_name {
-            let _ = writeln!(message, "Requester: {} ({})", clean(&f.requester.id, 80), clean(name, 80));
-        } else {
-            let _ = writeln!(message, "Requester: {}", clean(&f.requester.id, 80));
+        let _ = writeln!(message, "If you approve: {}", clean(&p.grant, 300));
+        match &p.action {
+            Some(Shown::Command { line }) => {
+                let _ = writeln!(message, "$ {}", clean(line, 1000));
+            }
+            Some(Shown::Lines { title, .. }) => {
+                let _ = writeln!(message, "{}", clean(title, 200));
+            }
+            Some(Shown::Question { .. }) | None => {}
         }
-        if let Some(t) = &f.target {
-            let _ = writeln!(message, "Target: {}", clean(t, 200));
+        for note in &p.notes {
+            let _ = writeln!(message, "Note: {}", clean(note, 300));
         }
-        if let Some(c) = f.attributes.get("command") {
-            let _ = writeln!(message, "Command: {}", clean(c, 1000));
-        }
-        let _ = writeln!(message, "Policy: {}", clean(r.requirements.policy.as_str(), 80));
-        let _ = writeln!(message, "Duration: {}", duration(r.requirements.ttl));
-        if let Some(reason) = &f.reason {
-            let _ = writeln!(message, "Reason: {}", clean(reason, 1000));
+        for c in &p.claims {
+            let _ = writeln!(message, "{} ({}): {}", clean(&c.label, 80), p.claims_note(), clean(&c.value, 1000));
         }
     }
     match event {
@@ -276,15 +280,18 @@ fn approval(config: &NtfyConfig, event: &DomainEvent, r: &Request) -> (String, &
         DomainEvent::Granted { until, .. } => {
             let _ = writeln!(message, "Active until {}", time(*until));
         }
-        DomainEvent::GrantFailed { error, .. } if details => {
-            let _ = writeln!(message, "Error: {}", clean(error, 500));
+        DomainEvent::GrantFailed { .. } if details => {
+            if let Some(detail) = &p.status.detail {
+                let _ = writeln!(message, "{}", clean(detail, 500));
+            }
         }
         _ => {}
     }
     (title, tag, priority, message)
 }
 
-/// Untrusted text on one line, bounded.
+/// Text on one line, bounded. Presentation text has its hidden characters
+/// written out already; only line breaks are left to flatten.
 fn clean(s: &str, max: usize) -> String {
     let one_line: String = s.chars().map(|c| if countersign_core::text::is_hidden(c) { ' ' } else { c }).collect();
     let t = one_line.trim();
@@ -296,20 +303,6 @@ fn clean(s: &str, max: usize) -> String {
 
 fn time(t: jiff::Timestamp) -> String {
     t.strftime("%Y-%m-%d %H:%M UTC").to_string()
-}
-
-fn duration(d: Duration) -> String {
-    let secs = d.as_secs();
-    if secs < 60 {
-        return format!("{secs}s");
-    }
-    let (days, hours, mins) = (secs / 86_400, secs / 3600 % 24, secs / 60 % 60);
-    let parts: Vec<String> = [(days, "d"), (hours, "h"), (mins, "m")]
-        .into_iter()
-        .filter(|(n, _)| *n > 0)
-        .map(|(n, u)| format!("{n}{u}"))
-        .collect();
-    parts.join(" ")
 }
 
 #[cfg(test)]

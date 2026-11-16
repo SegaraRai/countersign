@@ -21,9 +21,12 @@
 //!
 //! `facts` is `{"requester": {"id", "display_name"?, "groups"?},
 //! "initiator"?: {"identity", "display_name"?}, "target"?, "requested_ttl"?
-//! (e.g. "30m"), "reason"?, "attributes"?, "sensitive"?}`. Unknown keys are
-//! refused. Only report facts the helper can vouch for; `reason` is shown,
-//! never trusted. countersign names the requester `exec:<backend>#<id>`; the
+//! (e.g. "30m"), "reason"?, "summary"?, "attributes"?, "sensitive"?}`.
+//! Unknown keys are refused. Only report facts the helper can vouch for;
+//! `reason` is shown, never trusted. `summary` is what approvers see of the
+//! subject: `{"title", "lines"?: [{"label", "value"}]}`, e.g. `{"title": "a
+//! deploy of app", "lines": [{"label": "Environment", "value": "prod"}]}`
+//! (at most 10 lines); `attributes` are for policies. countersign names the requester `exec:<backend>#<id>`; the
 //! initiator is a recognition identity such as `github:<user id>`, the person
 //! who caused the request. Times are RFC 3339.
 //!
@@ -150,10 +153,24 @@ struct WireFacts {
     #[serde(default)]
     reason: Option<String>,
     #[serde(default)]
+    summary: Option<WireSummary>,
+    #[serde(default)]
     attributes: BTreeMap<String, String>,
     #[serde(default)]
     sensitive: bool,
 }
+
+/// What approvers see of the subject.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireSummary {
+    title: String,
+    #[serde(default)]
+    lines: Vec<countersign_core::Detail>,
+}
+
+/// Most summary lines shown.
+const MAX_SUMMARY_LINES: usize = 10;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -184,6 +201,10 @@ impl From<WireFacts> for SubjectFacts {
             target: w.target,
             requested_ttl: w.requested_ttl,
             reason: w.reason,
+            action: w.summary.map(|s| countersign_core::Action::Generic {
+                title: s.title,
+                lines: s.lines.into_iter().take(MAX_SUMMARY_LINES).collect(),
+            }),
             attributes: w.attributes,
             sensitive: w.sensitive,
             ..SubjectFacts::new(countersign_core::Requester {

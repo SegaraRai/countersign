@@ -109,6 +109,8 @@ async fn discover_returns_pending_sessions_with_user_facts() {
     assert_eq!(f.attributes["user_type"], "WORKLOAD");
     assert_eq!(f.attributes["auth_type"], "CREDENTIAL");
     assert_eq!(f.attributes["credential"], "agent-token");
+    let Some(countersign_core::Action::Session { credential, browser, .. }) = &f.action else { panic!() };
+    assert_eq!((credential.as_deref(), *browser), (Some("agent-token"), false));
     assert_eq!(found[0].observed_at, "2026-11-15T17:48:47.310158229Z".parse().unwrap());
 
     let user_lookups = b.runner.calls().iter().filter(|c| c.starts_with("get user")).count();

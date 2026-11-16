@@ -30,6 +30,7 @@ fn request() -> Request {
             target: Some("db-prod".into()),
             requested_ttl: None,
             reason: Some("rotate\nkeys\u{7}".into()),
+            action: None,
             attributes: BTreeMap::new(),
         },
         observed_at: Timestamp::UNIX_EPOCH,
@@ -43,6 +44,7 @@ fn request() -> Request {
         pending_timeout: Duration::from_secs(600),
         exclude: BTreeSet::from([countersign_core::Exclusion::Requester]),
         require_initiator: false,
+        scope: std::collections::BTreeMap::default(),
         grant: countersign_core::GrantMode::Once,
     };
     Request::open(pending, reqs, false, Timestamp::UNIX_EPOCH).0
@@ -68,12 +70,12 @@ fn new_requests_carry_details_and_a_review_button() {
         },
     );
     assert_eq!(p.topic, "cs-ops");
-    assert_eq!(p.title, "Access request: agent-7");
+    assert_eq!(p.title, "agent-7 wants access to db-prod");
     assert_eq!(p.priority, 4);
     assert_eq!(p.tags, ["key"]);
     assert_eq!(
         p.message,
-        "Requester: agent-7\nTarget: db-prod\nPolicy: ops\nDuration: 30m\nReason: rotate keys\nDecide by 1970-01-01 00:10 UTC"
+        "If you approve: Grants this access for up to 30 minutes\nReason (from the requester, unverified): rotate keys\\u{7}\nDecide by 1970-01-01 00:10 UTC"
     );
     assert_eq!(p.click.as_deref(), Some(URL));
     assert_eq!(p.actions.len(), 1);
@@ -130,7 +132,7 @@ fn outcomes_say_what_happened() {
             web_url: URL,
         },
     );
-    assert_eq!(p.title, "Access granted: agent-7");
+    assert_eq!(p.title, "Access granted: agent-7 wants access to db-prod");
     assert!(p.message.ends_with("Active until 1970-01-01 01:00 UTC"), "{}", p.message);
     assert_eq!(p.priority, 3);
     assert_eq!(p.actions[0].label, "Open");
@@ -209,7 +211,7 @@ async fn publishes_json_with_bearer_token() {
     {
         let c = seen.lock().unwrap();
         assert_eq!(c.bodies.len(), 1);
-        assert_eq!(c.bodies[0].title, "Access request: agent-7");
+        assert_eq!(c.bodies[0].title, "agent-7 wants access to db-prod");
         assert_eq!(c.auth[0].as_deref(), Some("Bearer tk_test"));
     }
     let _ = std::fs::remove_dir_all(dir);

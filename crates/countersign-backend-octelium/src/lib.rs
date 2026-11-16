@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use countersign_core::{
-    AccessBackend, BackendCaps, BackendError, BackendName, GrantHandle, PendingSubject, Requester, SubjectFacts,
-    SubjectRef,
+    AccessBackend, Action, BackendCaps, BackendError, BackendName, GrantHandle, PendingSubject, Requester,
+    SubjectFacts, SubjectRef,
 };
 use jiff::Timestamp;
 use serde::Deserialize;
@@ -227,7 +227,16 @@ impl<R: Runner> OcteliumBackend<R> {
             attributes.insert("browser".to_owned(), "true".to_owned());
         }
 
+        let get = |k: &str| attributes.get(k).cloned();
+        let action = Action::Session {
+            kind: get("session_type").map(|k| k.to_lowercase()),
+            device: get("device"),
+            client: get("user_agent"),
+            credential: get("credential"),
+            browser: st.is_browser,
+        };
         SubjectFacts {
+            action: Some(action),
             attributes,
             ..SubjectFacts::new(Requester {
                 id: user_name.clone(),

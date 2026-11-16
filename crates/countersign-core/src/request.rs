@@ -30,7 +30,7 @@ use crate::backend::GrantHandle;
 use crate::event::DomainEvent;
 use crate::id::{ActorId, ChannelName, RequestId};
 use crate::policy::{Exclusion, GrantMode, Requirements};
-use crate::subject::{PendingSubject, Requester, SubjectFacts, SubjectRef};
+use crate::subject::{Action, PendingSubject, Requester, SubjectFacts, SubjectRef};
 use crate::time;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -135,6 +135,9 @@ pub struct Use {
     /// The new subject's attributes (e.g. the command that was run).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attributes: BTreeMap<String, String>,
+    /// What the new subject asked to do, as shown to approvers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<Action>,
 }
 
 /// A request for approval.
@@ -210,6 +213,7 @@ impl Request {
             r.facts = SubjectFacts { source, sensitive: true, ..SubjectFacts::new(Requester::default()) };
             for u in &mut r.uses {
                 u.attributes.clear();
+                u.action = None;
             }
             for d in &mut r.decisions {
                 d.comment = None;
@@ -407,7 +411,12 @@ impl Request {
         if !self.window_covers(pending, now) {
             return Err(TransitionError::NotAWindow);
         }
-        self.uses.push(Use { subject: pending.subject.clone(), at: now, attributes: pending.facts.attributes.clone() });
+        self.uses.push(Use {
+            subject: pending.subject.clone(),
+            at: now,
+            attributes: pending.facts.attributes.clone(),
+            action: pending.facts.action.clone(),
+        });
         self.touch(now);
         Ok(())
     }
@@ -524,6 +533,7 @@ mod tests {
             pending_timeout: Duration::from_secs(300),
             grant: GrantMode::Once,
             require_initiator: false,
+            scope: std::collections::BTreeMap::default(),
         };
         let (r, ev) = Request::open(pending, reqs, false, t(0));
         assert_eq!(ev.len(), 1);

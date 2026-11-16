@@ -29,6 +29,7 @@ use axum::{Form, Json, Router};
 use axum_extra::extract::PrivateCookieJar;
 use axum_extra::extract::cookie::{Cookie, Key, SameSite};
 use countersign_core::form::{Field, FieldKind, TextFormat};
+use countersign_core::present::{self, Audience, Presentation, Shown, Tone, When};
 use countersign_core::question::REMOVED;
 use countersign_core::text::escape;
 use countersign_core::{
@@ -313,25 +314,55 @@ struct UserView {
     admin: bool,
 }
 
+/// One line of the request lists.
 #[derive(Debug)]
 struct Row {
     kind: &'static str,
     id: String,
-    from: String,
-    target: Option<String>,
-    policy: String,
-    state: &'static str,
-    sensitive: bool,
-    created: String,
-    updated: String,
+    headline: String,
+    /// The first line of the command, session or question.
+    summary: Option<String>,
+    label: String,
+    tone: &'static str,
+    /// The time that matters (open items) or when it last changed.
+    when: String,
     created_at: Timestamp,
     updated_at: Timestamp,
     open: bool,
 }
 
 #[derive(Debug)]
+struct TimeView {
+    label: &'static str,
+    at: String,
+    relative: String,
+}
+
+fn time_view(w: Option<When>, now: Timestamp) -> Option<TimeView> {
+    w.map(|w| TimeView { label: w.label, at: fmt_time(w.at), relative: present::relative(w.at, now) })
+}
+
+/// The action, flattened for the template.
+#[derive(Debug, Default)]
+struct ItemAction {
+    command: Option<String>,
+    title: Option<String>,
+    lines: Vec<countersign_core::Detail>,
+}
+
+fn action_view(shown: Option<&Shown>) -> ItemAction {
+    match shown {
+        Some(Shown::Command { line }) => ItemAction { command: Some(line.clone()), ..ItemAction::default() },
+        Some(Shown::Lines { title, lines }) => {
+            ItemAction { title: Some(title.clone()), lines: lines.clone(), ..ItemAction::default() }
+        }
+        Some(Shown::Question { .. }) | None => ItemAction::default(),
+    }
+}
+
+#[derive(Debug)]
 struct DecisionView {
-    approver: String,
+    who: String,
     verdict: &'static str,
     assurance: String,
     via: String,
@@ -342,158 +373,56 @@ struct DecisionView {
 #[derive(Debug)]
 struct UseView {
     at: String,
-    command: String,
-    cwd: Option<String>,
+    what: String,
 }
 
-#[derive(Debug)]
-struct RequestView {
-    id: String,
-    state: &'static str,
-    requester: String,
-    identity: String,
-    actor: Option<String>,
-    source: Option<String>,
-    initiator: Option<String>,
-    display_name: Option<String>,
-    groups: String,
-    target: Option<String>,
-    reason: Option<String>,
-    subject: String,
-    attributes: Vec<(String, String)>,
-    policy: String,
-    ttl: String,
-    window: bool,
-    quorum: u8,
-    min_assurance: String,
-    exclude: String,
-    sensitive: bool,
-    created: String,
-    pending_until: Option<String>,
-    active_until: Option<String>,
-    failure: Option<String>,
-    decisions: Vec<DecisionView>,
-    uses: Vec<UseView>,
+fn tone_name(t: Tone) -> &'static str {
+    match t {
+        Tone::Waiting => "waiting",
+        Tone::Asking => "asking",
+        Tone::Good => "good",
+        Tone::Done => "done",
+        Tone::Bad => "bad",
+        Tone::Muted => "muted",
+    }
 }
 
 fn fmt_time(t: Timestamp) -> String {
     t.strftime("%Y-%m-%d %H:%M:%S UTC").to_string()
 }
 
-fn fmt_duration(d: Duration) -> String {
-    let s = d.as_secs();
-    match (s / 3600, (s % 3600) / 60, s % 60) {
-        (0, 0, s) => format!("{s}s"),
-        (0, m, 0) => format!("{m}m"),
-        (h, 0, 0) => format!("{h}h"),
-        (0, m, s) => format!("{m}m {s}s"),
-        (h, m, _) => format!("{h}h {m}m"),
+fn row(kind: &'static str, id: RequestId, p: &Presentation, open: bool, times: (Timestamp, Timestamp)) -> Row {
+    let now = Timestamp::now();
+    let when = match (open, time_view(p.status.time, now)) {
+        (true, Some(t)) => format!("{} {}", t.label, t.relative),
+        _ => present::relative(times.1, now),
+    };
+    Row {
+        kind,
+        id: id.to_string(),
+        headline: p.headline.clone(),
+        summary: p.action.as_ref().map(Shown::summary).filter(|s| !s.is_empty()),
+        label: p.status.label.clone(),
+        tone: tone_name(p.status.tone),
+        when,
+        created_at: times.0,
+        updated_at: times.1,
+        open,
     }
 }
 
 fn approval_row(r: &Request) -> Row {
-    Row {
-        kind: "approval",
-        id: r.id.to_string(),
-        from: escape(&r.facts.requester.id),
-        target: r.facts.target.as_deref().map(escape),
-        policy: r.requirements.policy.to_string(),
-        state: r.state.name(),
-        sensitive: r.sensitive,
-        created: fmt_time(r.created_at),
-        updated: fmt_time(r.updated_at),
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-        open: !r.state.is_terminal(),
+    // A sensitive request's command stays on its own page.
+    let mut p = Presentation::approval(r, Audience::Full);
+    if r.sensitive {
+        p.action = None;
     }
+    row("approval", r.id, &p, !r.state.is_terminal(), (r.created_at, r.updated_at))
 }
 
 fn question_row(q: &Question) -> Row {
-    Row {
-        kind: "question",
-        id: q.id.to_string(),
-        from: q.asker.client.to_string(),
-        target: q.asker.actor.as_ref().map(ToString::to_string),
-        policy: q.requirements.policy.to_string(),
-        state: q.state(),
-        sensitive: q.confidentiality.question,
-        created: fmt_time(q.created_at),
-        updated: fmt_time(q.updated_at),
-        created_at: q.created_at,
-        updated_at: q.updated_at,
-        open: q.is_pending(),
-    }
-}
-
-/// Everything the requester or source supplied is passed through [`escape`],
-/// so hidden characters cannot make it look like something else.
-fn request_view(r: &Request) -> RequestView {
-    let f = &r.facts;
-    RequestView {
-        id: r.id.to_string(),
-        state: r.state.name(),
-        requester: escape(&f.requester.id),
-        identity: escape(&f.requester.identity),
-        actor: f.requester.actor.as_ref().map(ToString::to_string),
-        source: f.source.as_ref().map(ToString::to_string),
-        initiator: f.initiator.as_ref().map(|i| {
-            let who = i.actor.as_ref().map_or_else(|| "not a known person".to_owned(), ToString::to_string);
-            format!("{} ({who})", escape(i.display_name.as_deref().unwrap_or(&i.identity)))
-        }),
-        display_name: f.requester.display_name.as_deref().map(escape),
-        groups: escape(&f.requester.groups.iter().cloned().collect::<Vec<_>>().join(", ")),
-        target: f.target.as_deref().map(escape),
-        reason: f.reason.as_deref().map(escape),
-        subject: escape(&format!("{}/{}/{}", r.subject.backend, r.subject.kind, r.subject.id)),
-        attributes: f.attributes.iter().map(|(k, v)| (escape(k), escape(v))).collect(),
-        policy: r.requirements.policy.to_string(),
-        ttl: fmt_duration(r.requirements.ttl),
-        window: r.requirements.grant == countersign_core::GrantMode::Window,
-        quorum: r.requirements.quorum,
-        min_assurance: r.requirements.min_assurance.to_string(),
-        exclude: r
-            .requirements
-            .exclude
-            .iter()
-            .map(|e| serde_json::to_value(e).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default())
-            .collect::<Vec<_>>()
-            .join(", "),
-        sensitive: r.sensitive,
-        created: fmt_time(r.created_at),
-        pending_until: r.state.is_pending().then(|| fmt_time(r.pending_until)),
-        active_until: match r.state {
-            RequestState::Active { until } => Some(fmt_time(until)),
-            _ => None,
-        },
-        failure: match &r.state {
-            RequestState::Failed { error } => Some(escape(error)),
-            _ => None,
-        },
-        decisions: r
-            .decisions
-            .iter()
-            .map(|d| DecisionView {
-                approver: d.approver.to_string(),
-                verdict: match d.verdict {
-                    Verdict::Approve => "approve",
-                    Verdict::Deny => "deny",
-                },
-                assurance: d.assurance.to_string(),
-                via: d.via.to_string(),
-                at: fmt_time(d.at),
-                comment: d.comment.as_deref().map(escape),
-            })
-            .collect(),
-        uses: r
-            .uses
-            .iter()
-            .map(|u| UseView {
-                at: fmt_time(u.at),
-                command: escape(u.attributes.get("command").unwrap_or(&u.subject.id)),
-                cwd: u.attributes.get("cwd").map(|c| escape(c)),
-            })
-            .collect(),
-    }
+    let p = Presentation::question(q, Audience::Chat);
+    row("question", q.id, &p, q.is_pending(), (q.created_at, q.updated_at))
 }
 
 #[derive(Debug)]
@@ -600,7 +529,6 @@ fn show_value(field: Option<&Field>, v: &Value) -> String {
 #[allow(clippy::struct_excessive_bools)] // flags the template branches on
 struct QuestionView {
     id: String,
-    state: &'static str,
     asker: String,
     asker_actor: Option<String>,
     policy: String,
@@ -626,7 +554,6 @@ fn question_view(q: &Question, (text, answer): (bool, bool)) -> QuestionView {
     let form = q.form().ok();
     let mut v = QuestionView {
         id: q.id.to_string(),
-        state: q.state(),
         asker: q.asker.client.to_string(),
         asker_actor: q.asker.actor.as_ref().map(ToString::to_string),
         policy: q.requirements.policy.to_string(),
@@ -693,7 +620,14 @@ struct IndexPage {
 #[allow(clippy::struct_excessive_bools)]
 struct RequestPage {
     user: Option<UserView>,
-    r: RequestView,
+    id: String,
+    p: Presentation,
+    tone: &'static str,
+    when: Option<TimeView>,
+    action: ItemAction,
+    decisions: Vec<DecisionView>,
+    uses: Vec<UseView>,
+    sensitive: bool,
     csrf: String,
     error: Option<String>,
     can_decide: bool,
@@ -709,6 +643,12 @@ struct RequestPage {
 struct QuestionPage {
     user: Option<UserView>,
     q: QuestionView,
+    headline: String,
+    label: String,
+    tone: &'static str,
+    detail: Option<String>,
+    when: Option<TimeView>,
+    grant: String,
     csrf: String,
     error: Option<String>,
     can_answer: bool,
@@ -930,6 +870,7 @@ fn approval_page(
         Err(e) => Some(format!("You cannot decide this request: {e}.")),
     };
     let may_revoke = session.has(Role::Admin) || (member && r.eligible(&roster, &session.person).is_ok());
+    let p = Presentation::approval(r, Audience::Full);
     let page = RequestPage {
         user: Some(session.view()),
         csrf: session.data.csrf.clone(),
@@ -941,7 +882,26 @@ fn approval_page(
             .then(|| session.fresh_until(state.settings.fresh_auth_window).map(fmt_time))
             .flatten(),
         cannot_decide,
-        r: request_view(r),
+        id: r.id.to_string(),
+        tone: tone_name(p.status.tone),
+        when: time_view(p.status.time, now),
+        action: action_view(p.action.as_ref()),
+        decisions: p
+            .status
+            .decisions
+            .iter()
+            .map(|d| DecisionView {
+                who: d.who.clone(),
+                verdict: d.verdict(),
+                assurance: d.assurance.clone(),
+                via: d.via.clone(),
+                at: fmt_time(d.at),
+                comment: d.comment.clone(),
+            })
+            .collect(),
+        uses: p.status.uses.iter().map(|u| UseView { at: fmt_time(u.at), what: u.what.clone() }).collect(),
+        sensitive: r.sensitive,
+        p,
     };
     (status, render(&page)).into_response()
 }
@@ -969,6 +929,9 @@ fn question_page(
         Err(_) if !member => Some("You can see this question but not answer it.".to_owned()),
         Err(e) => Some(format!("You cannot answer this question: {e}.")),
     };
+    // Only the headline and status are taken from it: the text and answer
+    // follow the reader's access below.
+    let p = Presentation::question(q, Audience::Chat);
     let page = QuestionPage {
         user: Some(session.view()),
         csrf: session.data.csrf.clone(),
@@ -977,6 +940,12 @@ fn question_page(
         needs_reauth: assurance < q.required_assurance(),
         read_needs_reauth: q.confidentiality.question && !access.0 && responds_to(&roster, session, q),
         cannot_answer,
+        headline: p.headline.clone(),
+        label: p.status.label.clone(),
+        tone: tone_name(p.status.tone),
+        detail: p.status.detail.clone(),
+        when: time_view(p.status.time, now),
+        grant: p.grant.clone(),
         q: question_view(q, access),
     };
     (status, render(&page)).into_response()
@@ -1761,15 +1730,6 @@ mod tests {
     #[test]
     fn encodes_login_urls() {
         assert_eq!(login_url("/requests/a b?x=1&y", true), "/login?next=/requests/a%20b%3Fx%3D1%26y&fresh=1");
-    }
-
-    #[test]
-    fn formats_durations() {
-        assert_eq!(fmt_duration(Duration::from_secs(45)), "45s");
-        assert_eq!(fmt_duration(Duration::from_secs(1800)), "30m");
-        assert_eq!(fmt_duration(Duration::from_secs(7200)), "2h");
-        assert_eq!(fmt_duration(Duration::from_secs(5400)), "1h 30m");
-        assert_eq!(fmt_duration(Duration::from_secs(90)), "1m 30s");
     }
 
     #[test]

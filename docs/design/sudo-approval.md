@@ -95,7 +95,8 @@ A small static Rust binary run by `pam_exec` as root. It:
 1. Checks `PAM_TYPE=auth` and `PAM_SERVICE` is `sudo` or `sudo-i`.
 2. Reads the invoking `sudo` process (`$PPID`): `/proc/$PPID/exe` must be a
    known sudo binary; its real uid must be `PAM_USER`'s; `cmdline` gives the
-   argv as typed; `cwd` the working directory. The process is setuid root, so
+   whole `sudo` command line as typed (the program name is normalised to
+   `sudo` or `sudoedit`); `cwd` the working directory. The process is setuid root, so
    the agent cannot alter it.
 3. Reads optional hints from `/proc/$PPID/environ`: `COUNTERSIGN_REASON`
    (shown to approvers) and `COUNTERSIGN_SENSITIVE=1` (see "Sensitive
@@ -115,17 +116,21 @@ A small static Rust binary run by `pam_exec` as root. It:
 
 Configuration: `/etc/countersign/sudo.toml` (server URL, key file, timeout).
 
-The argv is shown as typed, e.g. `sudo -u postgres psql`. The helper parses
-sudo's options that do not change what runs (`-u`, `-n`, `-H`, `--`, ...) to
-report `runas` and the command separately. Anything else is sent as the raw
-arguments, which only match policies that do not look at the command: unknown
-options, and on purpose `-E`/`--preserve-env` (the caller's environment can
-make any command do anything), `-D`/`--chdir`, `-R`/`--chroot`, `-g` and
-leading `VAR=value` assignments. With `-s` or `-i` the command runs through a
-shell (for `-s`, the one the caller's `SHELL` names), so it is shown as
-`(shell) <command>` or `(login shell) <command>`.
+The helper sends the command line exactly as `sudo` received it, and
+approvers see exactly that, shell-quoted: `sudo -u postgres psql -c 'select
+1'` (see `presentation.md`). countersign reads it itself
+(`countersign_core::sudo`) for policies: sudo's options that do not change
+what runs (`-u`, `-n`, `-H`, `--`, ...) give `runas` and the command. Anything
+else makes the command the raw arguments, which only match policies that do
+not look at the command: unknown options, and on purpose `-E`/`--preserve-env`
+(the caller's environment can make any command do anything), `-D`/`--chdir`,
+`-R`/`--chroot`, `-g` and leading `VAR=value` assignments. Approvers then see
+a note saying why command-specific policies did not apply. With `-s` or `-i`
+the command runs through a shell (for `-s`, the one the caller's `SHELL`
+names), so for policies it is `(shell) <command>` or `(login shell)
+<command>`.
 
-Command patterns in policies are globs over the command as shown. Write them
+Command patterns in policies are globs over that reading of the command. Write them
 for exact commands or arguments the command cannot abuse: `apt *` also
 matches `apt -o APT::Update::Pre-Invoke::=sh …`.
 
@@ -272,7 +277,7 @@ signature against keys it pinned at setup.
   countersign-approval-v1
   request=<request id>
   client=<hex SHA-256 of the host key>
-  invocation=<hex SHA-256 of the JSON array [user, runas, argv...]>
+  invocation=<hex SHA-256 of the JSON array [user, cwd, sudo_argv]>
   nonce=<the submission's nonce>
   ```
 
@@ -315,7 +320,7 @@ Pinning the key:
 
 ```text
 POST   /intake/v1/requests
-       { "user": "agent", "runas": "root", "argv": ["apt","upgrade"],
+       { "user": "agent", "sudo_argv": ["sudo","apt","upgrade"],
          "cwd": "/home/agent", "reason": "…", "nonce": "<base64url>" }
   201  { "id": "…", "state": "pending", "url": "https://…/requests/…" }
   200  { "id": <window request>, "state": "approved", "until": "…", "url": …,
@@ -362,8 +367,9 @@ created by the intake API, not discovered:
   `requester_group` matches. Users that resolve to no active actor are
   refused (`unknown-user`).
 - `facts.source`: the client; `facts.target`: the client id (the host name).
-- `facts.attributes`: `host`, `user`, `runas`, `command` (argv joined with
-  spaces), `cwd`.
+- `facts.attributes`: `host`, `user`, `runas`, `command` (countersign's
+  reading of the command, shell-quoted), `cwd`. `facts.action` is the raw
+  line, `runas` and `cwd`, as shown to approvers.
 - `grant` / `deny` / `revoke` have nothing external to do; the result is the
   request state itself, which the host reads through the API.
 
@@ -399,7 +405,7 @@ pending_timeout = "5m"
   invocation.
 - `window`: while the request is `active`, a new submission from the same
   host, same user, matching the same policy, is approved immediately. Each
-  such use is appended to the window request (time, argv, cwd) and shown in
+  such use is appended to the window request (time, command line) and shown in
   the web UI and CLI, so the audit trail lists every command run under it.
   Revoking the request ends the window early.
 
@@ -408,8 +414,9 @@ pending_timeout = "5m"
 - Approving a command approves root on that host for as long as it runs;
   for many commands (`apt`, editors, shells) that is equivalent to full root.
   Command patterns are a convenience for approvers, not a sandbox.
-- Command globs match the argv joined with spaces, so `apt *` also matches
-  `apt -o APT::Update::Pre-Invoke::=sh …`. Approvers see the full argv.
+- Command globs match the command joined with spaces, so `apt *` also
+  matches `apt -o APT::Update::Pre-Invoke::=sh …`. Approvers see the full
+  command line as typed.
 - The request content is as trustworthy as root on the target host. A
   compromised host can request anything, but only for itself.
 - Self-approval checks still apply: approver identities must not overlap the

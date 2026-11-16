@@ -29,12 +29,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use countersign_core::approval_signing::{self, Approval, ServerKey};
-use countersign_core::host_key;
 use countersign_core::{
-    AccessBackend, AnswerError, Asker, BackendCaps, BackendError, BackendName, ClientId, Confidentiality, GrantHandle,
-    GrantMode, PendingSubject, Purpose, Question, QuestionOutcome, Request, RequestFilter, RequestId, RequestState,
-    Requester, Source, Store, SubjectFacts, SubjectRef, TransitionError,
+    AccessBackend, Action, AnswerError, Asker, BackendCaps, BackendError, BackendName, ClientId, Confidentiality,
+    GrantHandle, GrantMode, PendingSubject, Purpose, Question, QuestionOutcome, Request, RequestFilter, RequestId,
+    RequestState, Requester, Source, Store, SubjectFacts, SubjectRef, TransitionError,
 };
+use countersign_core::{host_key, text};
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -426,11 +426,10 @@ fn host_state(r: &Request) -> &'static str {
 pub struct SubmitBody {
     /// The OS user running `sudo`.
     pub user: String,
-    /// The user the command runs as. Defaults to `root`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runas: Option<String>,
-    /// The command and its arguments.
-    pub argv: Vec<String>,
+    /// The whole `sudo` command line as `sudo` received it, starting with
+    /// `sudo` or `sudoedit`. Shown to approvers as it is; countersign reads
+    /// who it runs as and which command it is from it.
+    pub sudo_argv: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -466,16 +465,6 @@ fn clean(s: &str, max: usize) -> String {
     out
 }
 
-/// Join argv for display and policy matching, quoting like a POSIX shell
-/// where needed.
-pub fn shell_join(argv: &[String]) -> String {
-    let safe = |a: &str| !a.is_empty() && a.bytes().all(|b| b.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&b));
-    argv.iter()
-        .map(|a| if safe(a) { a.clone() } else { format!("'{}'", a.replace('\'', r"'\''")) })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 /// The requester identity a client may name for an OS user.
 pub fn unix_identity(client: &ClientId, user: &str) -> String {
     format!("unix:{client}#{user}")
@@ -486,11 +475,11 @@ fn pending_subject(client: &ClientConfig, backend: BackendName, body: SubmitBody
     if !is_name(&body.user) {
         return Err(bad("invalid user"));
     }
-    if body.argv.is_empty() || body.argv[0].is_empty() {
-        return Err(bad("argv must name a command"));
+    if !matches!(body.sudo_argv.first().map(String::as_str), Some("sudo" | "sudoedit")) || body.sudo_argv.len() < 2 {
+        return Err(bad("sudo_argv must be a sudo command line"));
     }
-    if body.argv.iter().map(String::len).sum::<usize>() > MAX_ARGV_BYTES {
-        return Err(bad("argv is too long"));
+    if body.sudo_argv.iter().map(String::len).sum::<usize>() > MAX_ARGV_BYTES {
+        return Err(bad("sudo_argv is too long"));
     }
     if !approval_signing::is_nonce(&body.nonce) {
         return Err(bad("nonce must be 16 to 64 random bytes in base64url"));
@@ -498,28 +487,29 @@ fn pending_subject(client: &ClientConfig, backend: BackendName, body: SubmitBody
     // Of the raw values, before anything is cleaned for display.
     let binding = format!(
         "{}:{}",
-        approval_signing::invocation_digest(&body.user, body.runas.as_deref(), &body.argv),
+        approval_signing::invocation_digest(&body.user, body.cwd.as_deref(), &body.sudo_argv),
         body.nonce
     );
-    let runas = body.runas.unwrap_or_else(|| "root".to_owned());
-    if !is_name(&runas) {
-        return Err(bad("invalid runas"));
-    }
-    let argv: Vec<String> = body.argv.iter().map(|a| clean(a, MAX_ARGV_BYTES)).collect();
-    let command = shell_join(&argv);
-    if command.chars().count() > MAX_COMMAND_CHARS {
+    if text::shell_join(&body.sudo_argv).chars().count() > MAX_COMMAND_CHARS {
         return Err(bad("the command is too long to show to approvers"));
     }
+    let parsed = countersign_core::sudo::parse(&body.sudo_argv);
+    let runas = parsed.runas.unwrap_or_else(|| "root".to_owned());
+    if !is_name(&runas) {
+        return Err(bad("invalid user to run as"));
+    }
+    let command = text::shell_join(&parsed.command);
+    let cwd = body.cwd.filter(|s| !s.is_empty()).map(|c| clean(&c, MAX_FIELD));
 
     let host = client.id.to_string();
     let mut attributes = BTreeMap::from([
         ("host".to_owned(), host.clone()),
         ("user".to_owned(), body.user.clone()),
-        ("runas".to_owned(), runas),
+        ("runas".to_owned(), runas.clone()),
         ("command".to_owned(), command),
     ]);
-    if let Some(cwd) = body.cwd.filter(|s| !s.is_empty()) {
-        attributes.insert("cwd".to_owned(), clean(&cwd, MAX_FIELD));
+    if let Some(cwd) = &cwd {
+        attributes.insert("cwd".to_owned(), cwd.clone());
     }
     if let Some(tty) = body.tty.filter(|s| !s.is_empty()) {
         attributes.insert("tty".to_owned(), clean(&tty, MAX_FIELD));
@@ -535,6 +525,8 @@ fn pending_subject(client: &ClientConfig, backend: BackendName, body: SubmitBody
     facts.target = Some(host);
     facts.reason = body.reason.map(|r| clean(r.trim(), MAX_REASON)).filter(|r| !r.is_empty());
     facts.attributes = attributes;
+    facts.action =
+        Some(Action::Command { line: body.sudo_argv, runas, cwd, notes: parsed.uninterpreted.into_iter().collect() });
     facts.sensitive = body.sensitive;
     facts.binding = Some(binding);
     Ok(PendingSubject {

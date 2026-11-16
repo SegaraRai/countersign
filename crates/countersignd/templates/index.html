@@ -6,15 +6,14 @@
 {% else %}
 <div class="table-wrap">
 <table>
-  <thead><tr><th></th><th>From</th><th>Policy</th><th>State</th><th>Created</th></tr></thead>
+  <thead><tr><th></th><th>Request</th><th>State</th><th>When</th></tr></thead>
   <tbody>
   {% for r in open %}
   <tr>
     <td><span class="kind kind-{{ r.kind }}">{{ r.kind }}</span></td>
-    <td><a href="/requests/{{ r.id }}">{{ r.from }}</a>{% if let Some(t) = r.target %} <span class="muted">({{ t }})</span>{% endif %}{% if r.sensitive %} <span class="muted">· confidential</span>{% endif %}</td>
-    <td>{{ r.policy }}</td>
-    <td><span class="state state-{% if r.kind == "question" %}q-{% endif %}{{ r.state }}">{{ r.state }}</span></td>
-    <td class="muted">{{ r.created }}</td>
+    <td><a href="/requests/{{ r.id }}">{{ r.headline }}</a>{% if let Some(s) = r.summary %}<br><code class="muted">{{ s }}</code>{% endif %}</td>
+    <td><span class="state tone-{{ r.tone }}">{{ r.label }}</span></td>
+    <td class="muted">{{ r.when }}</td>
   </tr>
   {% endfor %}
   </tbody>
@@ -28,15 +27,14 @@
 {% else %}
 <div class="table-wrap">
 <table>
-  <thead><tr><th></th><th>From</th><th>Policy</th><th>State</th><th>Updated</th></tr></thead>
+  <thead><tr><th></th><th>Request</th><th>State</th><th>When</th></tr></thead>
   <tbody>
   {% for r in recent %}
   <tr>
     <td><span class="kind kind-{{ r.kind }}">{{ r.kind }}</span></td>
-    <td><a href="/requests/{{ r.id }}">{{ r.from }}</a>{% if let Some(t) = r.target %} <span class="muted">({{ t }})</span>{% endif %}</td>
-    <td>{{ r.policy }}</td>
-    <td><span class="state state-{% if r.kind == "question" %}q-{% endif %}{{ r.state }}">{% if r.kind == "question" && r.state == "expired" %}no answer{% else %}{{ r.state }}{% endif %}</span></td>
-    <td class="muted">{{ r.updated }}</td>
+    <td><a href="/requests/{{ r.id }}">{{ r.headline }}</a>{% if let Some(s) = r.summary %}<br><code class="muted">{{ s }}</code>{% endif %}</td>
+    <td><span class="state tone-{{ r.tone }}">{{ r.label }}</span></td>
+    <td class="muted">{{ r.when }}</td>
   </tr>
   {% endfor %}
   </tbody>
