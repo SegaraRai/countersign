@@ -23,6 +23,8 @@ pub struct View {
 
 const PENDING: u32 = 0x00f1_c40f;
 const GOOD: u32 = 0x002e_cc71;
+/// Approved and since finished: still green, darker than a live approval.
+const DONE: u32 = 0x001f_8b4c;
 const BAD: u32 = 0x00e7_4c3c;
 const MUTED: u32 = 0x0095_a5a6;
 const MAX_DECISIONS: usize = 10;
@@ -166,12 +168,13 @@ fn web_link(url: &str) -> Option<&str> {
     (url.starts_with("https://") || url.starts_with("http://")).then_some(url)
 }
 
-fn color(state: &RequestState) -> u32 {
+pub(crate) fn color(state: &RequestState) -> u32 {
     match state {
         RequestState::Pending => PENDING,
         RequestState::Approved | RequestState::Active { .. } => GOOD,
         RequestState::Denied | RequestState::Failed { .. } | RequestState::Revoked => BAD,
-        RequestState::Expired | RequestState::Withdrawn | RequestState::Ended => MUTED,
+        RequestState::Ended => DONE,
+        RequestState::Expired | RequestState::Withdrawn => MUTED,
     }
 }
 

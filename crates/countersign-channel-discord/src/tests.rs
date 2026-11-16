@@ -327,3 +327,14 @@ fn commands_are_shown_above_the_reason_and_cannot_escape_the_code_block() {
     assert_eq!(field("Run as").as_deref(), Some("`root`"));
     assert!(field("Duration").unwrap().ends_with("(window)"));
 }
+
+#[test]
+fn finished_approvals_stay_green_and_differ_from_live_ones() {
+    use crate::render::color;
+    let live = color(&RequestState::Approved);
+    let done = color(&RequestState::Ended);
+    assert_ne!(done, live);
+    assert_ne!(done, color(&RequestState::Expired));
+    let green = |c: u32| (c >> 8) & 0xff > (c >> 16) & 0xff && (c >> 8) & 0xff > c & 0xff;
+    assert!(green(live) && green(done));
+}
