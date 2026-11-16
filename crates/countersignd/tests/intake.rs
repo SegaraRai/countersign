@@ -716,3 +716,156 @@ async fn decisions_made_by_another_process_reach_waiting_hosts() {
     assert_eq!(v["state"], "denied");
     assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
 }
+
+// ------------------------------------------------------------------ MCP
+
+impl Setup {
+    /// POST one message to the MCP endpoint.
+    async fn mcp(&self, key: Option<&str>, body: &Value, headers: &[(&str, &str)]) -> (StatusCode, Value) {
+        let mut req = HttpRequest::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json, text/event-stream");
+        if let Some(k) = key {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {k}"));
+        }
+        for (name, value) in headers {
+            req = req.header(*name, *value);
+        }
+        let mut req = req.body(Body::from(body.to_string())).unwrap();
+        req.extensions_mut().insert(ConnectInfo("127.0.0.1:40000".parse::<SocketAddr>().unwrap()));
+        let resp = self.app.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    /// Call a tool and return its result.
+    async fn tool(&self, name: &str, arguments: Value) -> Value {
+        let msg = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                          "params": { "name": name, "arguments": arguments } });
+        let (status, v) = self.mcp(Some(AGENT.as_str()), &msg, &[]).await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        assert_eq!(v["id"], 7, "{v}");
+        v["result"].clone()
+    }
+}
+
+#[tokio::test]
+async fn mcp_clients_initialize_and_list_the_question_tools() {
+    let s = setup().await;
+    let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } });
+    let (status, v) = s.mcp(Some(AGENT.as_str()), &init, &[]).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["result"]["protocolVersion"], "2025-06-18");
+    assert!(v["result"]["capabilities"]["tools"].is_object());
+    assert_eq!(v["result"]["serverInfo"]["name"], "countersign");
+
+    let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
+    let hdr = [("mcp-protocol-version", "2025-06-18")];
+    assert_eq!(s.mcp(Some(AGENT.as_str()), &note, &hdr).await.0, StatusCode::ACCEPTED);
+
+    let list = json!({ "jsonrpc": "2.0", "id": "x", "method": "tools/list" });
+    let (_, v) = s.mcp(Some(AGENT.as_str()), &list, &hdr).await;
+    let names: Vec<_> = v["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].clone()).collect();
+    assert_eq!(names, [json!("ask_question"), json!("get_answer"), json!("withdraw_question")]);
+
+    let (_, v) =
+        s.mcp(Some(AGENT.as_str()), &json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }), &[]).await;
+    assert_eq!(v["error"]["code"], -32601);
+    let (status, _) = s.mcp(Some(AGENT.as_str()), &list, &[("mcp-protocol-version", "1999-01-01")]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn the_mcp_endpoint_needs_a_question_key_and_refuses_browsers() {
+    let s = setup().await;
+    let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+    let mut req = HttpRequest::builder().method("POST").uri("/mcp").body(Body::from(list.to_string())).unwrap();
+    req.extensions_mut().insert(ConnectInfo("127.0.0.1:40000".parse::<SocketAddr>().unwrap()));
+    let resp = s.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(resp.headers()[header::WWW_AUTHENTICATE], "Bearer");
+    assert_eq!(s.mcp(Some(WEB1), &list, &[]).await.0, StatusCode::FORBIDDEN, "approval-only key");
+    let origin = [("origin", "https://evil.example")];
+    assert_eq!(s.mcp(Some(AGENT.as_str()), &list, &origin).await.0, StatusCode::FORBIDDEN);
+    let get = HttpRequest::builder().method("GET").uri("/mcp").body(Body::empty()).unwrap();
+    assert_eq!(s.app.clone().oneshot(get).await.unwrap().status(), StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
+async fn agents_ask_over_mcp_and_wait_for_the_answer() {
+    let s = Arc::new(setup().await);
+    let q = question("Which token?", false);
+    let r = s
+        .tool(
+            "ask_question",
+            json!({ "message": q["message"], "requestedSchema": q["requestedSchema"],
+                    "context": { "service": "api" }, "wait_seconds": 0 }),
+        )
+        .await;
+    assert_eq!(r["isError"], false, "{r}");
+    assert_eq!(r["structuredContent"]["state"], "pending");
+    let id = r["structuredContent"]["id"].as_str().unwrap().to_owned();
+    assert!(r["content"][0]["text"].as_str().unwrap().contains("get_answer"));
+
+    let waiter = {
+        let s = Arc::clone(&s);
+        let id = id.clone();
+        tokio::spawn(async move { s.tool("get_answer", json!({ "id": id, "wait_seconds": 30 })).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    s.answer(&id, json!({ "token": "t-123" }), false).await;
+    let r = waiter.await.unwrap();
+    assert_eq!(r["structuredContent"]["state"], "answered", "{r}");
+    assert_eq!(r["structuredContent"]["content"]["token"], "t-123");
+    assert_eq!(r["structuredContent"]["answeredBy"], "bob");
+}
+
+#[tokio::test]
+async fn mcp_tool_refusals_are_results_the_agent_can_read() {
+    let s = setup().await;
+    let mut bad = question("Pick", false);
+    bad["requestedSchema"]["properties"]["token"] = json!({ "type": "array" });
+    let r = s.tool("ask_question", json!({ "message": "Pick", "requestedSchema": bad["requestedSchema"] })).await;
+    assert_eq!(r["isError"], true, "{r}");
+    let r = s.tool("get_answer", json!({ "id": "not-an-id" })).await;
+    assert_eq!(r["isError"], true, "{r}");
+
+    let q = question("Still needed?", false);
+    let r = s
+        .tool(
+            "ask_question",
+            json!({ "message": q["message"], "requestedSchema": q["requestedSchema"], "wait_seconds": 0 }),
+        )
+        .await;
+    let id = r["structuredContent"]["id"].as_str().unwrap().to_owned();
+    let r = s.tool("withdraw_question", json!({ "id": id })).await;
+    assert_eq!(r["structuredContent"]["state"], "withdrawn", "{r}");
+
+    let msg =
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "rm_rf", "arguments": {} } });
+    assert_eq!(s.mcp(Some(AGENT.as_str()), &msg, &[]).await.1["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn a_confidential_answer_reaches_an_mcp_agent_once() {
+    let s = setup().await;
+    let q = question("Paste the token", true);
+    let r = s
+        .tool(
+            "ask_question",
+            json!({ "message": q["message"], "requestedSchema": q["requestedSchema"], "confidential": true,
+                    "wait_seconds": 0 }),
+        )
+        .await;
+    let id = r["structuredContent"]["id"].as_str().unwrap().to_owned();
+    s.answer(&id, json!({ "token": "s3cret" }), true).await;
+    let r = s.tool("get_answer", json!({ "id": id, "wait_seconds": 0 })).await;
+    assert_eq!(r["structuredContent"]["content"]["token"], "s3cret", "{r}");
+    let r = s.tool("get_answer", json!({ "id": id, "wait_seconds": 0 })).await;
+    assert_eq!(r["structuredContent"]["contentRemoved"], true, "{r}");
+    assert!(r["structuredContent"].get("content").is_none());
+}

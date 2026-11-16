@@ -14,6 +14,7 @@
 //! POST   /intake/v1/questions        ask; 201 pending
 //! GET    /intake/v1/questions/{id}   state and answer; ?wait=<secs> long-polls while pending
 //! DELETE /intake/v1/questions/{id}   withdraw while pending
+//! POST   /mcp                        the question calls as MCP tools (Streamable HTTP; see [`mcp`])
 //! ```
 
 use std::collections::BTreeMap;
@@ -42,6 +43,8 @@ use subtle::ConstantTimeEq as _;
 use crate::config::{ClientConfig, Scope};
 use crate::engine::{Ask, Engine, EngineError, Submitted};
 use crate::tls::TlsConfig;
+
+mod mcp;
 
 /// Subject kind for `sudo` invocations.
 pub const KIND_SUDO: &str = "sudo";
@@ -342,6 +345,7 @@ pub fn router(state: IntakeState) -> Router {
         .route("/intake/v1/server-key", get(server_key))
         .route("/intake/v1/questions", post(ask))
         .route("/intake/v1/questions/{id}", get(question_status).delete(withdraw_question))
+        .route("/mcp", post(mcp::post).get(mcp::no_stream).delete(mcp::no_stream))
         .with_state(state)
 }
 
@@ -758,6 +762,12 @@ async fn ask(
     }
     let body: AskBody = serde_json::from_slice(&body)
         .map_err(|e| error(StatusCode::BAD_REQUEST, "bad-request", format!("invalid request body: {e}")))?;
+    let q = ask_as(&state, &client, body).await?;
+    Ok((StatusCode::CREATED, Json(question_body(&state, &q))).into_response())
+}
+
+/// Ask a question on behalf of an authenticated client.
+async fn ask_as(state: &IntakeState, client: &ClientConfig, body: AskBody) -> Result<Question, ApiError> {
     let ask = Ask {
         asker: Asker { client: client.id.clone(), actor: client.actor.clone() },
         message: body.message,
@@ -765,8 +775,41 @@ async fn ask(
         context: body.context,
         confidentiality: body.confidentiality,
     };
-    let q = state.engine.ask(ask, Timestamp::now()).await.map_err(question_error)?;
-    Ok((StatusCode::CREATED, Json(question_body(&state, &q))).into_response())
+    state.engine.ask(ask, Timestamp::now()).await.map_err(question_error)
+}
+
+/// The client's question as it stands, waiting up to `wait` while it is
+/// pending. Reading a decided question hands over (and for a confidential
+/// answer, uses up) the answer.
+async fn wait_for_answer(
+    state: &IntakeState,
+    client: &ClientConfig,
+    raw: &str,
+    wait: Duration,
+) -> Result<QuestionBody, ApiError> {
+    let deadline = tokio::time::Instant::now() + wait.min(MAX_WAIT);
+    let mut changes = state.engine.subscribe();
+    loop {
+        changes.borrow_and_update();
+        let q = state.owned_question(client, raw).await?;
+        if q.is_pending() {
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(question_body(state, &q));
+            }
+            let _ = tokio::time::timeout_at(deadline.min(now + RECHECK), changes.changed()).await;
+            continue;
+        }
+        let q = state.engine.read_question(q.id, &client.id, Timestamp::now()).await.map_err(question_error)?;
+        return Ok(question_body(state, &q));
+    }
+}
+
+/// Withdraw the client's pending question.
+async fn withdraw_as(state: &IntakeState, client: &ClientConfig, raw: &str) -> Result<(), ApiError> {
+    let q = state.owned_question(client, raw).await?;
+    state.engine.withdraw_question(q.id, Some(&client.id), Timestamp::now()).await.map_err(question_error)?;
+    Ok(())
 }
 
 async fn question_status(
@@ -777,22 +820,7 @@ async fn question_status(
     Query(w): Query<WaitQuery>,
 ) -> Result<Json<QuestionBody>, ApiError> {
     let client = state.authenticate(&headers, peer_addr(peer), Scope::Question)?;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(w.wait).min(MAX_WAIT);
-    let mut changes = state.engine.subscribe();
-    loop {
-        changes.borrow_and_update();
-        let q = state.owned_question(&client, &raw).await?;
-        if q.is_pending() {
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return Ok(Json(question_body(&state, &q)));
-            }
-            let _ = tokio::time::timeout_at(deadline.min(now + RECHECK), changes.changed()).await;
-            continue;
-        }
-        let q = state.engine.read_question(q.id, &client.id, Timestamp::now()).await.map_err(question_error)?;
-        return Ok(Json(question_body(&state, &q)));
-    }
+    Ok(Json(wait_for_answer(&state, &client, &raw, Duration::from_secs(w.wait)).await?))
 }
 
 async fn withdraw_question(
@@ -802,7 +830,6 @@ async fn withdraw_question(
     Path(raw): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let client = state.authenticate(&headers, peer_addr(peer), Scope::Question)?;
-    let q = state.owned_question(&client, &raw).await?;
-    state.engine.withdraw_question(q.id, Some(&client.id), Timestamp::now()).await.map_err(question_error)?;
+    withdraw_as(&state, &client, &raw).await?;
     Ok(StatusCode::NO_CONTENT)
 }

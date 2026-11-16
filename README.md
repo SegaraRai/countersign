@@ -4,7 +4,8 @@ Human approval for just-in-time access. countersign watches an access system
 for requests that need a second pair of eyes (for example an AI agent asking for
 an elevated session), tells the right people, and applies their decision — with
 the assurance level you require. Programs can also ask the right people a
-structured question and get their answer back; an answer never grants access.
+structured question and get their answer back, over HTTP or as an MCP server for
+AI agents; an answer never grants access.
 
 > Status: early development. Nothing here is stable yet.
 
@@ -93,7 +94,7 @@ min_assurance = "linked"       # chat buttons may approve directly
 | `countersign-channel-discord` | posts requests with Approve/Deny buttons and simple questions with answer buttons; receives presses over the Gateway (no inbound endpoint) |
 | `countersign-channel-ntfy` | push notifications via an ntfy server, linking to the web UI (notify-only) |
 | `countersign-channel-webhook` | signed JSON events ([Standard Webhooks](https://www.standardwebhooks.com/)) to any URL (notify-only) |
-| `countersignd` | daemon: config, engine (discover, decide, grant, expire, questions), outbox delivery, web UI, JSON API, intake API for clients |
+| `countersignd` | daemon: config, engine (discover, decide, grant, expire, questions), outbox delivery, web UI, JSON API, intake API for clients (also an MCP server for questions) |
 | `countersign` (CLI) | host-side administration: list/show requests and questions, deny/revoke, suspend/reinstate, manage account links, generate secrets (no approve, no answer) |
 | `countersign-sudo` | PAM helper for target hosts: asks countersign before `sudo` runs |
 

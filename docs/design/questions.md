@@ -1,7 +1,8 @@
 # Design: questions alongside approvals
 
-Status: implemented (rollout steps 1–5); the MCP bridge / `countersign ask`
-(step 6) is not. One deviation from the model below: a question is its own
+Status: implemented. Step 6 became an MCP endpoint in the intake API
+(`POST /mcp`, below) instead of a separate bridge; there is no
+`countersign ask` CLI. One deviation from the model below: a question is its own
 type (`Question`), not a `RequestKind` variant inside `Request`. Both are
 stored in the `requests` table with a `kind` column, and the engine's grant,
 revoke and window code takes a `Request`, which a question cannot be, so the
@@ -180,6 +181,36 @@ DELETE /intake/v1/questions/{id}               withdraw: 204, or 409 if no longe
 
 `/intake/v1/requests` stays approval-only.
 
+### MCP
+
+The same calls are offered as an MCP server over Streamable HTTP at
+`POST /mcp` on the intake listener, so an agent needs no extra program, only
+its MCP client configured with the URL and the client's key:
+
+```json
+{ "type": "http", "url": "https://countersign.example.com:8443/mcp",
+  "headers": { "Authorization": "Bearer ${COUNTERSIGN_KEY}" } }
+```
+
+- Tools: `ask_question` (message, requestedSchema, optional context,
+  `confidential`, `answerMayBeConfidential`), `get_answer` (id) and
+  `withdraw_question` (id). Results carry the question as above in
+  `structuredContent`, plus a short text for the agent.
+- The key needs the `question` scope; policies, limits and confidentiality
+  are those of the REST calls. Refusals (no policy, invalid schema, unknown
+  id) are tool results with `isError`, so the agent can read and correct
+  them.
+- People answer in minutes, MCP clients often give up on a tool call after
+  60 s: `ask_question` and `get_answer` wait at most `wait_seconds`
+  (default 45, at most 55) and then return state `pending`; the agent calls
+  `get_answer` again.
+- Stateless: one JSON-RPC message per POST, answered with
+  `application/json`; no sessions and no server-initiated stream (GET and
+  DELETE answer 405). Requests with an `Origin` header (browsers) are refused.
+- Authentication is a static bearer key, not the OAuth flow the MCP
+  specification describes for remote servers; MCP clients that let you set
+  headers support it.
+
 ## Confidentiality
 
 Some questions or answers should not end up in chat channels or in the
@@ -352,8 +383,8 @@ The message and schema text come from the asker and are untrusted.
 4. Web UI: form rendering from the schema, answer page with fresh-auth.
 5. Channels: kind-aware rendering; Discord in-place answers for single enum or
    boolean.
-6. A small MCP bridge or CLI (`countersign ask`) so agents and scripts can ask
-   without writing HTTP calls.
+6. Agents ask through MCP (`POST /mcp` on the intake listener) without
+   writing HTTP calls.
 
 ## Later / open questions
 

@@ -100,7 +100,8 @@ scopes = ["approval"]            # the default
 allowed_ips = ["192.0.2.21"]     # optional extra check, never a substitute for the key
 # backend = "sudo"               # needed only with more than one host backend
 
-# A client that asks questions for a workload (e.g. an AI agent's MCP bridge).
+# A client that asks questions for a workload, e.g. an AI agent through the
+# MCP endpoint (https://<intake>/mcp, this key as a bearer token).
 [[client]]
 id = "agent-bridge"
 auth = { host_key = "sha256:0000000000000000000000000000000000000000000000000000000000000002" }
