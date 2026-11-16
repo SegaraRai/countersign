@@ -30,6 +30,7 @@ fn request(min_assurance: Assurance, reason: Option<&str>) -> Request {
             source: None,
             initiator: None,
             sensitive: false,
+            binding: None,
             requester: Requester {
                 id: "alice".into(),
                 display_name: Some("Alice `@everyone`".into()),

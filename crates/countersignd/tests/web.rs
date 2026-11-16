@@ -96,6 +96,7 @@ fn facts() -> SubjectFacts {
         source: None,
         initiator: None,
         sensitive: false,
+        binding: None,
         requester: Requester {
             id: "agent".into(),
             groups: BTreeSet::from(["agents".to_owned()]),
@@ -147,10 +148,11 @@ const CONFIG: &str = r#"
     [intake]
     listen = "127.0.0.1:0"
     behind_proxy = true
+    signing_key_file = "set by the test"
 
     [[client]]
     id = "agent-host"
-    auth = { host_key_sha256 = "1111111111111111111111111111111111111111111111111111111111111111" }
+    auth = { host_key = "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
     scopes = ["question"]
 
     [[question_policy]]
@@ -254,11 +256,24 @@ struct Setup {
     daemon: Daemon,
 }
 
+/// A signing key file for the daemon under test (one per test process).
+fn signing_key_file() -> std::path::PathBuf {
+    static PATH: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
+        let p = std::env::temp_dir().join(format!("countersign-test-signing-{}.key", std::process::id()));
+        std::fs::write(&p, countersign_core::approval_signing::ServerKey::generate(&SIGNING_SEED)).unwrap();
+        p
+    });
+    PATH.clone()
+}
+
+const SIGNING_SEED: [u8; 32] = [5; 32];
+
 async fn setup(min_assurance: &str) -> Setup {
-    let config = Config::from_toml(
+    let mut config = Config::from_toml(
         &CONFIG.replace("max_ttl = \"30m\"", &format!("max_ttl = \"30m\"\nmin_assurance = \"{min_assurance}\"")),
     )
     .unwrap();
+    config.intake.as_mut().unwrap().signing_key_file = signing_key_file();
     let store: Arc<dyn Store> = Arc::new(SqliteStore::in_memory().await.unwrap());
     let backend = Arc::new(OneSession { state: Mutex::new("pending") });
     let mut daemon =

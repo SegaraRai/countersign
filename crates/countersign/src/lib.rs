@@ -112,6 +112,19 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Write a new approval signing key for `intake.signing_key_file` (mode
+    /// 0600; make it readable by the daemon's group) and print the
+    /// `server_keys` line clients pin. With `--public`, print the line for
+    /// an existing key instead.
+    SigningKey {
+        path: PathBuf,
+        /// Only print the public key of an existing key file.
+        #[arg(long, conflicts_with = "force")]
+        public: bool,
+        /// Overwrite an existing file.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -257,6 +270,7 @@ pub async fn execute(cmd: Command, ctx: Context, out: &mut dyn Write) -> Result<
         }
         Command::Keygen { path, format, force } => keygen(&path, format, force)?,
         Command::HostKey { path, force } => writeln!(out, "{}", host_key(&path, force)?)?,
+        Command::SigningKey { path, public, force } => writeln!(out, "{}", signing_key(&path, public, force)?)?,
     }
     Ok(())
 }
@@ -483,7 +497,23 @@ pub fn keygen(path: &Path, format: KeyFormat, force: bool) -> Result<(), CliErro
 pub fn host_key(path: &Path, force: bool) -> Result<String, CliError> {
     let key = countersign_core::host_key::from_random(&random_bytes()?);
     write_secret(path, &key, force)?;
-    Ok(format!("auth = {{ host_key_sha256 = \"{}\" }}", countersign_core::host_key::digest_hex(&key)))
+    Ok(format!("auth = {{ host_key = \"{}\" }}", countersign_core::host_key::reference(&key)))
+}
+
+/// Write a new approval signing key, or with `public` read an existing one.
+/// Returns the `server_keys` line for clients.
+pub fn signing_key(path: &Path, public: bool, force: bool) -> Result<String, CliError> {
+    use countersign_core::approval_signing::ServerKey;
+    let key = if public {
+        let text = std::fs::read_to_string(path)?;
+        ServerKey::parse(&text)
+            .ok_or_else(|| CliError::Usage(format!("{} does not hold a signing key", path.display())))?
+    } else {
+        let text = ServerKey::generate(&random_bytes()?);
+        write_secret(path, &text, force)?;
+        ServerKey::parse(&text).ok_or_else(|| CliError::Usage("generated key does not parse".into()))?
+    };
+    Ok(format!("server_keys = [\"{}\"]", key.public()))
 }
 
 fn write_secret(path: &Path, text: &str, force: bool) -> Result<(), CliError> {

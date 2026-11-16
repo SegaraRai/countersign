@@ -22,6 +22,9 @@ fn main() -> ExitCode {
     if std::env::args_os().nth(1).is_some_and(|a| a == "run") {
         return run_sudo(std::env::args_os().skip(2).collect());
     }
+    if std::env::args_os().nth(1).is_some_and(|a| a == "enroll") {
+        return enroll(std::env::args().skip(2).collect());
+    }
     #[cfg(unix)]
     {
         *OUTPUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
@@ -61,7 +64,8 @@ async fn run(path: PathBuf) -> Result<Outcome, Error> {
         &config.sudo_binaries,
     )?;
     let key = countersign_sudo::read_key(&config.key_file)?;
-    let client = countersign_sudo::Client::new(&config.server, key, config.ca_file.as_deref())?;
+    let client =
+        countersign_sudo::Client::new(&config.server, key, config.ca_file.as_deref(), config.server_keys.clone())?;
 
     let mut signals = Vec::new();
     for kind in [SignalKind::interrupt(), SignalKind::terminate(), SignalKind::hangup()] {
@@ -147,6 +151,68 @@ fn parse_run_args(args: Vec<std::ffi::OsString>) -> Result<RunArgs, String> {
         return Err("no command given".into());
     }
     Ok(RunArgs { reason, sensitive, command })
+}
+
+const ENROLL_USAGE: &str = "usage: countersign-sudo enroll --server URL [--ca-file PEM] [--server-key ed25519:...] \
+                            [--config PATH] [--key-file PATH]";
+
+/// Set this host up: pin countersign's key, create the host key, write the
+/// configuration, and print the `[[client]]` entry for countersign.
+fn enroll(args: Vec<String>) -> ExitCode {
+    let mut e = countersign_sudo::Enroll {
+        server: String::new(),
+        ca_file: None,
+        server_key: None,
+        config: PathBuf::from(CONFIG_PATH),
+        key_file: PathBuf::from("/etc/countersign/host.key"),
+    };
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        let Some(v) = it.next() else {
+            eprintln!("countersign-sudo: {a} needs a value\n{ENROLL_USAGE}");
+            return ExitCode::from(2);
+        };
+        match a.as_str() {
+            "--server" => e.server = v,
+            "--ca-file" => e.ca_file = Some(PathBuf::from(v)),
+            "--server-key" => e.server_key = Some(v),
+            "--config" => e.config = PathBuf::from(v),
+            "--key-file" => e.key_file = PathBuf::from(v),
+            _ => {
+                eprintln!("countersign-sudo: unknown option {a}\n{ENROLL_USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if e.server.is_empty() {
+        eprintln!("{ENROLL_USAGE}");
+        return ExitCode::from(2);
+    }
+    let mut confirm = |key: &str| {
+        use std::io::{BufRead as _, Write as _};
+        println!("countersign reports this approval signing key:\n\n  {key}\n");
+        println!("Compare it with the key countersignd logs at startup (or `countersign signing-key --public`).");
+        print!("Trust it? [y/N] ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).is_ok() && matches!(line.trim(), "y" | "Y" | "yes")
+    };
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|err| Error::Context(err.to_string()))
+        .and_then(|rt| rt.block_on(countersign_sudo::enroll(&e, &mut confirm)));
+    match result {
+        Ok(client) => {
+            println!("wrote {} and {}.", e.config.display(), e.key_file.display());
+            println!("Add this host to countersign's configuration:\n\n{client}");
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("countersign-sudo: {err}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Replace this process with `sudo -- COMMAND...`. Returns only on failure.

@@ -37,6 +37,21 @@ fn config() -> Config {
     config_with(OWN_TLS)
 }
 
+/// The nonce test submissions carry.
+const NONCE: &str = "bm9uY2Vub25jZW5vbmNlbm9uY2Vub25jZW5vbmNlbm8";
+
+/// A signing key file for the daemon under test (one per test process).
+fn signing_key_file() -> std::path::PathBuf {
+    static PATH: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
+        let p = std::env::temp_dir().join(format!("countersign-test-signing-{}.key", std::process::id()));
+        std::fs::write(&p, countersign_core::approval_signing::ServerKey::generate(&SIGNING_SEED)).unwrap();
+        p
+    });
+    PATH.clone()
+}
+
+const SIGNING_SEED: [u8; 32] = [5; 32];
+
 fn config_with(exposure: &str) -> Config {
     let text = format!(
         r#"
@@ -46,6 +61,7 @@ fn config_with(exposure: &str) -> Config {
         [intake]
         listen = "127.0.0.1:0"
         {exposure}
+        signing_key_file = "set by the test"
         max_pending_per_client = 3
 
         [backend.sudo]
@@ -53,20 +69,20 @@ fn config_with(exposure: &str) -> Config {
 
         [[client]]
         id = "web-1"
-        auth = {{ host_key_sha256 = "{}" }}
+        auth = {{ host_key = "sha256:{}" }}
 
         [[client]]
         id = "web-2"
-        auth = {{ host_key_sha256 = "{}" }}
+        auth = {{ host_key = "sha256:{}" }}
         allowed_ips = ["100.64.0.22"]
 
         [[client]]
         id = "legacy"
-        auth = {{ host_key_sha256 = "{}" }}
+        auth = {{ host_key = "sha256:{}" }}
 
         [[client]]
         id = "agent-host"
-        auth = {{ host_key_sha256 = "{}" }}
+        auth = {{ host_key = "sha256:{}" }}
         scopes = ["question"]
         actor = "deployer"
 
@@ -126,7 +142,7 @@ fn config_with(exposure: &str) -> Config {
         confidential_min_assurance = "linked"
         "#,
         digest_hex(WEB1),
-        digest_hex(WEB2).to_uppercase(),
+        digest_hex(WEB2),
         digest_hex(LEGACY),
         digest_hex(&AGENT),
     );
@@ -143,7 +159,8 @@ async fn setup() -> Setup {
     setup_with(config()).await
 }
 
-async fn setup_with(config: Config) -> Setup {
+async fn setup_with(mut config: Config) -> Setup {
+    config.intake.as_mut().unwrap().signing_key_file = signing_key_file();
     let store: Arc<dyn Store> = Arc::new(SqliteStore::in_memory().await.unwrap());
     let backends = build_backends(&config, &store).unwrap();
     let daemon = Daemon::with_parts(&config, Arc::clone(&store), backends, vec![]).unwrap();
@@ -177,7 +194,7 @@ impl Setup {
     }
 
     async fn submit(&self, key: &str, user: &str, argv: &[&str]) -> (StatusCode, Value) {
-        let body = json!({ "user": user, "argv": argv, "cwd": "/home/agent", "reason": "deploy" });
+        let body = json!({ "user": user, "argv": argv, "cwd": "/home/agent", "reason": "deploy", "nonce": NONCE });
         self.call(Call {
             method: "POST",
             path: "/intake/v1/requests".into(),
@@ -221,7 +238,7 @@ async fn hosts_must_present_a_known_key_from_an_allowed_address() {
         method: "POST",
         path: "/intake/v1/requests".into(),
         key,
-        body: Some(json!({ "user": "agent", "argv": ["true"] })),
+        body: Some(json!({ "user": "agent", "argv": ["true"], "nonce": NONCE })),
         peer,
     };
     assert_eq!(s.call(post(None, None)).await.0, StatusCode::UNAUTHORIZED);
@@ -255,7 +272,8 @@ async fn behind_a_proxy_the_client_address_comes_from_its_header() {
         for f in forwarded {
             req = req.header("x-forwarded-for", *f);
         }
-        let mut req = req.body(Body::from(json!({ "user": "agent", "argv": ["true"] }).to_string())).unwrap();
+        let mut req =
+            req.body(Body::from(json!({ "user": "agent", "argv": ["true"], "nonce": NONCE }).to_string())).unwrap();
         // The proxy itself connects from loopback.
         req.extensions_mut().insert(ConnectInfo("127.0.0.1:40000".parse::<SocketAddr>().unwrap()));
         let app = s.app.clone();
@@ -267,6 +285,60 @@ async fn behind_a_proxy_the_client_address_comes_from_its_header() {
     assert_eq!(post(&["100.64.0.22, 100.64.0.99"]).await, StatusCode::UNAUTHORIZED);
     assert_eq!(post(&["100.64.0.22", "100.64.0.99"]).await, StatusCode::UNAUTHORIZED);
     assert_eq!(post(&["100.64.0.99, 100.64.0.22"]).await, StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn approvals_are_signed_for_the_submission_and_the_client() {
+    use countersign_core::approval_signing::{Approval, ServerKey, invocation_digest, verify};
+    let s = setup().await;
+    let public = vec![ServerKey::parse(&ServerKey::generate(&SIGNING_SEED)).unwrap().public()];
+    let (status, v) = s.submit(WEB1, "agent", &["systemctl", "restart", "nginx"]).await;
+    assert_eq!(status, StatusCode::CREATED, "{v}");
+    assert!(v.get("signature").is_none(), "nothing to sign while pending");
+    let id = id_of(&v);
+    s.decide(&id, Verdict::Approve).await;
+    let v = s.status(WEB1, &id, 0).await.1;
+    assert_eq!(v["state"], "approved");
+    let sig = v["signature"].as_str().unwrap();
+    let argv: Vec<String> = ["systemctl", "restart", "nginx"].map(String::from).to_vec();
+    let digest = invocation_digest("agent", None, &argv);
+    let client = countersign_core::host_key::digest_hex(WEB1);
+    let approval = Approval { request: &id, client: &client, invocation: &digest, nonce: NONCE };
+    assert!(verify(&public, &approval, sig));
+    let other = invocation_digest("agent", None, &["reboot".to_owned()]);
+    assert!(!verify(&public, &Approval { invocation: &other, ..approval }, sig));
+    let web2 = countersign_core::host_key::digest_hex(WEB2);
+    assert!(!verify(&public, &Approval { client: &web2, ..approval }, sig));
+
+    // The key is public; anyone may fetch it (and must confirm it elsewhere).
+    let req = HttpRequest::builder().uri("/intake/v1/server-key").body(Body::empty()).unwrap();
+    let resp = s.app.clone().oneshot(req).await.unwrap();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap()["server_key"], public[0].as_str());
+
+    // Without a usable nonce there is nothing to bind an approval to.
+    let body = json!({ "user": "agent", "argv": ["true"], "nonce": "short" });
+    let (status, _) = s
+        .call(Call {
+            method: "POST",
+            path: "/intake/v1/requests".into(),
+            key: Some(WEB1),
+            body: Some(body),
+            peer: None,
+        })
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let body = json!({ "user": "agent", "argv": ["true"] });
+    let (status, _) = s
+        .call(Call {
+            method: "POST",
+            path: "/intake/v1/requests".into(),
+            key: Some(WEB1),
+            body: Some(body),
+            peer: None,
+        })
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -344,7 +416,7 @@ async fn a_window_approves_later_matching_commands_and_records_them() {
         method: "POST",
         path: "/intake/v1/requests".into(),
         key: Some(WEB2),
-        body: Some(json!({ "user": "agent", "argv": ["apt", "install", "jq"] })),
+        body: Some(json!({ "user": "agent", "argv": ["apt", "install", "jq"], "nonce": NONCE })),
         peer: Some("100.64.0.22"),
     };
     assert_eq!(s.call(peer).await.0, StatusCode::CREATED);
@@ -452,19 +524,19 @@ fn configuration_mistakes_are_reported() {
         type = "host"
         [[client]]
         id = "a"
-        auth = { host_key_sha256 = "abc" }
+        auth = { host_key = "sha256:abc" }
         actor = "bob"
         [[client]]
         id = "b"
-        auth = { host_key_sha256 = "1111111111111111111111111111111111111111111111111111111111111111" }
+        auth = { host_key = "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
         [[client]]
         id = "b"
-        auth = { host_key_sha256 = "1111111111111111111111111111111111111111111111111111111111111111" }
+        auth = { host_key = "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
     "#;
     let e = Config::from_toml(bad).unwrap_err().to_string();
-    assert!(e.contains("64 hex digits"), "{e}");
+    assert!(e.contains("64 lowercase hex digits"), "{e}");
     assert!(e.contains("client b: duplicate id"), "{e}");
-    assert!(e.contains("client b: auth.host_key_sha256 is used by another client"), "{e}");
+    assert!(e.contains("client b: auth.host_key is used by another client"), "{e}");
     assert!(e.contains("actor is only used with the question scope"), "{e}");
     assert!(e.contains("need an [intake] section"), "{e}");
 }
@@ -472,7 +544,7 @@ fn configuration_mistakes_are_reported() {
 #[tokio::test]
 async fn sensitive_requests_are_marked_when_the_policy_honors_it() {
     let s = setup().await;
-    let body = json!({ "user": "agent", "argv": ["cat", "/etc/shadow"], "sensitive": true });
+    let body = json!({ "user": "agent", "argv": ["cat", "/etc/shadow"], "sensitive": true, "nonce": NONCE });
     let call =
         Call { method: "POST", path: "/intake/v1/requests".into(), key: Some(WEB1), body: Some(body), peer: None };
     let (status, v) = s.call(call).await;

@@ -75,6 +75,13 @@ and compared by hash). The network is not trusted for anything:
 `countersign-sudo` trusts the system's usual roots plus, with `ca_file`, the
 PEM certificates given there (a private CA or a self-signed certificate).
 
+TLS is not what makes an approval trustworthy, though. countersign signs
+every approval with its own key over the host, the exact command and a
+fresh nonce, and the helper accepts only signatures from the keys it pinned
+(`server_keys`). A proxy, tunnel or anyone else holding the TLS session can
+read requests and block them, but cannot approve one. See "Signed
+approvals" in `sudo-approval.md`.
+
 ### Example setups
 
 These are examples, not requirements:

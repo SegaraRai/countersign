@@ -20,6 +20,7 @@ fn request() -> Request {
             source: None,
             initiator: None,
             sensitive: false,
+            binding: None,
             requester: Requester {
                 id: "agent-7".into(),
                 display_name: None,

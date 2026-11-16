@@ -134,7 +134,9 @@ backups remain until those backups expire.
 Both the web UI and the intake API serve HTTPS: either countersign terminates
 TLS (`tls = { cert_file, key_file }`), or a reverse proxy or tunnel does and
 the listener stays on a loopback or private address. Clients authenticate with
-their key alone; `allowed_ips` is an optional extra.
+their key alone; `allowed_ips` is an optional extra. Approvals are signed by
+countersign, and `countersign-sudo` checks the signature against a pinned
+public key, so nothing in between can approve a `sudo`.
 
 See [`crates/countersignd/config.example.toml`](crates/countersignd/config.example.toml)
 and [`docs/design/deployment.md`](docs/design/deployment.md).

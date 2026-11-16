@@ -306,7 +306,7 @@ identities = ["github:repo:example/app:environment:prod"]
 
 [[client]]
 id = "web-1"
-auth = { host_key_sha256 = "…" }
+auth = { host_key = "sha256:…" }
 scopes = ["approval"]
 
 [[client]]
@@ -325,7 +325,7 @@ auditor = ["group:security"]
 member = ["group:ops", "group:security"]
 ```
 
-`[[host]]` becomes `[[client]]` with `host_key_sha256`; the sudo backend's
+`[[host]]` becomes `[[client]]` with `host_key`; the sudo backend's
 `users` map is replaced by workload identities and groups.
 
 ## What this changes in current code

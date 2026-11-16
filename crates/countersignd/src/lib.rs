@@ -27,6 +27,8 @@ pub enum BuildError {
     Auth(#[from] countersign_core::AuthError),
     #[error("session key: {0}")]
     SessionKey(String),
+    #[error("intake signing key: {0}")]
+    SigningKey(String),
     #[error("channel {name}: {source}")]
     Channel { name: String, source: countersign_core::ChannelError },
 }
@@ -55,6 +57,17 @@ pub fn session_key(config: &Config) -> Result<axum_extra::extract::cookie::Key, 
         return Err(BuildError::SessionKey(format!("{} must hold at least 32 bytes", path.display())));
     }
     Ok(Key::derive_from(&bytes))
+}
+
+/// Read countersign's approval signing key (`intake.signing_key_file`).
+pub fn signing_key(path: &std::path::Path) -> Result<countersign_core::approval_signing::ServerKey, BuildError> {
+    let text = std::fs::read_to_string(path).map_err(|e| BuildError::SigningKey(format!("{}: {e}", path.display())))?;
+    countersign_core::approval_signing::ServerKey::parse(&text).ok_or_else(|| {
+        BuildError::SigningKey(format!(
+            "{} does not hold a signing key (create one with `countersign signing-key`)",
+            path.display()
+        ))
+    })
 }
 
 /// The directory, policies and clients from a configuration, as engine rules.
@@ -186,8 +199,14 @@ impl Daemon {
                 fresh_auth_window: config.server.fresh_auth_window,
             }),
         };
-        let intake =
-            config.intake.as_ref().map(|i| intake::IntakeState::new(Arc::clone(&engine), i, &config.server.public_url));
+        let intake = match &config.intake {
+            Some(i) => {
+                let key = Arc::new(signing_key(&i.signing_key_file)?);
+                tracing::info!(public_key = %key.public(), "intake approvals are signed; clients pin this key");
+                Some(intake::IntakeState::new(Arc::clone(&engine), i, &config.server.public_url, key))
+            }
+            None => None,
+        };
         Ok(Self { engine, dispatcher, web, interactive, sink, intake })
     }
 }

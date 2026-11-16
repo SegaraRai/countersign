@@ -6,6 +6,12 @@
 //! waiting `sudo` process (`/proc/$PPID`), submits it to countersign's intake
 //! API with this host's key, and long-polls until the request is decided.
 //!
+//! An approval counts only with countersign's signature over this host's
+//! key, this exact invocation and a fresh nonce, checked against the public
+//! keys pinned in the configuration (`server_keys`). TLS protects the key
+//! and the details on the way; the signature is what makes an approval
+//! trustworthy even where TLS is terminated by something in between.
+//!
 //! It exits 0 only when the invocation is approved. Every other outcome —
 //! denial, timeout, Ctrl-C, an unreachable server, a configuration problem —
 //! exits non-zero, so `sudo` fails closed. On timeout or a signal it
@@ -52,6 +58,9 @@ pub struct Config {
     /// self-signed certificate. The system's usual roots stay trusted.
     #[serde(default)]
     pub ca_file: Option<PathBuf>,
+    /// countersign's approval signing public keys (`ed25519:…`). An approval
+    /// counts only if one of them signed it. More than one while rotating.
+    pub server_keys: Vec<String>,
     /// File holding this host's key. Must not be readable by group or others.
     #[serde(default = "default_key_file")]
     pub key_file: PathBuf,
@@ -87,6 +96,13 @@ impl Config {
         if c.timeout.is_zero() {
             return Err(Error::Config("timeout must be greater than zero".into()));
         }
+        if c.server_keys.is_empty() {
+            return Err(Error::Config("server_keys must list countersign's public key".into()));
+        }
+        for k in &c.server_keys {
+            countersign_core::approval_signing::check_public_key(k)
+                .map_err(|why| Error::Config(format!("server_keys: {why}")))?;
+        }
         Ok(c)
     }
 
@@ -94,6 +110,104 @@ impl Config {
         let text = std::fs::read_to_string(path).map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
         Self::parse(&text)
     }
+}
+
+/// What `countersign-sudo enroll` was told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Enroll {
+    pub server: String,
+    pub ca_file: Option<PathBuf>,
+    /// The public key as obtained out of band; compared with what the
+    /// server reports. Without it the person enrolling confirms the key.
+    pub server_key: Option<String>,
+    pub config: PathBuf,
+    pub key_file: PathBuf,
+}
+
+/// Set up this host: fetch and pin countersign's public key, create the host
+/// key if there is none, and write the configuration. `confirm` is asked to
+/// accept a key that was not given in advance. Returns the `[[client]]`
+/// lines for countersign's configuration.
+pub async fn enroll(e: &Enroll, confirm: &mut dyn FnMut(&str) -> bool) -> Result<String, Error> {
+    if e.config.exists() {
+        return Err(Error::Config(format!("{} exists; remove it to enroll again", e.config.display())));
+    }
+    if !countersign_core::url::is_secure(&e.server) {
+        return Err(Error::Config(format!("server must be an https:// URL, got {:?}", e.server)));
+    }
+    if let Some(k) = &e.server_key {
+        countersign_core::approval_signing::check_public_key(k)
+            .map_err(|why| Error::Config(format!("--server-key: {why}")))?;
+    }
+
+    // Any client key will do to build the HTTP client; the key is not sent.
+    let probe = Client::new(&e.server, String::new(), e.ca_file.as_deref(), Vec::new())?;
+    let url = format!("{}/intake/v1/server-key", e.server.trim_end_matches('/'));
+    let resp = probe.http.get(url).send().await.map_err(net)?;
+    if !resp.status().is_success() {
+        return Err(Error::Server(format!("HTTP {} fetching the server key", resp.status())));
+    }
+    let reported = resp.json::<KeyBody>().await.map_err(net)?.server_key;
+    if !countersign_core::approval_signing::is_public_key(&reported) {
+        return Err(Error::Server("the server reported something that is not a public key".into()));
+    }
+    if let Some(k) = &e.server_key {
+        if *k != reported {
+            return Err(Error::Server(format!(
+                "the server reports {reported}, not the expected {k}; something is in between, or the key changed"
+            )));
+        }
+    } else if !confirm(&reported) {
+        return Err(Error::Context("not trusted; nothing written".into()));
+    }
+
+    let key = if e.key_file.exists() {
+        read_key(&e.key_file)?
+    } else {
+        let mut random = [0u8; 32];
+        getrandom::getrandom(&mut random)
+            .map_err(|err| Error::Context(format!("no random numbers from the OS: {err}")))?;
+        let key = countersign_core::host_key::from_random(&random);
+        write_new(&e.key_file, &format!("{key}\n"), 0o600)?;
+        key
+    };
+
+    let quote = |s: &str| toml::Value::String(s.to_owned()).to_string();
+    let mut lines = vec![format!("server = {}", quote(&e.server))];
+    if let Some(ca) = &e.ca_file {
+        lines.push(format!("ca_file = {}", quote(&ca.display().to_string())));
+    }
+    lines.push(format!("server_keys = [{}]", quote(&reported)));
+    lines.push(format!("key_file = {}", quote(&e.key_file.display().to_string())));
+    let text = lines.join("\n") + "\n";
+    Config::parse(&text)?;
+    write_new(&e.config, &text, 0o644)?;
+
+    Ok(format!(
+        "[[client]]\nid = \"<this host's name>\"\nauth = {{ host_key = \"{}\" }}",
+        countersign_core::host_key::reference(&key)
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct KeyBody {
+    server_key: String,
+}
+
+/// Create a file that must not exist yet.
+fn write_new(path: &Path, text: &str, mode: u32) -> Result<(), Error> {
+    use std::io::Write as _;
+    let err = |e: std::io::Error| Error::Config(format!("{}: {e}", path.display()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    opts.open(path).and_then(|mut f| f.write_all(text.as_bytes())).map_err(err)
 }
 
 /// Read the host key, refusing a file others could read.
@@ -133,6 +247,16 @@ struct StatusBody {
     state: String,
     #[serde(default)]
     url: String,
+    #[serde(default)]
+    signature: Option<String>,
+}
+
+/// What is sent: the invocation and the nonce the approval is bound to.
+#[derive(Debug, serde::Serialize)]
+struct Submission<'a> {
+    #[serde(flatten)]
+    invocation: &'a Invocation,
+    nonce: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,11 +273,15 @@ pub struct Client {
     http: reqwest::Client,
     base: String,
     key: String,
+    /// What countersign signs as this client: the hash of its key.
+    key_digest: String,
+    server_keys: Vec<String>,
 }
 
 impl Client {
-    /// `ca_file`: extra PEM certificates to trust (see [`Config::ca_file`]).
-    pub fn new(server: &str, key: String, ca_file: Option<&Path>) -> Result<Self, Error> {
+    /// `ca_file`: extra PEM certificates to trust (see [`Config::ca_file`]);
+    /// `server_keys`: the pinned public keys (see [`Config::server_keys`]).
+    pub fn new(server: &str, key: String, ca_file: Option<&Path>, server_keys: Vec<String>) -> Result<Self, Error> {
         let mut http = reqwest::Client::builder();
         if let Some(path) = ca_file {
             let err = |e: &dyn std::fmt::Display| Error::Config(format!("{}: {e}", path.display()));
@@ -175,11 +303,33 @@ impl Client {
             .user_agent(concat!("countersign-sudo/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| Error::Config(e.to_string()))?;
-        Ok(Self { http, base: format!("{}/intake/v1/requests", server.trim_end_matches('/')), key })
+        let key_digest = countersign_core::host_key::digest_hex(&key);
+        Ok(Self {
+            http,
+            base: format!("{}/intake/v1/requests", server.trim_end_matches('/')),
+            key,
+            key_digest,
+            server_keys,
+        })
     }
 
-    async fn submit(&self, inv: &Invocation) -> Result<(reqwest::StatusCode, StatusBody), Error> {
-        let resp = self.http.post(&self.base).bearer_auth(&self.key).json(inv).send().await.map_err(net)?;
+    /// Whether `body` is an approval countersign signed for this client,
+    /// this invocation and this nonce.
+    fn genuine(&self, body: &StatusBody, invocation: &str, nonce: &str) -> bool {
+        let approval = countersign_core::approval_signing::Approval {
+            request: &body.id,
+            client: &self.key_digest,
+            invocation,
+            nonce,
+        };
+        body.signature
+            .as_deref()
+            .is_some_and(|s| countersign_core::approval_signing::verify(&self.server_keys, &approval, s))
+    }
+
+    async fn submit(&self, inv: &Invocation, nonce: &str) -> Result<(reqwest::StatusCode, StatusBody), Error> {
+        let body = Submission { invocation: inv, nonce };
+        let resp = self.http.post(&self.base).bearer_auth(&self.key).json(&body).send().await.map_err(net)?;
         let status = resp.status();
         if status.is_success() {
             Ok((status, resp.json().await.map_err(net)?))
@@ -216,11 +366,21 @@ impl Client {
         say: &mut dyn FnMut(&str),
     ) -> Outcome {
         let deadline = tokio::time::Instant::now() + timeout;
-        let (status, body) = match self.submit(inv).await {
+        let mut random = [0u8; 32];
+        if let Err(e) = getrandom::getrandom(&mut random) {
+            return Outcome::Refused(format!("no random numbers from the OS: {e}"));
+        }
+        let nonce = countersign_core::approval_signing::nonce(&random);
+        let digest = countersign_core::approval_signing::invocation_digest(&inv.user, inv.runas.as_deref(), &inv.argv);
+        let forged = || Outcome::Refused("the approval is not signed by countersign; refusing".into());
+        let (status, body) = match self.submit(inv, &nonce).await {
             Ok(r) => r,
             Err(e) => return Outcome::Refused(e.to_string()),
         };
         if body.state == "approved" {
+            if !self.genuine(&body, &digest, &nonce) {
+                return forged();
+            }
             return Outcome::Approved { window: status == reqwest::StatusCode::OK };
         }
         if body.state != "pending" {
@@ -237,6 +397,10 @@ impl Client {
                 }
                 match self.poll(&id, left.min(POLL)).await {
                     Ok(b) if b.state == "pending" => {}
+                    Ok(b) if b.state == "approved" && b.id != id => return Some("answered for another request".into()),
+                    Ok(b) if b.state == "approved" && !self.genuine(&b, &digest, &nonce) => {
+                        return Some("forged".into());
+                    }
                     Ok(b) => return Some(b.state),
                     Err(Error::Server(m)) if m.starts_with("network:") => {
                         // Transient: keep trying until the deadline.
@@ -249,6 +413,7 @@ impl Client {
         tokio::select! {
             state = wait => match state.as_deref() {
                 Some("approved") => Outcome::Approved { window: false },
+                Some("forged") => forged(),
                 Some(other) => Outcome::Refused(format!("request {other}")),
                 None => {
                     self.withdraw(&id).await;

@@ -8,7 +8,7 @@ use std::time::Duration;
 use countersign_core::{ActionIntent, Assurance, RequestFilter, RequestState, Store, Verdict};
 use countersign_store_sqlite::SqliteStore;
 use countersign_sudo::invocation::{Host, Parsed, parse_sudo_args, read};
-use countersign_sudo::{Client, Config, Error, Invocation, Outcome};
+use countersign_sudo::{Client, Config, Enroll, Error, Invocation, Outcome};
 use countersignd::config::Config as DaemonConfig;
 use countersignd::{Daemon, build_backends};
 use jiff::Timestamp;
@@ -193,19 +193,26 @@ fn refuses_anything_but_sudo_authenticating_its_own_caller() {
 
 #[test]
 fn config_defaults_and_validation() {
-    let c = Config::parse(r#"server = "https://cs.example.test:8443""#).unwrap();
+    let keys = format!("server_keys = [{:?}]", pinned()[0]);
+    let c = Config::parse(&format!("server = \"https://cs.example.test:8443\"\n{keys}")).unwrap();
     assert_eq!(c.key_file, PathBuf::from("/etc/countersign/host.key"));
     assert_eq!(c.timeout, Duration::from_secs(300));
     assert_eq!(c.ca_file, None);
     assert!(c.sudo_binaries.contains(&PathBuf::from("/usr/bin/sudo")));
-    assert!(Config::parse(r#"server = "http://127.0.0.1:8081""#).is_ok(), "plain HTTP to this machine");
+    assert!(
+        Config::parse(&format!("server = \"http://127.0.0.1:8081\"\n{keys}")).is_ok(),
+        "plain HTTP to this machine"
+    );
     for bad in [
-        r#"server = "cs.example.test:8443""#,
-        r#"server = "http://cs.example.test:8443""#,
-        "server = \"https://x\"\ntimeout = \"0s\"",
-        "server = \"https://x\"\nkey = \"inline\"",
+        format!("server = \"cs.example.test:8443\"\n{keys}"),
+        format!("server = \"http://cs.example.test:8443\"\n{keys}"),
+        format!("server = \"https://x\"\ntimeout = \"0s\"\n{keys}"),
+        format!("server = \"https://x\"\nkey = \"inline\"\n{keys}"),
+        "server = \"https://x\"".to_owned(),
+        "server = \"https://x\"\nserver_keys = []".to_owned(),
+        format!("server = \"https://x\"\nserver_keys = [{KEY:?}]"),
     ] {
-        assert!(matches!(Config::parse(bad), Err(Error::Config(_))), "{bad}");
+        assert!(matches!(Config::parse(&bad), Err(Error::Config(_))), "{bad}");
     }
 }
 
@@ -215,7 +222,7 @@ fn a_ca_file_must_hold_certificates() {
     std::fs::create_dir_all(&dir).unwrap();
     let garbage = dir.join("garbage.pem");
     std::fs::write(&garbage, "not a certificate").unwrap();
-    let err = |p: &std::path::Path| match Client::new("https://x", KEY.to_owned(), Some(p)) {
+    let err = |p: &std::path::Path| match Client::new("https://x", KEY.to_owned(), Some(p), pinned()) {
         Err(Error::Config(e)) => e,
         other => panic!("{other:?}"),
     };
@@ -252,6 +259,29 @@ struct Server {
     store: Arc<dyn Store>,
 }
 
+/// A signing key file for the daemon under test (one per test process).
+fn signing_key_file() -> std::path::PathBuf {
+    static PATH: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
+        let p = std::env::temp_dir().join(format!("countersign-test-signing-{}.key", std::process::id()));
+        std::fs::write(&p, countersign_core::approval_signing::ServerKey::generate(&SIGNING_SEED)).unwrap();
+        p
+    });
+    PATH.clone()
+}
+
+const SIGNING_SEED: [u8; 32] = [5; 32];
+
+/// The public key the daemon under test signs with.
+fn pinned() -> Vec<String> {
+    vec![
+        countersign_core::approval_signing::ServerKey::parse(&countersign_core::approval_signing::ServerKey::generate(
+            &SIGNING_SEED,
+        ))
+        .unwrap()
+        .public(),
+    ]
+}
+
 async fn server() -> Server {
     let text = format!(
         r#"
@@ -260,11 +290,12 @@ async fn server() -> Server {
         [intake]
         listen = "127.0.0.1:0"
         behind_proxy = true
+        signing_key_file = "set by the test"
         [backend.sudo]
         type = "host"
         [[client]]
         id = "web-1"
-        auth = {{ host_key_sha256 = "{}" }}
+        auth = {{ host_key = "sha256:{}" }}
         [[person]]
         id = "bob"
         [[workload]]
@@ -293,7 +324,8 @@ async fn server() -> Server {
         "#,
         countersign_core::host_key::digest_hex(KEY)
     );
-    let config = DaemonConfig::from_toml(&text).unwrap();
+    let mut config = DaemonConfig::from_toml(&text).unwrap();
+    config.intake.as_mut().unwrap().signing_key_file = signing_key_file();
     let store: Arc<dyn Store> = Arc::new(SqliteStore::in_memory().await.unwrap());
     let backends = build_backends(&config, &store).unwrap();
     let daemon = Daemon::with_parts(&config, Arc::clone(&store), backends, vec![]).unwrap();
@@ -349,7 +381,17 @@ fn invocation(argv: &[&str]) -> Invocation {
 }
 
 async fn ask(s: &Server, key: &str, argv: &[&str], timeout: Duration) -> (Outcome, Vec<String>) {
-    let client = Client::new(&s.url, key.to_owned(), None).unwrap();
+    ask_pinned(s, key, argv, timeout, pinned()).await
+}
+
+async fn ask_pinned(
+    s: &Server,
+    key: &str,
+    argv: &[&str],
+    timeout: Duration,
+    keys: Vec<String>,
+) -> (Outcome, Vec<String>) {
+    let client = Client::new(&s.url, key.to_owned(), None, keys).unwrap();
     let mut said = Vec::new();
     let outcome =
         client.ask(&invocation(argv), timeout, std::future::pending(), &mut |m: &str| said.push(m.to_owned())).await;
@@ -402,9 +444,89 @@ async fn denial_timeout_and_bad_keys_fail_closed() {
 }
 
 #[tokio::test]
+async fn approvals_without_a_valid_signature_do_not_count() {
+    use countersign_core::approval_signing::ServerKey;
+    // Approved by a person, but signed by a key this host does not pin.
+    let s = server().await;
+    let decider = s.decide_when_pending(Verdict::Approve);
+    let elsewhere = vec![ServerKey::parse(&ServerKey::generate(&[6; 32])).unwrap().public()];
+    let (outcome, _) = ask_pinned(&s, KEY, &["reboot"], Duration::from_secs(10), elsewhere).await;
+    decider.await.unwrap();
+    assert!(matches!(&outcome, Outcome::Refused(m) if m.contains("not signed")), "{outcome:?}");
+
+    // Something in between answers "approved" on its own.
+    let fake = axum::Router::new().route(
+        "/intake/v1/requests",
+        axum::routing::post(|| async {
+            axum::Json(
+                serde_json::json!({ "id": "01a1e45e-662b-734f-950f-cd451a032aa3", "state": "approved", "url": "" }),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+    let client = Client::new(&url, KEY.to_owned(), None, pinned()).unwrap();
+    let outcome =
+        client.ask(&invocation(&["reboot"]), Duration::from_secs(5), std::future::pending(), &mut |_: &str| {}).await;
+    assert!(matches!(&outcome, Outcome::Refused(m) if m.contains("not signed")), "{outcome:?}");
+}
+
+#[tokio::test]
+async fn enrolling_pins_the_key_and_writes_the_configuration() {
+    let s = server().await;
+    let dir = std::env::temp_dir().join(format!("cs-enroll-{}", countersign_core::RequestId::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let e = countersign_sudo::Enroll {
+        server: s.url.clone(),
+        ca_file: None,
+        server_key: None,
+        config: dir.join("sudo.toml"),
+        key_file: dir.join("host.key"),
+    };
+    // Declined: nothing is written.
+    let mut shown = String::new();
+    let err = countersign_sudo::enroll(&e, &mut |k: &str| {
+        shown = k.to_owned();
+        false
+    })
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("not trusted"), "{err}");
+    assert_eq!(shown, pinned()[0]);
+    assert!(!e.config.exists() && !e.key_file.exists());
+
+    // A key given in advance that does not match is refused.
+    let wrong = countersign_core::approval_signing::ServerKey::parse(
+        &countersign_core::approval_signing::ServerKey::generate(&[6; 32]),
+    )
+    .unwrap()
+    .public();
+    let err = countersign_sudo::enroll(&Enroll { server_key: Some(wrong), ..e.clone() }, &mut |_: &str| true)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("something is in between"), "{err}");
+
+    // The expected key: config and host key are written.
+    let client =
+        countersign_sudo::enroll(&Enroll { server_key: Some(pinned()[0].clone()), ..e.clone() }, &mut |_: &str| {
+            panic!("no question when the key was given")
+        })
+        .await
+        .unwrap();
+    let config = Config::load(&e.config).unwrap();
+    assert_eq!(config.server_keys, pinned());
+    let key = countersign_sudo::read_key(&e.key_file).unwrap();
+    assert!(client.contains(&countersign_core::host_key::digest_hex(&key)), "{client}");
+    let err = countersign_sudo::enroll(&e, &mut |_: &str| true).await.unwrap_err();
+    assert!(err.to_string().contains("exists"), "never overwrites: {err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
 async fn cancelling_withdraws_the_request() {
     let s = server().await;
-    let client = Client::new(&s.url, KEY.to_owned(), None).unwrap();
+    let client = Client::new(&s.url, KEY.to_owned(), None, pinned()).unwrap();
     let cancel = tokio::time::sleep(Duration::from_millis(300));
     let outcome = client.ask(&invocation(&["reboot"]), Duration::from_secs(30), cancel, &mut |_: &str| {}).await;
     assert_eq!(outcome, Outcome::Refused("interrupted; request withdrawn".into()));
@@ -413,7 +535,7 @@ async fn cancelling_withdraws_the_request() {
 
 #[tokio::test]
 async fn an_unreachable_server_fails_closed() {
-    let client = Client::new("http://127.0.0.1:9", KEY.to_owned(), None).unwrap();
+    let client = Client::new("http://127.0.0.1:9", KEY.to_owned(), None, pinned()).unwrap();
     let outcome =
         client.ask(&invocation(&["reboot"]), Duration::from_secs(5), std::future::pending(), &mut |_: &str| {}).await;
     assert!(matches!(outcome, Outcome::Refused(m) if m.contains("network")));

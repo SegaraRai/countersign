@@ -214,7 +214,7 @@ the key itself (see `identity-model.md` for clients and scopes):
 ```toml
 [[client]]
 id = "web-1"
-auth = { host_key_sha256 = "…" } # printed by `countersign host-key <file>`
+auth = { host_key = "sha256:…" } # printed by `countersign host-key <file>`
 allowed_ips = ["192.0.2.21"]     # optional extra check on the client address
 # backend = "sudo"               # only with more than one host backend
 ```
@@ -238,7 +238,9 @@ cshk_<43 chars: base64url of 32 random bytes><6 chars: base64url checksum>
   hand-made keys; it is not a secret.
 - The server checks prefix, length, alphabet and checksum before hashing,
   and rejects anything else with the same response as a wrong key. Config
-  loading rejects `host_key_sha256` values that are not 64 hex digits.
+  loading accepts only `sha256:` and 64 lowercase hex digits, and calls out
+  a `cshk_` key pasted there by mistake. Values that say what they are
+  (`sha256:…`, `ed25519:…`) are public; tokens (`cs??_…`) are secrets.
 - Limit: someone who deliberately builds a low-entropy key in this format and
   hashes it themselves is not stopped. The format blocks accidents (short
   keys, reused passwords, keys from other systems), not deliberate misuse by
@@ -249,20 +251,84 @@ Decided: per-host keys. Network-level identity (for example a mesh VPN's
 peer lookup) was considered and rejected: it would tie countersign to one
 network product, and the key works over any network.
 
+### Signed approvals
+
+The helper turns "approved" into root, so that answer must not depend on
+TLS alone: TLS may be terminated by a proxy or tunnel, and a leaked TLS key
+or a mis-issued certificate would let anyone in between say "approved".
+countersign therefore signs every approval, and the helper checks the
+signature against keys it pinned at setup.
+
+- countersign holds an Ed25519 signing key (`intake.signing_key_file`,
+  `cssk_…`, made by `countersign signing-key`). Its public key (`ed25519:…`)
+  is printed by that command, logged at startup and served at
+  `GET /intake/v1/server-key`.
+- Each submission carries a `nonce`: 32 fresh random bytes from the helper.
+  countersign stores `<invocation digest>:<nonce>` with the request
+  (`facts.binding`, not displayed).
+- Every answer with `state = "approved"` carries `signature`, over:
+
+  ```text
+  countersign-approval-v1
+  request=<request id>
+  client=<hex SHA-256 of the host key>
+  invocation=<hex SHA-256 of the JSON array [user, runas, argv...]>
+  nonce=<the submission's nonce>
+  ```
+
+  For a submission covered by an open window, the signature is for that
+  submission (its digest and nonce) with the window's request id.
+- The helper computes the digest from what it sent, uses the hash of its
+  own key as `client`, and runs the command only if one of its
+  `server_keys` verifies the signature. A missing or wrong signature reads
+  as "not signed by countersign" and fails closed.
+
+What this stops: an answer forged by anything between helper and daemon,
+an approval for a different command (someone who also holds the bearer key
+rewriting the submission), an approval meant for another host, and an old
+approval replayed (the nonce is fresh). Denials are not signed: forging one
+only blocks a command.
+
+What it does not: a compromised countersignd or a leaked signing key, and
+root on the target host (which can edit `sudo.toml` anyway).
+
+Pinning the key:
+
+- `server_keys` in `sudo.toml` is required. The key is public, so it can be
+  distributed with the rest of the host setup (configuration management,
+  a repository).
+- Secrets and public keys look different on purpose: secrets are tokens
+  (`cshk_…`, `cssk_…`: `cs`, two letters, `_`, base64url, checksum), the
+  public key is `ed25519:<base64url>`. A secret given where a public key
+  belongs is refused with its own error that says it is a secret, so it can
+  be treated as exposed.
+- `countersign-sudo enroll --server URL [--ca-file PEM] [--server-key
+  ed25519:…]` sets a host up in one step: it fetches the key, compares it with
+  `--server-key` or asks the person to confirm it (as SSH does for host
+  keys), creates the host key if there is none, writes `sudo.toml`, and
+  prints the `[[client]]` entry. Pinning never happens implicitly during a
+  `sudo`.
+- Rotation: list the new key next to the old one on every host, switch
+  countersign to the new key, then remove the old one.
+
 ### API
 
 ```text
 POST   /intake/v1/requests
        { "user": "agent", "runas": "root", "argv": ["apt","upgrade"],
-         "cwd": "/home/agent", "reason": "…" }
+         "cwd": "/home/agent", "reason": "…", "nonce": "<base64url>" }
   201  { "id": "…", "state": "pending", "url": "https://…/requests/…" }
-  200  { "id": <window request>, "state": "approved", "until": "…", "url": … }  (open window)
+  200  { "id": <window request>, "state": "approved", "until": "…", "url": …,
+         "signature": "…" }  (open window)
   403  { "error": "no-policy" | "unknown-user", "message": "…" }
   429  { "error": "too-many-pending", … }
 
 GET    /intake/v1/requests/{id}?wait=50          (seconds, at most 60)
   200  { "id", "url", "state": "pending" | "approved" | "denied" | "expired"
-                                | "withdrawn" | "revoked" | "ended", "until"? }
+                                | "withdrawn" | "revoked" | "ended", "until"?,
+         "signature"? (with "approved") }
+
+GET    /intake/v1/server-key             { "server_key": "ed25519:…" }  (no auth)
 
 DELETE /intake/v1/requests/{id}          withdraw: 204, or 409 if no longer pending
 ```

@@ -236,8 +236,9 @@ pub struct ClientConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientAuth {
-    /// Lowercase hex SHA-256 of the client's `cshk_` key (`countersign keygen --host`).
-    pub host_key_sha256: String,
+    /// `sha256:` and the lowercase hex SHA-256 of the client's `cshk_` key,
+    /// as printed by `countersign host-key`. Never the key itself.
+    pub host_key: String,
 }
 
 fn default_scopes() -> BTreeSet<Scope> {
@@ -453,10 +454,10 @@ impl Config {
             if !ids.insert(id) {
                 errors.push(format!("client {id}: duplicate id"));
             }
-            if host_key::parse_digest_hex(&c.auth.host_key_sha256).is_none() {
-                errors.push(format!("client {id}: auth.host_key_sha256 must be 64 hex digits"));
-            } else if !keys.insert(c.auth.host_key_sha256.to_ascii_lowercase()) {
-                errors.push(format!("client {id}: auth.host_key_sha256 is used by another client"));
+            if let Err(why) = host_key::parse_reference(&c.auth.host_key) {
+                errors.push(format!("client {id}: auth.host_key: {why}"));
+            } else if !keys.insert(c.auth.host_key.clone()) {
+                errors.push(format!("client {id}: auth.host_key is used by another client"));
             }
             if c.scopes.is_empty() {
                 errors.push(format!("client {id}: scopes is empty"));
@@ -651,11 +652,11 @@ mod tests {
     #[test]
     fn checks_clients() {
         let base = "[server]\npublic_url = 'https://x'\n[[person]]\nid = 'a'\n[roles]\nmember = ['person:a']\n\
-             [intake]\nlisten = '127.0.0.1:9000'\nbehind_proxy = true\n[backend.h1]\ntype = 'host'\n"
+             [intake]\nlisten = '127.0.0.1:9000'\nbehind_proxy = true\nsigning_key_file = 'k'\n[backend.h1]\ntype = 'host'\n"
             .to_string();
         let ok = format!(
-            "{base}[[client]]\nid = 'web-1'\nauth = {{ host_key_sha256 = '{KEY}' }}\n\
-             [[client]]\nid = 'agent'\nauth = {{ host_key_sha256 = '{}' }}\nscopes = ['question']\nactor = 'a'\n",
+            "{base}[[client]]\nid = 'web-1'\nauth = {{ host_key = 'sha256:{KEY}' }}\n\
+             [[client]]\nid = 'agent'\nauth = {{ host_key = 'sha256:{}' }}\nscopes = ['question']\nactor = 'a'\n",
             KEY.replace('1', "2")
         );
         let c = Config::from_toml(&ok).unwrap();
@@ -664,8 +665,8 @@ mod tests {
 
         let bad = format!(
             "{base}[backend.h2]\ntype = 'host'\n\
-             [[client]]\nid = 'web-1'\nauth = {{ host_key_sha256 = '{KEY}' }}\nactor = 'ghost'\n\
-             [[client]]\nid = 'web-1'\nauth = {{ host_key_sha256 = '{KEY}' }}\nbackend = 'h1'\n"
+             [[client]]\nid = 'web-1'\nauth = {{ host_key = 'sha256:{KEY}' }}\nactor = 'ghost'\n\
+             [[client]]\nid = 'web-1'\nauth = {{ host_key = 'sha256:{KEY}' }}\nbackend = 'h1'\n"
         );
         let ConfigError::Invalid(errs) = Config::from_toml(&bad).unwrap_err() else { panic!() };
         let all = errs.join("\n");
@@ -687,10 +688,12 @@ mod tests {
     fn intake_must_be_https_or_behind_a_private_proxy() {
         let base = "[server]\npublic_url = 'https://x'\n[[person]]\nid = 'a'\n[roles]\nmember = ['person:a']\n";
         let client = format!(
-            "[[client]]\nid = 'web-1'\nauth = {{ host_key_sha256 = '{KEY}' }}\nscopes = ['question']\n\
+            "[[client]]\nid = 'web-1'\nauth = {{ host_key = 'sha256:{KEY}' }}\nscopes = ['question']\n\
              actor = 'a'\nallowed_ips = ['192.0.2.1']\n"
         );
-        let errors = |intake: &str| match Config::from_toml(&format!("{base}[intake]\n{intake}\n{client}")) {
+        let errors = |intake: &str| match Config::from_toml(&format!(
+            "{base}[intake]\nsigning_key_file = 'k'\n{intake}\n{client}"
+        )) {
             Ok(_) => String::new(),
             Err(ConfigError::Invalid(e)) => e.join("\n"),
             Err(e) => panic!("{e}"),

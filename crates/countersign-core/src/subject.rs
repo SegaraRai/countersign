@@ -107,6 +107,11 @@ pub struct SubjectFacts {
     /// The requester asked to keep the details out of chat channels.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sensitive: bool,
+    /// What the backend's answer must be bound to (for the intake API: the
+    /// submission's invocation digest and nonce, see
+    /// [`crate::approval_signing`]). Not displayed and not matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
 }
 
 impl SubjectFacts {
@@ -121,6 +126,7 @@ impl SubjectFacts {
             reason: None,
             attributes: BTreeMap::new(),
             sensitive: false,
+            binding: None,
         }
     }
 }

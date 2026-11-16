@@ -29,6 +29,7 @@ fn facts() -> SubjectFacts {
         source: None,
         initiator: None,
         sensitive: false,
+        binding: None,
         requester: Requester {
             id: "agent\u{1b}[31m-7".into(),
             display_name: None,
@@ -321,7 +322,7 @@ fn keygen_writes_usable_secrets_and_refuses_to_overwrite() {
     let key = std::fs::read_to_string(&host).unwrap();
     let key = key.trim();
     assert!(countersign_core::host_key::is_well_formed(key), "{key}");
-    assert_eq!(line, format!("auth = {{ host_key_sha256 = \"{}\" }}", countersign_core::host_key::digest_hex(key)));
+    assert_eq!(line, format!("auth = {{ host_key = \"sha256:{}\" }}", countersign_core::host_key::digest_hex(key)));
     assert!(!line.contains(key), "the key itself is not printed");
     assert!(matches!(host_key(&host, false), Err(CliError::Usage(_))));
     host_key(&host, true).unwrap();

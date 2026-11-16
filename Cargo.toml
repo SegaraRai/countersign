@@ -23,6 +23,7 @@ askama = "0.16"
 async-trait = "0.1"
 axum = "0.8"
 base64 = "0.22"
+ed25519-dalek = { version = "3", default-features = false, features = ["fast", "zeroize"] }
 getrandom = "0.2"
 sha2 = "0.10"
 subtle = "2.6"

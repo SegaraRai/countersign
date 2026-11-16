@@ -64,6 +64,7 @@ impl FakeBackend {
         SubjectFacts {
             source: None,
             sensitive: false,
+            binding: None,
             requester: Requester {
                 id: user.into(),
                 display_name: None,
@@ -260,10 +261,11 @@ const CONFIG: &str = r#"
     [intake]
     listen = "127.0.0.1:0"
     behind_proxy = true
+    signing_key_file = "set by the test"
 
     [[client]]
     id = "agent-host"
-    auth = { host_key_sha256 = "1111111111111111111111111111111111111111111111111111111111111111" }
+    auth = { host_key = "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
     scopes = ["question"]
     actor = "agent"
 
@@ -282,8 +284,21 @@ struct Harness {
     store: Arc<dyn Store>,
 }
 
+/// A signing key file for the daemon under test (one per test process).
+fn signing_key_file() -> std::path::PathBuf {
+    static PATH: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
+        let p = std::env::temp_dir().join(format!("countersign-test-signing-{}.key", std::process::id()));
+        std::fs::write(&p, countersign_core::approval_signing::ServerKey::generate(&SIGNING_SEED)).unwrap();
+        p
+    });
+    PATH.clone()
+}
+
+const SIGNING_SEED: [u8; 32] = [5; 32];
+
 async fn harness_with(extra: &str, backend: FakeBackend, channels: Vec<Arc<dyn Channel>>) -> Harness {
-    let config = Config::from_toml(&format!("{CONFIG}\n{extra}")).unwrap();
+    let mut config = Config::from_toml(&format!("{CONFIG}\n{extra}")).unwrap();
+    config.intake.as_mut().unwrap().signing_key_file = signing_key_file();
     let store: Arc<dyn Store> = Arc::new(SqliteStore::in_memory().await.unwrap());
     let backend = Arc::new(backend);
     backend.set_groups("agent", &["agents"]);

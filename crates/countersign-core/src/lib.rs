@@ -16,6 +16,7 @@
 //! that the rules can be tested in isolation.
 
 pub mod actor;
+pub mod approval_signing;
 pub mod assurance;
 pub mod auth;
 pub mod backend;

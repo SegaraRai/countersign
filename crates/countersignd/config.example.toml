@@ -83,6 +83,11 @@ tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/count
 # listen = "127.0.0.1:8081"
 # behind_proxy = true
 # client_ip_header = "x-forwarded-for"  # only needed for allowed_ips; last entry counts
+# Approvals are signed with this key, and clients pin its public key, so a
+# forged "approved" fails even where TLS is terminated by someone else.
+# `countersign signing-key /etc/countersign/signing.key` creates it and
+# prints the public key; countersignd also logs it at startup.
+signing_key_file = "/etc/countersign/signing.key"
 max_pending_per_client = 10
 
 # A program that talks to the intake API with its own key.
@@ -90,7 +95,7 @@ max_pending_per_client = 10
 # auth line; the key file stays there.
 [[client]]
 id = "web-1"
-auth = { host_key_sha256 = "0000000000000000000000000000000000000000000000000000000000000001" }
+auth = { host_key = "sha256:0000000000000000000000000000000000000000000000000000000000000001" }
 scopes = ["approval"]            # the default
 allowed_ips = ["192.0.2.21"]     # optional extra check, never a substitute for the key
 # backend = "sudo"               # needed only with more than one host backend
@@ -98,7 +103,7 @@ allowed_ips = ["192.0.2.21"]     # optional extra check, never a substitute for 
 # A client that asks questions for a workload (e.g. an AI agent's MCP bridge).
 [[client]]
 id = "agent-bridge"
-auth = { host_key_sha256 = "0000000000000000000000000000000000000000000000000000000000000002" }
+auth = { host_key = "sha256:0000000000000000000000000000000000000000000000000000000000000002" }
 scopes = ["question"]
 actor = "deploy-agent"
 

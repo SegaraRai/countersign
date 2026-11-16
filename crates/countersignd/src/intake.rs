@@ -27,6 +27,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
+use countersign_core::approval_signing::{self, Approval, ServerKey};
 use countersign_core::host_key;
 use countersign_core::{
     AccessBackend, AnswerError, Asker, BackendCaps, BackendError, BackendName, ClientId, Confidentiality, GrantHandle,
@@ -79,6 +80,11 @@ pub struct IntakeConfig {
     /// clients with `allowed_ips`.
     #[serde(default)]
     pub client_ip_header: Option<String>,
+    /// countersign's approval signing key (`cssk_…`, from `countersign
+    /// signing-key`). Clients pin its public key and accept an approval only
+    /// with a valid signature, so TLS is not the only thing between a forged
+    /// answer and root.
+    pub signing_key_file: std::path::PathBuf,
     /// Undecided approval requests a single client may have at once.
     /// Questions have their own limit per question policy.
     #[serde(default = "default_max_pending")]
@@ -208,6 +214,7 @@ pub struct IntakeState {
     max_pending: usize,
     /// Behind a proxy: where it puts the client's address.
     client_ip_header: Option<axum::http::HeaderName>,
+    signing: Arc<ServerKey>,
 }
 
 impl std::fmt::Debug for IntakeState {
@@ -217,7 +224,7 @@ impl std::fmt::Debug for IntakeState {
 }
 
 impl IntakeState {
-    pub fn new(engine: Arc<Engine>, intake: &IntakeConfig, public_url: &str) -> Self {
+    pub fn new(engine: Arc<Engine>, intake: &IntakeConfig, public_url: &str, signing: Arc<ServerKey>) -> Self {
         let client_ip_header = intake
             .client_ip_header
             .as_deref()
@@ -228,6 +235,31 @@ impl IntakeState {
             public_url: public_url.trim_end_matches('/').into(),
             max_pending: intake.max_pending_per_client,
             client_ip_header,
+            signing,
+        }
+    }
+
+    /// What the client sees, signed if it says `approved`. `binding` is the
+    /// submission the answer is for (`<invocation digest>:<nonce>`); without
+    /// one an approval is not signed and the client will not act on it.
+    fn status_body(&self, r: &Request, client: &ClientConfig, binding: Option<&str>) -> StatusBody {
+        let state = host_state(r);
+        let signature = (state == "approved").then_some(binding).flatten().and_then(|b| b.split_once(':')).map(
+            |(invocation, nonce)| {
+                let id = r.id.to_string();
+                let key = client.auth.host_key.strip_prefix(host_key::REFERENCE_PREFIX).unwrap_or_default();
+                self.signing.sign(&Approval { request: &id, client: key, invocation, nonce })
+            },
+        );
+        StatusBody {
+            id: r.id.to_string(),
+            state: state.to_owned(),
+            url: self.url(r.id),
+            until: match r.state {
+                RequestState::Active { until } => Some(until),
+                _ => None,
+            },
+            signature,
         }
     }
 
@@ -266,8 +298,7 @@ impl IntakeState {
         // hashed. Every configured digest is compared in constant time.
         let found = host_key::is_well_formed(key).then(|| host_key::digest(key)).and_then(|digest| {
             rules.clients.values().fold(None, |found, c| {
-                let matches =
-                    host_key::parse_digest_hex(&c.auth.host_key_sha256).is_some_and(|d| bool::from(d.ct_eq(&digest)));
+                let matches = host_key::parse_reference(&c.auth.host_key).is_ok_and(|d| bool::from(d.ct_eq(&digest)));
                 if matches { Some(c) } else { found }
             })
         });
@@ -308,6 +339,7 @@ pub fn router(state: IntakeState) -> Router {
     Router::new()
         .route("/intake/v1/requests", post(submit))
         .route("/intake/v1/requests/{id}", get(status).delete(withdraw))
+        .route("/intake/v1/server-key", get(server_key))
         .route("/intake/v1/questions", post(ask))
         .route("/intake/v1/questions/{id}", get(question_status).delete(withdraw_question))
         .with_state(state)
@@ -358,6 +390,11 @@ pub struct StatusBody {
     /// When the approval this answer relies on ends, if approved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<Timestamp>,
+    /// With `approved`: countersign's signature over the request, the
+    /// client, the submission's invocation digest and its nonce (see
+    /// [`countersign_core::approval_signing`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 /// The state as the client should act on it: only `approved` lets the
@@ -376,18 +413,6 @@ fn host_state(r: &Request) -> &'static str {
         RequestState::Expired => "expired",
         RequestState::Withdrawn => "withdrawn",
         RequestState::Revoked => "revoked",
-    }
-}
-
-fn status_body(state: &IntakeState, r: &Request) -> StatusBody {
-    StatusBody {
-        id: r.id.to_string(),
-        state: host_state(r).to_owned(),
-        url: state.url(r.id),
-        until: match r.state {
-            RequestState::Active { until } => Some(until),
-            _ => None,
-        },
     }
 }
 
@@ -413,6 +438,9 @@ pub struct SubmitBody {
     /// this is honoured). The record keeps everything.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sensitive: bool,
+    /// Fresh random value (16–64 bytes, base64url) the approval signature
+    /// is bound to.
+    pub nonce: String,
 }
 
 /// Write out control and other hidden characters (see
@@ -460,6 +488,15 @@ fn pending_subject(client: &ClientConfig, backend: BackendName, body: SubmitBody
     if body.argv.iter().map(String::len).sum::<usize>() > MAX_ARGV_BYTES {
         return Err(bad("argv is too long"));
     }
+    if !approval_signing::is_nonce(&body.nonce) {
+        return Err(bad("nonce must be 16 to 64 random bytes in base64url"));
+    }
+    // Of the raw values, before anything is cleaned for display.
+    let binding = format!(
+        "{}:{}",
+        approval_signing::invocation_digest(&body.user, body.runas.as_deref(), &body.argv),
+        body.nonce
+    );
     let runas = body.runas.unwrap_or_else(|| "root".to_owned());
     if !is_name(&runas) {
         return Err(bad("invalid runas"));
@@ -495,6 +532,7 @@ fn pending_subject(client: &ClientConfig, backend: BackendName, body: SubmitBody
     facts.reason = body.reason.map(|r| clean(r.trim(), MAX_REASON)).filter(|r| !r.is_empty());
     facts.attributes = attributes;
     facts.sensitive = body.sensitive;
+    facts.binding = Some(binding);
     Ok(PendingSubject {
         subject: SubjectRef { backend, kind: KIND_SUDO.to_owned(), id: uuid::Uuid::new_v4().to_string() },
         facts,
@@ -528,6 +566,7 @@ async fn submit(
     }
     let user = body.user.clone();
     let p = pending_subject(&client, backend, body)?;
+    let binding = p.facts.binding.clone();
 
     // Bound how many undecided requests one client can pile up.
     let open = state
@@ -547,11 +586,21 @@ async fn submit(
     }
 
     match state.engine.submit(p, Timestamp::now()).await.map_err(|e| internal(&e))? {
-        Submitted::Opened(r) => Ok((StatusCode::CREATED, Json(status_body(&state, &r))).into_response()),
-        Submitted::Covered(r) => Ok(Json(status_body(&state, &r)).into_response()),
+        Submitted::Opened(r) => {
+            Ok((StatusCode::CREATED, Json(state.status_body(&r, &client, binding.as_deref()))).into_response())
+        }
+        // An open window covers this submission: the signature is for it,
+        // not for the one that opened the window.
+        Submitted::Covered(r) => Ok(Json(state.status_body(&r, &client, binding.as_deref())).into_response()),
         Submitted::Unmatched => Err(error(StatusCode::FORBIDDEN, "no-policy", "no policy allows this request")),
         Submitted::Inactive => Err(unknown_user(&client, &user)),
     }
+}
+
+/// countersign's approval signing public key, for `countersign-sudo enroll`.
+/// Public and unauthenticated: a client must still confirm it out of band.
+async fn server_key(State(state): State<IntakeState>) -> Json<Value> {
+    Json(serde_json::json!({ "server_key": state.signing.public() }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -577,7 +626,7 @@ async fn status(
         if host_state(&r) == "pending" {
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                return Ok(Json(status_body(&state, &r)));
+                return Ok(Json(state.status_body(&r, &client, r.facts.binding.as_deref())));
             }
             // Wake on changes made by this process, and re-read now and then
             // for changes made elsewhere (e.g. the CLI deciding).
@@ -587,9 +636,9 @@ async fn status(
         if matches!(r.state, RequestState::Active { .. }) && r.requirements.grant == GrantMode::Once {
             // The client has the answer; a single-use approval ends here.
             let r = state.engine.collect(r.id, Timestamp::now()).await.map_err(|e| internal(&e))?;
-            return Ok(Json(status_body(&state, &r)));
+            return Ok(Json(state.status_body(&r, &client, r.facts.binding.as_deref())));
         }
-        return Ok(Json(status_body(&state, &r)));
+        return Ok(Json(state.status_body(&r, &client, r.facts.binding.as_deref())));
     }
 }
 
