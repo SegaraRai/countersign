@@ -108,14 +108,14 @@ behind an Octelium session. It is matched against `Recognition` identities
 
 ### When a request is decided
 
-| Involved                     | What it is                                                                                          |
-| ---------------------------- | --------------------------------------------------------------------------------------------------- |
-| **Decider**                  | an Active **person**; never a workload                                                              |
-| **Identity used**            | the account they act through: `SignIn` (web UI, OIDC session) or `Chat` (Discord, Slack)     |
-| **Assurance**                | what that identity and session prove now: `linked` (chat), `web`, `fresh-auth` (recent login)|
-| **Channel**                  | where the decision was made (web, Discord, Slack)                                            |
-| **Eligibility**              | the policy's selectors frozen with the request, current group membership and status, exclusions     |
-| **Relations to the request** | same person as the requester? owner of the requester? the initiator?                                |
+| Involved                     | What it is                                                                                      |
+| ---------------------------- | ----------------------------------------------------------------------------------------------- |
+| **Decider**                  | an Active **person**; never a workload                                                          |
+| **Identity used**            | the account they act through: `SignIn` (web UI, OIDC session) or `Chat` (Discord, Slack)        |
+| **Assurance**                | what that identity and session prove now: `linked` (chat), `web`, `fresh-auth` (recent login)   |
+| **Channel**                  | where the decision was made (web, Discord, Slack)                                               |
+| **Eligibility**              | the policy's selectors frozen with the request, current group membership and status, exclusions |
+| **Relations to the request** | same person as the requester? owner of the requester? the initiator?                            |
 
 The decider's identity comes only from countersign's own sign-in or a chat
 link the person made; nothing in the request can influence who the decider

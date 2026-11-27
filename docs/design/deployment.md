@@ -160,11 +160,11 @@ The `Channel` trait has `notify`, `update` and an optional long-running
 `run` for receiving actions. Channels differ along two axes, and adapters
 are expected for each combination:
 
-|                                          | how people act               | how actions arrive                       |
-| ---------------------------------------- | ---------------------------- | ---------------------------------------- |
-| link-only (Web Push, ntfy, email)        | open the web UI              | —                                        |
-| buttons (Discord, Slack)                 | press a button in chat       | persistent connection, or HTTP callbacks |
-| webhook (Standard Webhooks)              | a program decides what to do | —                                        |
+|                                   | how people act               | how actions arrive                       |
+| --------------------------------- | ---------------------------- | ---------------------------------------- |
+| link-only (Web Push, ntfy, email) | open the web UI              | —                                        |
+| buttons (Discord, Slack)          | press a button in chat       | persistent connection, or HTTP callbacks |
+| webhook (Standard Webhooks)       | a program decides what to do | —                                        |
 
 How actions arrive:
 

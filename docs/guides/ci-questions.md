@@ -23,9 +23,10 @@ id = "github-actions"
 auth = { oidc = {
   issuer = "https://token.actions.githubusercontent.com",
   audience = "countersign",
+  # Optional: restrict to a specific repository and branch/tag
   claims = { repository = "example/*", environment = "prod" },
   initiator_claim = "actor_id",
-  initiator_scheme = "github",
+  initiator_scheme = "github"
 } }
 scopes = ["question"]
 actor = "ci-release"
@@ -73,10 +74,10 @@ steps:
 - `--schema '<json>'` or `--schema-file path.json`: full MCP elicitation JSON Schema subset
 - `--confidential` / `--answer-may-be-confidential`: keep question/answer out of chat and logs
 
-| Exit code | Meaning |
-| --------- | ------- |
-| `0` | Answered (`state: "answered"`, `action: "accept"`) |
-| `2` | Declined by responder (`state: "declined"`, `action: "decline"`) |
-| `3` | Expired without an answer (`state: "expired"`) |
-| `4` | Withdrawn on local timeout, `SIGINT`, or `SIGTERM` (`state: "withdrawn"`) |
-| `1` | Operational, auth, network, or policy error |
+| Exit code | Meaning                                                                   |
+| --------- | ------------------------------------------------------------------------- |
+| `0`       | Answered (`state: "answered"`, `action: "accept"`)                        |
+| `2`       | Declined by responder (`state: "declined"`, `action: "decline"`)          |
+| `3`       | Expired without an answer (`state: "expired"`)                            |
+| `4`       | Withdrawn on local timeout, `SIGINT`, or `SIGTERM` (`state: "withdrawn"`) |
+| `1`       | Operational, auth, network, or policy error                               |
