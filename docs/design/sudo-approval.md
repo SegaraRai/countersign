@@ -203,9 +203,9 @@ behind a reverse proxy or tunnel on a loopback or private address.
 
 ```toml
 [intake]
-listen = "0.0.0.0:8443"
+listen = "0.0.0.0:2743"
 tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/countersign/tls/key.pem" }
-# or: listen = "127.0.0.1:8081" with behind_proxy = true
+# or: listen = "127.0.0.1:2781" with behind_proxy = true
 ```
 
 An access layer in front of it (single sign-on for browsers) would block the

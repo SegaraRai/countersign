@@ -4,9 +4,10 @@
 question and receive the validated JSON answer on `stdout` (progress and the
 review link go to `stderr`).
 
-> **Note:** An answer never grants access inside countersign. If a pipeline
-> proceeds to perform a privileged action, gate that action with its own
-> approval or least-privilege credential.
+> [!IMPORTANT]
+> An answer never grants access inside countersign. If a pipeline proceeds to
+> perform a privileged action, gate that action with its own approval or
+> least-privilege credential.
 
 ## 1. Configure a CI OIDC client on `countersignd`
 
@@ -55,7 +56,7 @@ steps:
   - name: Ask operator to confirm release
     run: |
       RESULT=$(countersign-ask \
-        --server https://countersign.example.com:8443 \
+        --server https://countersign.example.com:2743 \
         --github-oidc \
         --audience countersign \
         --message "Deploy ${{ github.sha }} to production?" \

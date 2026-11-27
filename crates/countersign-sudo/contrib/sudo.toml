@@ -2,14 +2,14 @@
 #
 # Recommended setup — run once as root on the target host:
 #   sudo countersign-sudo enroll \
-#     --server https://countersign.example.com:8443 \
+#     --server https://countersign.example.com:2743 \
 #     --server-key ed25519:<public-key-from-countersignd>
 #
 # `enroll` creates /etc/countersign/host.key (0600), pins countersign's signing
 # key, writes this file, and prints the [[client]] block to add to config.toml.
 
 # countersign's intake API URL. Always HTTPS (http:// only for localhost dev).
-server = "https://countersign.example.com:8443"
+server = "https://countersign.example.com:2743"
 
 # Extra PEM CA certificate(s) to trust in addition to the system root store
 # (for private CAs or self-signed certificates).

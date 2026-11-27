@@ -31,7 +31,7 @@ public_url = "https://countersign.example.com"
 # - Behind a reverse proxy or tunnel (Caddy, nginx, Cloudflare Tunnel): keep on
 #   127.0.0.1 or a private IP and omit `tls`.
 # - Serving HTTPS directly: bind any interface and set `tls` below.
-listen = "127.0.0.1:8080"
+listen = "127.0.0.1:2780"
 # tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/countersign/tls/key.pem" }
 
 # Secret key for encrypting session cookies (32+ bytes).
@@ -48,7 +48,7 @@ fresh_auth_window = "5m"
 # idp_groups_max_age = "12h"
 
 # Optional dedicated HTTP listener for Prometheus `/metrics` (keep on loopback).
-# metrics_listen = "127.0.0.1:9090"
+# metrics_listen = "127.0.0.1:2790"
 
 [auth.oidc]
 # Any OpenID Connect provider supporting authorization code flow + PKCE.
@@ -186,10 +186,10 @@ type = "log"
 # and `/mcp` to this listener).
 
 [intake]
-listen = "0.0.0.0:8443"
+listen = "0.0.0.0:2743"
 tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/countersign/tls/key.pem" }
 # Alternative behind a reverse proxy or tunnel:
-# listen = "127.0.0.1:8081"
+# listen = "127.0.0.1:2781"
 # behind_proxy = true
 # client_ip_header = "x-forwarded-for"  # only needed if any [[client]] uses allowed_ips
 

@@ -87,7 +87,7 @@ approvals" in `sudo-approval.md`.
 
 These are examples, not requirements:
 
-- **Public with its own certificate**: `[intake] listen = "0.0.0.0:8443"`
+- **Public with its own certificate**: `[intake] listen = "0.0.0.0:2743"`
   with `tls`, the web UI behind a reverse proxy on 443.
 - **Reverse proxy on the same host**: both listeners on `127.0.0.1`, the
   proxy terminates TLS for one hostname and routes `/intake/` and `/mcp` to

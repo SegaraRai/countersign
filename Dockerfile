@@ -37,8 +37,8 @@ COPY --from=rust /usr/local/bin/countersign /usr/local/bin/countersign
 USER countersign
 WORKDIR /var/lib/countersign
 VOLUME ["/var/lib/countersign"]
-# Note: in containers, bind [server].listen to a reachable interface (e.g. 0.0.0.0:8080 with TLS
-# or a container bridge IP behind a proxy). [metrics] (optional) is typically 127.0.0.1:9090.
-EXPOSE 8080 8443
+# Note: in containers, bind [server].listen to a reachable interface (e.g. 0.0.0.0:2780 with TLS
+# or a container bridge IP behind a proxy). [server].metrics_listen (optional) is typically 127.0.0.1:2790.
+EXPOSE 2780 2743
 ENTRYPOINT ["/usr/local/bin/countersignd"]
 CMD ["--config", "/etc/countersign/config.toml", "run"]

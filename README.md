@@ -7,7 +7,8 @@ production, or an automated tool needs a human decision, countersign pauses it,
 notifies the right people (Slack, Discord, browser Web Push, ntfy, or webhook),
 enforces your approval policy, and returns a cryptographically signed decision.
 
-> **Status:** Early development. Configuration and APIs may change before `1.0`.
+> [!NOTE]
+> **Early development:** Configuration and APIs may change before `1.0`.
 
 ## What you can do with it
 
@@ -54,8 +55,6 @@ enforces your approval policy, and returns a cryptographically signed decision.
   provider, one HTTPS address (direct TLS or behind a reverse proxy/tunnel), and
   a notification channel.
 
----
-
 ## Quick start
 
 ### 1. Generate server keys
@@ -79,7 +78,7 @@ channel looks like this:
 ```toml
 [server]
 public_url = "https://countersign.example.com"
-listen = "127.0.0.1:8080"
+listen = "127.0.0.1:2780"
 session_key_file = "/etc/countersign/session.key"
 
 [auth.oidc]
@@ -91,7 +90,7 @@ client_secret_file = "/etc/countersign/oidc-client-secret"
 path = "/var/lib/countersign/countersign.db"
 
 [intake]
-listen = "0.0.0.0:8443"
+listen = "0.0.0.0:2743"
 tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/countersign/tls/key.pem" }
 signing_key_file = "/etc/countersign/signing.key"
 
@@ -145,8 +144,6 @@ countersignd --config /etc/countersign/config.toml run
 For production systemd, Docker, reverse proxy (`/intake/` + `/mcp`), and
 Prometheus `/metrics` setup, see [`docs/guides/deployment.md`](docs/guides/deployment.md).
 
----
-
 ## Common workflows
 
 ### Approve `sudo` on a Linux host
@@ -156,7 +153,7 @@ and prints the `[[client]]` block to paste into `config.toml`):
 
 ```sh
 sudo countersign-sudo enroll \
-  --server https://countersign.example.com:8443 \
+  --server https://countersign.example.com:2743 \
   --server-key ed25519:<public-key-from-countersignd>
 ```
 
@@ -174,7 +171,7 @@ In GitHub Actions (`id-token: write`), authenticate without static secrets:
 
 ```sh
 countersign-ask \
-  --server https://countersign.example.com:8443 \
+  --server https://countersign.example.com:2743 \
   --github-oidc \
   --message "Deploy v1.4.0 to production?" \
   --yes-no
@@ -191,14 +188,12 @@ client key:
 ```json
 {
   "type": "http",
-  "url": "https://countersign.example.com:8443/mcp",
+  "url": "https://countersign.example.com:2743/mcp",
   "headers": { "Authorization": "Bearer ${COUNTERSIGN_KEY}" }
 }
 ```
 
 The agent gets `ask_question`, `get_answer`, and `withdraw_question`.
-
----
 
 ## Day-2 operations (`countersign` CLI)
 
@@ -234,8 +229,6 @@ countersign host-key /etc/countersign/host.key
 - **Backups:** Back up SQLite online with
   `sqlite3 /var/lib/countersign/countersign.db ".backup /backups/countersign.db"`.
 
----
-
 ## Building from source & local development
 
 The web UI is a SvelteKit app in `web/` (styled with Stillwind), embedded into
@@ -254,7 +247,7 @@ the JSON API, and the intake API work, while web pages return `503`.
 - **UI development with hot reload:** `vp run dev` starts the demo daemon and
   serves the UI at <http://localhost:5173> with a mock IdP and sample data.
 - **Frontend checks:** `vp run check` runs SvelteKit sync, type checks, and Stillwind checks.
-- **Preview embedded UI:** `vp run build && cargo run -p countersignd --example web_demo` (<http://localhost:8790>).
+- **Preview embedded UI:** `vp run build && cargo run -p countersignd --example web_demo` (<http://localhost:2770>).
 
 ## Crates
 

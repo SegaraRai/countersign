@@ -193,7 +193,7 @@ its MCP client configured with the URL and the client's key:
 ```json
 {
   "type": "http",
-  "url": "https://countersign.example.com:8443/mcp",
+  "url": "https://countersign.example.com:2743/mcp",
   "headers": { "Authorization": "Bearer ${COUNTERSIGN_KEY}" }
 }
 ```

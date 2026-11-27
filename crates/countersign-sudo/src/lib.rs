@@ -51,7 +51,7 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Base URL of countersign's intake API, e.g. `https://countersign.example.com:8443`.
+    /// Base URL of countersign's intake API, e.g. `https://countersign.example.com:2743`.
     /// Must be HTTPS (plain HTTP only to this machine).
     pub server: String,
     /// Extra PEM certificates to trust for `server`, e.g. a private CA or a

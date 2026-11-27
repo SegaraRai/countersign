@@ -81,7 +81,7 @@ pub struct ServerConfig {
     #[serde(default, with = "humantime_serde")]
     pub idp_groups_max_age: Option<Duration>,
     /// Optional dedicated address serving Prometheus `/metrics` over HTTP
-    /// (keep on a loopback or private address, e.g. `127.0.0.1:9090`).
+    /// (keep on a loopback or private address, e.g. `127.0.0.1:2790`).
     #[serde(default)]
     pub metrics_listen: Option<SocketAddr>,
 }
@@ -109,7 +109,7 @@ pub fn is_private(ip: IpAddr) -> bool {
 }
 
 fn default_listen() -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], 8080))
+    SocketAddr::from(([127, 0, 0, 1], 2780))
 }
 
 fn default_session_ttl() -> Duration {

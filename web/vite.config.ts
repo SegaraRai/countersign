@@ -9,7 +9,7 @@ import { defineConfig, type Plugin } from "vite-plus";
 /** Where `vp run dev` serves the pages. */
 const DEV_ORIGIN = "http://localhost:5173";
 /** The demo daemon behind it (`web_demo --dev`). */
-const DAEMON = process.env.COUNTERSIGN_DEV_DAEMON_URL || "http://127.0.0.1:8790";
+const DAEMON = process.env.COUNTERSIGN_DEV_DAEMON_URL || "http://127.0.0.1:2770";
 /** What countersignd answers itself rather than the pages. */
 const DAEMON_PATHS = ["/login", "/auth/", "/logout", "/api/", "/demo-idp", "/healthz"];
 

@@ -4,9 +4,9 @@ This guide walks through installing and verifying `countersign-sudo` on a real
 Linux host (tested design targets: Ubuntu 26.04 with `sudo-rs` and Debian /
 Ubuntu with classic `sudo`).
 
-> **Important:** Open a separate root shell (`sudo -i` or console login) and
-> keep it open until every check below succeeds. A mistake in `/etc/pam.d/sudo`
-> can lock out `sudo`.
+> [!CAUTION]
+> Open a separate root shell (`sudo -i` or console login) and keep it open until
+> every check below succeeds. A mistake in `/etc/pam.d/sudo` can lock out `sudo`.
 
 ## 1. Install the binary
 
@@ -23,7 +23,7 @@ countersign's Ed25519 approval signing key, and writes `/etc/countersign/sudo.to
 
 ```sh
 sudo /usr/local/libexec/countersign-sudo enroll \
-  --server https://countersign.example.com:8443 \
+  --server https://countersign.example.com:2743 \
   --server-key ed25519:<public-key-from-countersignd>
 ```
 

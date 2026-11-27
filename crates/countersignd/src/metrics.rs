@@ -1,7 +1,7 @@
 //! Prometheus text-format metrics endpoint (`/metrics`).
 //!
 //! Served on an optional dedicated listener (`server.metrics_listen`, e.g.
-//! `127.0.0.1:9090`) so operational counts are never exposed on the public web
+//! `127.0.0.1:2790`) so operational counts are never exposed on the public web
 //! UI by accident.
 
 use std::fmt::Write as _;

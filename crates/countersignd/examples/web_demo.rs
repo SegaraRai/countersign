@@ -4,7 +4,7 @@
 //! vp run build && cargo run -p countersignd --example web_demo
 //! ```
 //!
-//! Then open <http://localhost:8790>. Signing in goes to a pretend identity
+//! Then open <http://localhost:2770>. Signing in goes to a pretend identity
 //! provider that lets you pick who you are. Nothing here is real: the
 //! backend only remembers what was decided, and everything is gone when the
 //! process stops.
@@ -38,12 +38,12 @@ use countersignd::Daemon;
 use countersignd::config::Config;
 use countersignd::engine::Ask;
 
-const LISTEN: &str = "127.0.0.1:8790";
-const PUBLIC_URL: &str = "http://localhost:8790";
+const LISTEN: &str = "127.0.0.1:2770";
+const PUBLIC_URL: &str = "http://localhost:2770";
 
 const CONFIG: &str = r#"
     [server]
-    public_url = "http://localhost:8790"
+    public_url = "http://localhost:2770"
     fresh_auth_window = "5m"
 
     [[person]]
