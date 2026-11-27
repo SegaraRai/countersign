@@ -10,7 +10,6 @@ publish.workspace = true
 [dependencies]
 async-trait.workspace = true
 countersign-core.workspace = true
-jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
@@ -26,6 +25,7 @@ twilight-http = { version = "0.18", default-features = false, features = [
 twilight-model = "0.18"
 
 [dev-dependencies]
+jiff.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 toml.workspace = true
 

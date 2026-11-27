@@ -12,7 +12,9 @@ use twilight_model::application::interaction::{Interaction, InteractionContextTy
 use twilight_model::id::Id;
 use twilight_model::id::marker::{ChannelMarker, GuildMarker};
 
-use countersign_core::{ActionIntent, ActionSink, AnswerIntent, Assurance, ChannelName, RequestId, Response, Verdict};
+pub use countersign_core::channel::ChatAction as Action;
+use countersign_core::channel::execute_chat_action;
+use countersign_core::{ActionSink, ChannelName, RequestId, Verdict};
 
 pub const LINK_COMMAND: &str = "countersign-link";
 
@@ -27,15 +29,6 @@ pub struct Scope {
     pub name: ChannelName,
     pub channel_id: Id<ChannelMarker>,
     pub guild_id: Option<Id<GuildMarker>>,
-}
-
-/// What a user asked for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Action {
-    Decide { verdict: Verdict, request_id: RequestId },
-    Answer { question_id: RequestId, content: Map<String, Value> },
-    Decline { question_id: RequestId },
-    Link { code: String },
 }
 
 /// The `custom_id` of a button answering `question` with `field = value`, if
@@ -118,75 +111,16 @@ pub async fn perform(scope: &Scope, sink: &dyn ActionSink, i: &Interaction, acti
         return "Could not tell who you are.".to_owned();
     };
     let external_id = user.to_string();
-    if let Action::Link { code } = action {
-        // Linking is allowed anywhere, e.g. in a DM with the bot: the code is the proof.
-        return match sink.link_account(&scope.name, &external_id, &code).await {
-            Ok(person) => format!("Linked your Discord account to `{person}`."),
-            Err(e) => format!("Could not link: {e}"),
-        };
-    }
+    // Linking is allowed anywhere (e.g. in a DM with the bot): the code is the proof.
     // Everything else only from our own channel (and guild, if pinned).
-    let from = i.message.as_ref().map(|m| m.channel_id).or_else(|| i.channel.as_ref().map(|c| c.id));
-    if from != Some(scope.channel_id) || scope.guild_id.is_some_and(|g| i.guild_id != Some(g)) {
-        return "countersign does not accept actions here.".to_owned();
+    if !matches!(action, Action::Link { .. }) {
+        let from = i.message.as_ref().map(|m| m.channel_id).or_else(|| i.channel.as_ref().map(|c| c.id));
+        if from != Some(scope.channel_id) || scope.guild_id.is_some_and(|g| i.guild_id != Some(g)) {
+            return "countersign does not accept actions here.".to_owned();
+        }
     }
-    let approver = match sink.resolve_account(&scope.name, &external_id).await {
-        Ok(Some(a)) => a,
-        Ok(None) => {
-            return format!(
-                "Your Discord account is not linked to a countersign person. Sign in to the web UI, \
-                 choose \"Link chat account\", and run `/{LINK_COMMAND}` with the code shown there."
-            );
-        }
-        Err(e) => return format!("Not recorded: {e}"),
-    };
-    match action {
-        Action::Answer { question_id, content } => {
-            let intent = AnswerIntent {
-                question_id,
-                responder: approver.clone(),
-                response: Response::Accept { content, confidential: false },
-                assurance: Assurance::Linked,
-                via: scope.name.clone(),
-            };
-            match sink.answer(intent).await {
-                Ok(_) => format!("Recorded your answer as `{approver}`."),
-                Err(e) => format!("Not recorded: {e}"),
-            }
-        }
-        Action::Decline { question_id } => {
-            let intent = AnswerIntent {
-                question_id,
-                responder: approver.clone(),
-                response: Response::Decline { note: None },
-                assurance: Assurance::Linked,
-                via: scope.name.clone(),
-            };
-            match sink.answer(intent).await {
-                Ok(_) => format!("Recorded that `{approver}` declined to answer."),
-                Err(e) => format!("Not recorded: {e}"),
-            }
-        }
-        Action::Decide { verdict, request_id } => {
-            let intent = ActionIntent {
-                request_id,
-                verdict,
-                approver: approver.clone(),
-                assurance: Assurance::Linked,
-                via: scope.name.clone(),
-                comment: None,
-            };
-            let verb = match verdict {
-                Verdict::Approve => "approval",
-                Verdict::Deny => "denial",
-            };
-            match sink.submit(intent).await {
-                Ok(r) => format!("Recorded your {verb} as `{approver}`. The request is now {}.", r.state.name()),
-                Err(e) => format!("Not recorded: {e}"),
-            }
-        }
-        Action::Link { .. } => unreachable!("handled above"),
-    }
+    let hint = format!("`/{LINK_COMMAND}` with the code shown there");
+    execute_chat_action(sink, &scope.name, "Discord", &external_id, &hint, &action).await
 }
 
 /// The slash command that redeems a link code.

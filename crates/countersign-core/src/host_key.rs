@@ -26,9 +26,11 @@ pub fn from_random(bytes: &[u8; 32]) -> String {
     encode(PREFIX, bytes)
 }
 
-/// `prefix`, the base64url of `bytes`, and the checksum. Shared with the
-/// approval signing keys.
-pub(crate) fn encode(prefix: &str, bytes: &[u8; 32]) -> String {
+/// `prefix`, the base64url of `bytes`, and the 4-byte SHA-256 checksum.
+/// Shared by host keys (`cshk_`), approval signing keys (`cssk_`), and VAPID
+/// keys (`csvk_`).
+#[must_use]
+pub fn encode(prefix: &str, bytes: &[u8; 32]) -> String {
     let mut key = format!("{prefix}{}", B64.encode(bytes));
     let check = checksum(&key);
     key.push_str(&check);
@@ -37,7 +39,8 @@ pub(crate) fn encode(prefix: &str, bytes: &[u8; 32]) -> String {
 
 /// The 32 bytes of a text made by [`encode`] with `prefix`, if it is well
 /// formed (prefix, length, alphabet, checksum).
-pub(crate) fn decode(prefix: &str, key: &str) -> Option<[u8; 32]> {
+#[must_use]
+pub fn decode(prefix: &str, key: &str) -> Option<[u8; 32]> {
     let len = prefix.len() + RANDOM_LEN + CHECK_LEN;
     if key.len() != len || !key.is_ascii() || !key.starts_with(prefix) {
         return None;

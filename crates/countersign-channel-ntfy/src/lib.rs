@@ -143,6 +143,30 @@ fn valid_topic(t: &str) -> bool {
     (1..=64).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+impl NtfyChannel {
+    async fn send(&self, body: &Publish, kind: &str) -> Result<(), ChannelError> {
+        let mut req = self.http.post(&self.endpoint).json(body);
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+        let res = req.send().await.map_err(|e| {
+            // Never echo the URL with credentials; reqwest errors do not include headers.
+            ChannelError::Unavailable(format!("ntfy: {}", e.without_url()))
+        })?;
+        let status = res.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let retry_after =
+            res.headers().get("retry-after").and_then(|v| v.to_str().ok()?.parse().ok()).map(Duration::from_secs);
+        Err(match status.as_u16() {
+            429 => ChannelError::RateLimited { retry_after },
+            s if status.is_server_error() => ChannelError::Unavailable(format!("ntfy returned {s}")),
+            s => ChannelError::Other(format!("ntfy refused the {kind} ({s})").into()),
+        })
+    }
+}
+
 #[async_trait]
 impl Channel for NtfyChannel {
     fn name(&self) -> &ChannelName {
@@ -155,25 +179,8 @@ impl Channel for NtfyChannel {
 
     async fn notify(&self, n: Notification<'_>) -> Result<Option<MessageRef>, ChannelError> {
         let body = publish(&self.config, n);
-        let mut req = self.http.post(&self.endpoint).json(&body);
-        if let Some(token) = &self.token {
-            req = req.bearer_auth(token);
-        }
-        let res = req.send().await.map_err(|e| {
-            // Never echo the URL with credentials; reqwest errors do not include headers.
-            ChannelError::Unavailable(format!("ntfy: {}", e.without_url()))
-        })?;
-        let status = res.status();
-        if status.is_success() {
-            return Ok(None);
-        }
-        let retry_after =
-            res.headers().get("retry-after").and_then(|v| v.to_str().ok()?.parse().ok()).map(Duration::from_secs);
-        Err(match status.as_u16() {
-            429 => ChannelError::RateLimited { retry_after },
-            s if status.is_server_error() => ChannelError::Unavailable(format!("ntfy returned {s}")),
-            s => ChannelError::Other(format!("ntfy refused the message ({s})").into()),
-        })
+        self.send(&body, "message").await?;
+        Ok(None)
     }
 
     async fn update(&self, _: &MessageRef, _: Notification<'_>) -> Result<(), ChannelError> {
@@ -195,20 +202,7 @@ impl Channel for NtfyChannel {
                 .into_iter()
                 .collect(),
         };
-        let mut req = self.http.post(&self.endpoint).json(&body);
-        if let Some(token) = &self.token {
-            req = req.bearer_auth(token);
-        }
-        let res = req.send().await.map_err(|e| ChannelError::Unavailable(format!("ntfy: {}", e.without_url())))?;
-        let status = res.status();
-        if status.is_success() {
-            return Ok(());
-        }
-        Err(if status.is_server_error() {
-            ChannelError::Unavailable(format!("ntfy returned {}", status.as_u16()))
-        } else {
-            ChannelError::Other(format!("ntfy refused the notice ({})", status.as_u16()).into())
-        })
+        self.send(&body, "notice").await
     }
 }
 

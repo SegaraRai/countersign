@@ -12,12 +12,8 @@ use p256::SecretKey;
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use p256::elliptic_curve::sec1::ToSec1Point as _;
 use serde_json::json;
-use sha2::{Digest as _, Sha256};
 
 const PREFIX: &str = "csvk_";
-const BODY_LEN: usize = 43; // 32 bytes base64url without padding
-const CHECKSUM_LEN: usize = 6; // 4 bytes base64url without padding
-const TOTAL_LEN: usize = PREFIX.len() + BODY_LEN + CHECKSUM_LEN;
 
 /// A VAPID P-256 signing key.
 #[derive(Clone)]
@@ -53,26 +49,15 @@ impl VapidKey {
 
     /// Parse a `csvk_…` key string (ignoring surrounding whitespace).
     pub fn parse(s: &str) -> Option<Self> {
-        let s = s.trim();
-        if s.len() != TOTAL_LEN || !s.starts_with(PREFIX) {
-            return None;
-        }
-        let (payload, checksum) = s.split_at(PREFIX.len() + BODY_LEN);
-        let expected = URL_SAFE_NO_PAD.encode(&Sha256::digest(payload.as_bytes())[..4]);
-        if checksum != expected {
-            return None;
-        }
-        let raw = URL_SAFE_NO_PAD.decode(&payload[PREFIX.len()..]).ok()?;
+        let raw = countersign_core::host_key::decode(PREFIX, s.trim())?;
         let secret = SecretKey::from_slice(&raw).ok()?;
         Some(Self::from_secret(secret))
     }
 
     /// Encode as a `csvk_…` secret token for storing in `vapid_key_file`.
     pub fn to_token(&self) -> String {
-        let raw = self.secret.to_bytes();
-        let payload = format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(raw));
-        let checksum = URL_SAFE_NO_PAD.encode(&Sha256::digest(payload.as_bytes())[..4]);
-        format!("{payload}{checksum}")
+        let raw: [u8; 32] = self.secret.to_bytes().into();
+        countersign_core::host_key::encode(PREFIX, &raw)
     }
 
     /// Uncompressed 65-byte P-256 public key as base64url (no padding).

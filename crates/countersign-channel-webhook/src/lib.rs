@@ -208,36 +208,8 @@ impl Channel for WebhookChannel {
         let now = Timestamp::now();
         let payload = Payload::new(n, now);
         let body = serde_json::to_vec(&payload).map_err(|e| ChannelError::Other(Box::new(e)))?;
-        let id = n.event_id.to_string();
-        let ts = now.as_second();
-        let mut req = self
-            .http
-            .post(&self.url)
-            .header("content-type", "application/json")
-            .header("webhook-id", &id)
-            .header("webhook-timestamp", ts.to_string());
-        if let Some(key) = &self.key {
-            req = req.header("webhook-signature", sign(key, &id, ts, &body));
-        }
-        if let Some(token) = &self.bearer {
-            req = req.bearer_auth(token);
-        }
-        let res = req
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| ChannelError::Unavailable(format!("webhook: {}", e.without_url())))?;
-        let status = res.status();
-        if status.is_success() {
-            return Ok(None);
-        }
-        let retry_after =
-            res.headers().get("retry-after").and_then(|v| v.to_str().ok()?.parse().ok()).map(Duration::from_secs);
-        Err(match status.as_u16() {
-            408 | 429 => ChannelError::RateLimited { retry_after },
-            s if status.is_server_error() => ChannelError::Unavailable(format!("webhook returned {s}")),
-            s => ChannelError::Other(format!("webhook refused the event ({s})").into()),
-        })
+        self.send(&n.event_id.to_string(), now.as_second(), body, "event").await?;
+        Ok(None)
     }
 
     async fn update(&self, _: &MessageRef, _: Notification<'_>) -> Result<(), ChannelError> {
@@ -254,16 +226,20 @@ impl Channel for WebhookChannel {
             "notice": notice,
         }))
         .map_err(|e| ChannelError::Other(Box::new(e)))?;
-        let id = notice.event_id.to_string();
-        let ts = now.as_second();
+        self.send(&notice.event_id.to_string(), now.as_second(), body, "notice").await
+    }
+}
+
+impl WebhookChannel {
+    async fn send(&self, id: &str, ts: i64, body: Vec<u8>, kind: &str) -> Result<(), ChannelError> {
         let mut req = self
             .http
             .post(&self.url)
             .header("content-type", "application/json")
-            .header("webhook-id", &id)
+            .header("webhook-id", id)
             .header("webhook-timestamp", ts.to_string());
         if let Some(key) = &self.key {
-            req = req.header("webhook-signature", sign(key, &id, ts, &body));
+            req = req.header("webhook-signature", sign(key, id, ts, &body));
         }
         if let Some(token) = &self.bearer {
             req = req.bearer_auth(token);
@@ -277,10 +253,12 @@ impl Channel for WebhookChannel {
         if status.is_success() {
             return Ok(());
         }
-        Err(if status.is_server_error() {
-            ChannelError::Unavailable(format!("webhook returned {}", status.as_u16()))
-        } else {
-            ChannelError::Other(format!("webhook refused the notice ({})", status.as_u16()).into())
+        let retry_after =
+            res.headers().get("retry-after").and_then(|v| v.to_str().ok()?.parse().ok()).map(Duration::from_secs);
+        Err(match status.as_u16() {
+            408 | 429 => ChannelError::RateLimited { retry_after },
+            s if status.is_server_error() => ChannelError::Unavailable(format!("webhook returned {s}")),
+            s => ChannelError::Other(format!("webhook refused the {kind} ({s})").into()),
         })
     }
 }

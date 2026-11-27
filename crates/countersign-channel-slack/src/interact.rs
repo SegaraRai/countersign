@@ -6,9 +6,11 @@
 //! so a decision or answer made here is worth [`Assurance::Linked`].
 
 use serde::Deserialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
-use countersign_core::{ActionIntent, ActionSink, AnswerIntent, Assurance, ChannelName, RequestId, Response, Verdict};
+pub use countersign_core::channel::ChatAction as Action;
+use countersign_core::channel::execute_chat_action;
+use countersign_core::{ActionSink, ChannelName, RequestId, Verdict};
 
 pub const LINK_COMMAND: &str = "/countersign-link";
 
@@ -31,15 +33,6 @@ pub struct Envelope {
     pub kind: String,
     #[serde(default)]
     pub payload: Value,
-}
-
-/// What a user asked for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Action {
-    Decide { verdict: Verdict, request_id: RequestId },
-    Answer { question_id: RequestId, content: Map<String, Value> },
-    Decline { question_id: RequestId },
-    Link { code: String },
 }
 
 /// Parsed inbound Slack event ready to authorize and execute.
@@ -158,71 +151,10 @@ pub async fn perform(scope: &Scope, sink: &dyn ActionSink, p: &ParsedInteraction
         if code.is_empty() {
             return format!("Usage: `{LINK_COMMAND} <code>` (get a one-time code from the countersign web UI).");
         }
-        // Linking is allowed from any channel or DM in the workspace: the code is the proof.
-        return match sink.link_account(&scope.name, &p.user_id, code).await {
-            Ok(person) => format!("Linked your Slack account to `{person}`."),
-            Err(e) => format!("Could not link: {e}"),
-        };
-    }
-    // Decisions and answers are accepted only from our configured channel.
-    if p.channel_id.as_deref() != Some(scope.channel_id.as_str()) {
+    } else if p.channel_id.as_deref() != Some(scope.channel_id.as_str()) {
+        // Decisions and answers are accepted only from our configured channel.
         return "countersign does not accept actions here.".to_owned();
     }
-    let approver = match sink.resolve_account(&scope.name, &p.user_id).await {
-        Ok(Some(a)) => a,
-        Ok(None) => {
-            return format!(
-                "Your Slack account is not linked to a countersign person. Sign in to the web UI, \
-                 choose \"Link chat account\", and run `{LINK_COMMAND} <code>`."
-            );
-        }
-        Err(e) => return format!("Not recorded: {e}"),
-    };
-    match &p.action {
-        Action::Answer { question_id, content } => {
-            let intent = AnswerIntent {
-                question_id: *question_id,
-                responder: approver.clone(),
-                response: Response::Accept { content: content.clone(), confidential: false },
-                assurance: Assurance::Linked,
-                via: scope.name.clone(),
-            };
-            match sink.answer(intent).await {
-                Ok(_) => format!("Recorded your answer as `{approver}`."),
-                Err(e) => format!("Not recorded: {e}"),
-            }
-        }
-        Action::Decline { question_id } => {
-            let intent = AnswerIntent {
-                question_id: *question_id,
-                responder: approver.clone(),
-                response: Response::Decline { note: None },
-                assurance: Assurance::Linked,
-                via: scope.name.clone(),
-            };
-            match sink.answer(intent).await {
-                Ok(_) => format!("Recorded that `{approver}` declined to answer."),
-                Err(e) => format!("Not recorded: {e}"),
-            }
-        }
-        Action::Decide { verdict, request_id } => {
-            let intent = ActionIntent {
-                request_id: *request_id,
-                verdict: *verdict,
-                approver: approver.clone(),
-                assurance: Assurance::Linked,
-                via: scope.name.clone(),
-                comment: None,
-            };
-            let verb = match verdict {
-                Verdict::Approve => "approval",
-                Verdict::Deny => "denial",
-            };
-            match sink.submit(intent).await {
-                Ok(r) => format!("Recorded your {verb} as `{approver}`. The request is now {}.", r.state.name()),
-                Err(e) => format!("Not recorded: {e}"),
-            }
-        }
-        Action::Link { .. } => unreachable!("handled above"),
-    }
+    let hint = format!("`{LINK_COMMAND} <code>`");
+    execute_chat_action(sink, &scope.name, "Slack", &p.user_id, &hint, &p.action).await
 }

@@ -684,42 +684,53 @@ impl Store for SqliteStore {
         let cutoff = ms(before);
         let mut tx = self.pool.begin().await.map_err(other)?;
         // Only purge closed items whose outbox events have all been delivered.
-        let ids: Vec<String> = sqlx::query(
-            "SELECT r.id FROM requests r
+        // Stage matching IDs in a temp table so deletion is set-based (O(4) statements).
+        sqlx::query("CREATE TEMP TABLE IF NOT EXISTS _purge_ids (id TEXT PRIMARY KEY)")
+            .execute(&mut *tx)
+            .await
+            .map_err(other)?;
+        sqlx::query("DELETE FROM _purge_ids").execute(&mut *tx).await.map_err(other)?;
+        let inserted = sqlx::query(
+            "INSERT INTO _purge_ids (id)
+             SELECT r.id FROM requests r
              WHERE r.is_open = 0 AND r.updated_at_ms < ?
                AND NOT EXISTS (
                  SELECT 1 FROM outbox o WHERE o.request_id = r.id AND o.delivered_at_ms IS NULL
                )",
         )
         .bind(cutoff)
-        .fetch_all(&mut *tx)
+        .execute(&mut *tx)
         .await
         .map_err(other)?
-        .into_iter()
-        .map(|row| row.get("id"))
-        .collect();
+        .rows_affected();
 
-        if ids.is_empty() {
+        if inserted == 0 {
             tx.commit().await.map_err(other)?;
             return Ok(0);
         }
 
-        for id in &ids {
-            sqlx::query("DELETE FROM outbox_deliveries WHERE event_id IN (SELECT id FROM outbox WHERE request_id = ?)")
-                .bind(id)
-                .execute(&mut *tx)
-                .await
-                .map_err(other)?;
-            sqlx::query("DELETE FROM outbox WHERE request_id = ?").bind(id).execute(&mut *tx).await.map_err(other)?;
-            sqlx::query("DELETE FROM message_refs WHERE request_id = ?")
-                .bind(id)
-                .execute(&mut *tx)
-                .await
-                .map_err(other)?;
-            sqlx::query("DELETE FROM requests WHERE id = ?").bind(id).execute(&mut *tx).await.map_err(other)?;
-        }
+        sqlx::query(
+            "DELETE FROM outbox_deliveries
+             WHERE event_id IN (SELECT id FROM outbox WHERE request_id IN (SELECT id FROM _purge_ids))",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(other)?;
+        sqlx::query("DELETE FROM outbox WHERE request_id IN (SELECT id FROM _purge_ids)")
+            .execute(&mut *tx)
+            .await
+            .map_err(other)?;
+        sqlx::query("DELETE FROM message_refs WHERE request_id IN (SELECT id FROM _purge_ids)")
+            .execute(&mut *tx)
+            .await
+            .map_err(other)?;
+        sqlx::query("DELETE FROM requests WHERE id IN (SELECT id FROM _purge_ids)")
+            .execute(&mut *tx)
+            .await
+            .map_err(other)?;
+        sqlx::query("DELETE FROM _purge_ids").execute(&mut *tx).await.map_err(other)?;
         tx.commit().await.map_err(other)?;
-        Ok(u64::try_from(ids.len()).unwrap_or(u64::MAX))
+        Ok(inserted)
     }
 }
 

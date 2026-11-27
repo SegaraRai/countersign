@@ -308,7 +308,9 @@ struct QuestionPage {
 struct StatusView {
     label: String,
     tone: Tone,
+    #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     time: Option<When>,
 }
 
@@ -854,7 +856,10 @@ async fn admin(State(state): State<AppState>, ctx: Ctx) -> Response {
     let links = store
         .list_account_links()
         .await
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "listing account links failed");
+            Vec::new()
+        })
         .into_iter()
         .map(|l| LinkView {
             channel: l.channel.to_string(),
@@ -866,7 +871,10 @@ async fn admin(State(state): State<AppState>, ctx: Ctx) -> Response {
     let actions = store
         .admin_actions(50)
         .await
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "listing admin actions failed");
+            Vec::new()
+        })
         .into_iter()
         .map(|a| ActionView {
             at: a.at,

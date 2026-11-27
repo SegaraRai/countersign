@@ -310,3 +310,90 @@ pub trait Channel: Send + Sync {
         Ok(())
     }
 }
+
+/// An inbound action from an interactive chat channel (Discord, Slack, …).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatAction {
+    Decide { verdict: Verdict, request_id: RequestId },
+    Answer { question_id: RequestId, content: serde_json::Map<String, serde_json::Value> },
+    Decline { question_id: RequestId },
+    Link { code: String },
+}
+
+/// Execute a validated [`ChatAction`] against `sink` at [`Assurance::Linked`]
+/// and return the ephemeral reply message for the user.
+///
+/// Callers are responsible for platform-level authorization (checking channel
+/// and workspace/guild scope) before invoking this for non-`Link` actions.
+pub async fn execute_chat_action(
+    sink: &dyn ActionSink,
+    channel: &ChannelName,
+    platform: &str,
+    external_id: &str,
+    link_hint: &str,
+    action: &ChatAction,
+) -> String {
+    if let ChatAction::Link { code } = action {
+        return match sink.link_account(channel, external_id, code).await {
+            Ok(person) => format!("Linked your {platform} account to `{person}`."),
+            Err(e) => format!("Could not link: {e}"),
+        };
+    }
+    let approver = match sink.resolve_account(channel, external_id).await {
+        Ok(Some(a)) => a,
+        Ok(None) => {
+            return format!(
+                "Your {platform} account is not linked to a countersign person. Sign in to the web UI, \
+                 choose \"Link chat account\", and run {link_hint}."
+            );
+        }
+        Err(e) => return format!("Not recorded: {e}"),
+    };
+    match action {
+        ChatAction::Answer { question_id, content } => {
+            let intent = AnswerIntent {
+                question_id: *question_id,
+                responder: approver.clone(),
+                response: Response::Accept { content: content.clone(), confidential: false },
+                assurance: Assurance::Linked,
+                via: channel.clone(),
+            };
+            match sink.answer(intent).await {
+                Ok(_) => format!("Recorded your answer as `{approver}`."),
+                Err(e) => format!("Not recorded: {e}"),
+            }
+        }
+        ChatAction::Decline { question_id } => {
+            let intent = AnswerIntent {
+                question_id: *question_id,
+                responder: approver.clone(),
+                response: Response::Decline { note: None },
+                assurance: Assurance::Linked,
+                via: channel.clone(),
+            };
+            match sink.answer(intent).await {
+                Ok(_) => format!("Recorded that `{approver}` declined to answer."),
+                Err(e) => format!("Not recorded: {e}"),
+            }
+        }
+        ChatAction::Decide { verdict, request_id } => {
+            let intent = ActionIntent {
+                request_id: *request_id,
+                verdict: *verdict,
+                approver: approver.clone(),
+                assurance: Assurance::Linked,
+                via: channel.clone(),
+                comment: None,
+            };
+            let verb = match verdict {
+                Verdict::Approve => "approval",
+                Verdict::Deny => "denial",
+            };
+            match sink.submit(intent).await {
+                Ok(r) => format!("Recorded your {verb} as `{approver}`. The request is now {}.", r.state.name()),
+                Err(e) => format!("Not recorded: {e}"),
+            }
+        }
+        ChatAction::Link { .. } => unreachable!("handled above"),
+    }
+}

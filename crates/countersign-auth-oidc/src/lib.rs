@@ -131,9 +131,10 @@ impl OidcAuthenticator {
     }
 }
 
-/// Compare without exiting early on the first differing byte.
+/// Constant-time string comparison.
 fn same(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    use subtle::ConstantTimeEq as _;
+    a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
 #[async_trait]

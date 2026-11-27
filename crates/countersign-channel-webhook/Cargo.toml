@@ -9,14 +9,14 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-base64 = "0.22"
+base64.workspace = true
 countersign-core.workspace = true
 hmac = "0.12"
 jiff.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
+sha2.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
