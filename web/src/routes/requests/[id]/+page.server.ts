@@ -5,9 +5,12 @@ import type { Actions, PageServerLoad } from "./$types";
 
 const path = (id: string, rest = "") => `/requests/${encodeURIComponent(id)}${rest}`;
 
-export const load = (async (event) => ({
-  item: await read<Item>(event, path(event.params.id)),
-})) satisfies PageServerLoad;
+export const load = (async (event) => {
+  event.depends("app:request");
+  return {
+    item: await read<Item>(event, path(event.params.id)),
+  };
+}) satisfies PageServerLoad;
 
 export const actions: Actions = {
   decide: (event) => act(event, "decide", path(event.params.id, "/decision")),

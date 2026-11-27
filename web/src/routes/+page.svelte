@@ -14,7 +14,7 @@
 
   let { data }: PageProps = $props();
 
-  refreshEvery(15);
+  refreshEvery(15, "app:requests");
 
   const waiting = $derived(data.index.waiting);
   const active = $derived(data.index.active);

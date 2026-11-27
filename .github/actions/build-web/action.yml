@@ -1,0 +1,26 @@
+name: Build Web UI
+description: Install pnpm dependencies, optionally check, and build the embedded SvelteKit web UI.
+inputs:
+  check:
+    description: Run `vp run check` before building
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - uses: voidzero-dev/setup-vp@v1.22.0
+      with:
+        cache: true
+    - shell: bash
+      run: vp i --frozen-lockfile
+    - uses: actions/cache@v6.1.0
+      with:
+        path: node_modules/.vite/task-cache
+        key: vp-task-${{ runner.os }}-${{ hashFiles('**/vite.config.*', '**/package.json', 'pnpm-lock.yaml') }}
+        restore-keys: |
+          vp-task-${{ runner.os }}-
+    - if: inputs.check == 'true'
+      shell: bash
+      run: vp run check
+    - shell: bash
+      run: vp run build

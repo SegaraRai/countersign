@@ -15,26 +15,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: voidzero-dev/setup-vp@v1.22.0
+      - uses: ./.github/actions/build-web
         with:
-          cache: true
-      - run: vp i --frozen-lockfile
-      - uses: actions/cache@v6.1.0
-        with:
-          path: node_modules/.vite/task-cache
-          key: vp-task-${{ runner.os }}-${{ hashFiles('**/vite.config.*', '**/package.json', 'pnpm-lock.yaml') }}
-          restore-keys: |
-            vp-task-${{ runner.os }}-
-      - run: vp run check
-      - run: vp run build
+          check: "true"
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: web-build
           path: web/build
           retention-days: 1
 
+  rust-lint:
+    name: Rust (fmt & wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-lint-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-lint-${{ runner.os }}-${{ runner.arch }}-
+      - run: cargo fmt --all -- --check
+      - run: cargo check --locked -p countersign-core --target wasm32-unknown-unknown
+
   rust:
-    name: Rust (fmt, clippy, test, wasm)
+    name: Rust (clippy & test)
     runs-on: ubuntu-latest
     needs: web
     steps:
@@ -45,8 +58,7 @@ jobs:
           path: web/build
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
+          components: clippy
       - uses: actions/cache@v6.1.0
         with:
           path: |
@@ -57,7 +69,5 @@ jobs:
           key: cargo-ci-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-ci-${{ runner.os }}-${{ runner.arch }}-
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - run: cargo check -p countersign-core --target wasm32-unknown-unknown
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace

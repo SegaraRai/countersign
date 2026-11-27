@@ -46,12 +46,12 @@ export class Submission {
       return;
     }
     form.dataset.keep = "";
-    let saved: Record<string, string> | null = null;
+    let saved: Record<string, string | string[]> | null = null;
     try {
       const key = draftKey(form);
       const raw = sessionStorage.getItem(key);
       sessionStorage.removeItem(key);
-      saved = raw ? (JSON.parse(raw) as Record<string, string>) : null;
+      saved = raw ? (JSON.parse(raw) as Record<string, string | string[]>) : null;
     } catch {
       return;
     }
@@ -61,12 +61,24 @@ export class Submission {
         field instanceof HTMLInputElement &&
         (field.type === "checkbox" || field.type === "radio")
       ) {
-        field.checked = field.value === value;
+        field.checked = Array.isArray(value) ? value.includes(field.value) : field.value === value;
+      } else if (field instanceof RadioNodeList) {
+        const items = Array.from(field).filter(
+          (el): el is HTMLInputElement => el instanceof HTMLInputElement,
+        );
+        if (items.length > 0 && items[0].type === "checkbox") {
+          const selected = new Set(Array.isArray(value) ? value : [value]);
+          for (const item of items) {
+            item.checked = selected.has(item.value);
+          }
+        } else if (typeof value === "string") {
+          field.value = value;
+        }
       } else if (
-        field instanceof HTMLTextAreaElement ||
-        field instanceof HTMLInputElement ||
-        field instanceof HTMLSelectElement ||
-        field instanceof RadioNodeList
+        typeof value === "string" &&
+        (field instanceof HTMLTextAreaElement ||
+          field instanceof HTMLInputElement ||
+          field instanceof HTMLSelectElement)
       ) {
         field.value = value;
       }
@@ -83,7 +95,7 @@ function saveDraft(form: HTMLFormElement) {
   ) {
     return;
   }
-  const draft: Record<string, string> = {};
+  const draft: Record<string, string | string[]> = {};
   for (const el of form.elements) {
     if (
       (el instanceof HTMLTextAreaElement ||
@@ -94,7 +106,14 @@ function saveDraft(form: HTMLFormElement) {
       el.type !== "submit" &&
       !((el.type === "checkbox" || el.type === "radio") && !(el as HTMLInputElement).checked)
     ) {
-      draft[el.name] = el.value;
+      const prev = draft[el.name];
+      if (prev === undefined) {
+        draft[el.name] = el.value;
+      } else if (Array.isArray(prev)) {
+        prev.push(el.value);
+      } else {
+        draft[el.name] = [prev, el.value];
+      }
     }
   }
   try {

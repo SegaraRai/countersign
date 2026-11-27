@@ -11,7 +11,7 @@ const ORIGIN = "https://countersign.internal";
  * is the demo daemon's (`web_demo --dev`), which works out who is asking
  * from the browser's headers forwarded here. Left out of the build.
  */
-const DEV_ORIGIN = "http://127.0.0.1:8790/_dev/ui";
+const DEV_ORIGIN = `${(process.env.COUNTERSIGN_DEV_DAEMON_URL || "http://127.0.0.1:8790").replace(/\/$/, "")}/_dev/ui`;
 const FORWARDED = ["cookie", "origin", "sec-fetch-site"];
 
 function ui(path: string, init: RequestInit = {}): Promise<Response> {
@@ -66,7 +66,14 @@ export async function read<T>(event: Pick<RequestEvent, "url">, path: string): P
 /** GET `path`, or null when it is not there or not for this reader. */
 export async function maybe<T>(path: string): Promise<T | null> {
   const res = await ui(path);
-  return res.ok ? ((await res.json()) as T) : null;
+  if (res.ok) {
+    return (await res.json()) as T;
+  }
+  if (res.status === 401 || res.status === 403 || res.status === 404) {
+    return null;
+  }
+  const p = await problem(res);
+  error(res.status, p.message);
 }
 
 /**

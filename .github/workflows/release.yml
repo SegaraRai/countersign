@@ -15,17 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: voidzero-dev/setup-vp@v1.22.0
-        with:
-          cache: true
-      - run: vp i --frozen-lockfile
-      - uses: actions/cache@v6.1.0
-        with:
-          path: node_modules/.vite/task-cache
-          key: vp-task-${{ runner.os }}-${{ hashFiles('**/vite.config.*', '**/package.json', 'pnpm-lock.yaml') }}
-          restore-keys: |
-            vp-task-${{ runner.os }}-
-      - run: vp run build
+      - uses: ./.github/actions/build-web
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: web-build
@@ -63,7 +53,7 @@ jobs:
             cargo-release-${{ matrix.target }}-
       - name: Build release binaries
         run: >
-          cargo build --release
+          cargo build --release --locked
           -p countersignd
           -p countersign
           -p countersign-sudo

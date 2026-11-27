@@ -10,7 +10,7 @@
   let { data, form }: PageProps = $props();
 
   // A decision elsewhere (chat, another approver) shows up here too.
-  refreshEvery(20);
+  refreshEvery(20, "app:request");
 
   const failure = $derived(
     form && typeof form.error === "string" ? { form: form.form, error: form.error } : null,

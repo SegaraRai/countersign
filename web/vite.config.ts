@@ -9,7 +9,7 @@ import { defineConfig, type Plugin } from "vite-plus";
 /** Where `vp run dev` serves the pages. */
 const DEV_ORIGIN = "http://localhost:5173";
 /** The demo daemon behind it (`web_demo --dev`). */
-const DAEMON = "http://127.0.0.1:8790";
+const DAEMON = process.env.COUNTERSIGN_DEV_DAEMON_URL || "http://127.0.0.1:8790";
 /** What countersignd answers itself rather than the pages. */
 const DAEMON_PATHS = ["/login", "/auth/", "/logout", "/api/", "/demo-idp", "/healthz"];
 
@@ -22,8 +22,14 @@ let daemon: ChildProcess | undefined;
 process.on("exit", () => daemon?.kill());
 
 function demoDaemon(): Plugin {
+  let build: ChildProcess | undefined;
   let child: ChildProcess | undefined;
-  const stop = () => child?.kill();
+  let closed = false;
+  const stop = () => {
+    closed = true;
+    build?.kill();
+    child?.kill();
+  };
   return {
     name: "countersign-demo-daemon",
     apply: "serve",
@@ -35,7 +41,7 @@ function demoDaemon(): Plugin {
       const log = server.config.logger;
       // Build, then run the binary itself: stopping `cargo run` would leave
       // the daemon running on Windows.
-      const build = spawn(
+      build = spawn(
         "cargo",
         [
           "build",
@@ -48,7 +54,7 @@ function demoDaemon(): Plugin {
         { cwd: root, stdio: ["ignore", "pipe", "inherit"] },
       );
       let executable: string | undefined;
-      createInterface({ input: build.stdout }).on("line", (line) => {
+      createInterface({ input: build.stdout! }).on("line", (line) => {
         try {
           const msg = JSON.parse(line) as {
             reason?: string;
@@ -67,6 +73,10 @@ function demoDaemon(): Plugin {
         }
       });
       build.on("close", (code) => {
+        build = undefined;
+        if (closed) {
+          return;
+        }
         if (code !== 0 || !executable) {
           log.error(`countersign demo daemon: cargo build failed (${code})`);
           return;

@@ -1,6 +1,7 @@
 // What the UI API (countersignd's `web/ui.rs`) returns.
 
 export type Tone = "waiting" | "asking" | "good" | "done" | "bad" | "muted";
+export type Assurance = "linked" | "web" | "fresh-auth";
 
 export interface Detail {
   label: string;
@@ -20,7 +21,7 @@ export interface Me {
   oversees: boolean;
   admin: boolean;
   csrf: string;
-  assurance: string;
+  assurance: Assurance;
   fresh_until: string | null;
 }
 
@@ -64,7 +65,7 @@ export interface DecisionLine {
   who: string;
   approved: boolean;
   via: string;
-  assurance: string;
+  assurance: Assurance;
   at: string;
   comment?: string;
 }
@@ -86,7 +87,7 @@ export interface Status {
 }
 
 export interface Presentation {
-  kind: string;
+  kind: "approval" | "question";
   headline: string;
   withheld: boolean;
   grant: string;
@@ -170,8 +171,8 @@ export interface QuestionPage {
   status: {
     label: string;
     tone: Tone;
-    detail: string | null;
-    time: When | null;
+    detail?: string;
+    time?: When;
   };
   grant: string;
   q: QuestionView;
