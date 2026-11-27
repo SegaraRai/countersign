@@ -66,7 +66,7 @@ export class Submission {
         const items = Array.from(field).filter(
           (el): el is HTMLInputElement => el instanceof HTMLInputElement,
         );
-        if (items.length > 0 && items[0].type === "checkbox") {
+        if (items[0]?.type === "checkbox") {
           const selected = new Set(Array.isArray(value) ? value : [value]);
           for (const item of items) {
             item.checked = selected.has(item.value);
