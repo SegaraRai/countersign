@@ -10,7 +10,9 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
+use countersign_core::{ActionSink, Channel};
 use countersignd::config::Config;
+use countersignd::tls::{CertReloader, TlsConfig, TlsListener, reloadable_server_config};
 use countersignd::{Daemon, rules_from};
 
 #[derive(Debug, Parser)]
@@ -125,7 +127,7 @@ async fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Er
         .iter()
         .map(|channel| {
             let channel = Arc::clone(channel);
-            let sink: Arc<dyn countersign_core::ActionSink> = daemon.sink.clone();
+            let sink: Arc<dyn ActionSink> = daemon.sink.clone();
             let mut stop = stop_rx.clone();
             tokio::spawn(async move {
                 tokio::select! {
@@ -136,7 +138,8 @@ async fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Er
         })
         .collect();
 
-    let web_tls = config.server.tls.as_ref().map(countersignd::tls::server_config).transpose()?;
+    let mut tls_reloaders = Vec::new();
+    let web_tls = load_tls("web UI", config.server.tls.as_ref(), &mut tls_reloaders)?;
     if web_tls.is_none() && !countersignd::config::is_private(config.server.listen.ip()) {
         warn!(
             listen = %config.server.listen,
@@ -151,23 +154,51 @@ async fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Er
     let intake = match (&config.intake, daemon.intake.clone()) {
         (Some(ic), Some(state)) => {
             // Config validation guarantees `tls`, or `behind_proxy` on a private address.
-            let tls = ic.tls.as_ref().map(countersignd::tls::server_config).transpose()?;
+            let tls = load_tls("intake API", ic.tls.as_ref(), &mut tls_reloaders)?;
             Some(serve("intake API", ic.listen, tls, countersignd::intake::router(state), stop_rx.clone()).await?)
         }
         _ => None,
     };
 
-    wait_for_shutdown(&path, &config, &daemon).await;
+    let metrics_server = if let Some(addr) = config.server.metrics_listen {
+        if !countersignd::config::is_private(addr.ip()) {
+            warn!(listen = %addr, "metrics_listen is on a non-private address; keep it on loopback or a private network");
+        }
+        let app = countersignd::metrics::router(Arc::clone(daemon.engine.store()), Arc::clone(&daemon.metrics));
+        Some(serve("metrics", addr, None, app, stop_rx.clone()).await?)
+    } else {
+        None
+    };
+
+    wait_for_shutdown(&path, &config, &daemon, &tls_reloaders).await;
     info!("shutting down");
     let _ = stop_tx.send(true);
     let _ = tokio::join!(ticker, delivery, server);
     if let Some(i) = intake {
         let _ = i.await;
     }
+    if let Some(m) = metrics_server {
+        let _ = m.await;
+    }
     for r in receivers {
         let _ = r.await;
     }
     Ok(())
+}
+
+fn load_tls(
+    what: &'static str,
+    tls: Option<&TlsConfig>,
+    reloaders: &mut Vec<(&'static str, Arc<CertReloader>)>,
+) -> Result<Option<Arc<tokio_rustls::rustls::ServerConfig>>, String> {
+    match tls {
+        Some(tc) => {
+            let (cfg, reloader) = reloadable_server_config(tc)?;
+            reloaders.push((what, reloader));
+            Ok(Some(cfg))
+        }
+        None => Ok(None),
+    }
 }
 
 /// Bind `listen` and serve `app` until `stop` fires: over TLS when a server
@@ -189,7 +220,7 @@ async fn serve(
     let task = if let Some(config) = tls {
         info!(%listen, "{what} listening (HTTPS)");
         // `tap_io` makes the peer address available as `ConnectInfo<SocketAddr>`.
-        let listener = countersignd::tls::TlsListener::new(tcp, config)?.tap_io(|_| {});
+        let listener = TlsListener::new(tcp, config)?.tap_io(|_| {});
         tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown).await {
                 error!(error = %e, "{what} failed");
@@ -207,7 +238,7 @@ async fn serve(
 }
 
 /// Keep an interactive channel's receiver running, backing off on failure.
-async fn receive(channel: Arc<dyn countersign_core::Channel>, sink: Arc<dyn countersign_core::ActionSink>) {
+async fn receive(channel: Arc<dyn Channel>, sink: Arc<dyn ActionSink>) {
     let mut delay = RECEIVER_MIN_BACKOFF;
     loop {
         let started = tokio::time::Instant::now();
@@ -224,9 +255,14 @@ async fn receive(channel: Arc<dyn countersign_core::Channel>, sink: Arc<dyn coun
 }
 
 /// Wait for SIGINT/SIGTERM. On Unix, SIGHUP reloads persons, workloads,
-/// groups, roles, clients and policies.
+/// groups, roles, clients, policies and TLS certificates.
 #[cfg(unix)]
-async fn wait_for_shutdown(path: &std::path::Path, running: &Config, daemon: &Daemon) {
+async fn wait_for_shutdown(
+    path: &std::path::Path,
+    running: &Config,
+    daemon: &Daemon,
+    tls_reloaders: &[(&'static str, Arc<CertReloader>)],
+) {
     use tokio::signal::unix::{SignalKind, signal};
     let (Ok(mut term), Ok(mut hup)) = (signal(SignalKind::terminate()), signal(SignalKind::hangup())) else {
         warn!("cannot install signal handlers; stopping on Ctrl-C only");
@@ -237,20 +273,31 @@ async fn wait_for_shutdown(path: &std::path::Path, running: &Config, daemon: &Da
         tokio::select! {
             _ = tokio::signal::ctrl_c() => return,
             _ = term.recv() => return,
-            _ = hup.recv() => reload(path, running, daemon),
+            _ = hup.recv() => reload(path, running, daemon, tls_reloaders),
         }
     }
 }
 
 #[cfg(not(unix))]
-async fn wait_for_shutdown(_: &std::path::Path, _: &Config, _: &Daemon) {
+async fn wait_for_shutdown(_: &std::path::Path, _: &Config, _: &Daemon, _: &[(&'static str, Arc<CertReloader>)]) {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-/// Swap in the new directory, clients and policies if the file is valid.
+/// Swap in the new directory, clients, policies and TLS certificates if valid.
 /// Other sections need a restart.
 #[cfg_attr(not(unix), allow(dead_code))]
-fn reload(path: &std::path::Path, running: &Config, daemon: &Daemon) {
+fn reload(
+    path: &std::path::Path,
+    running: &Config,
+    daemon: &Daemon,
+    tls_reloaders: &[(&'static str, Arc<CertReloader>)],
+) {
+    for (what, reloader) in tls_reloaders {
+        match reloader.reload() {
+            Ok(()) => info!(listener = what, "TLS certificate reloaded"),
+            Err(e) => error!(listener = what, "TLS reload failed; keeping previous certificate: {e}"),
+        }
+    }
     match Config::load(path) {
         Ok(new) => {
             if new.server != running.server

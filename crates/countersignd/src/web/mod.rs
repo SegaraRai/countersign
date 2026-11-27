@@ -99,6 +99,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/requests", get(api::list))
         .route("/api/requests/{id}", get(api::get))
         .route("/api/requests/{id}/decision", post(api::decide))
+        .route("/api/requests/{id}/break-glass", post(api::break_glass))
         .route("/api/questions", get(api::questions))
         .route("/api/questions/{id}", get(api::question))
         .route("/api/questions/{id}/answer", post(api::answer))

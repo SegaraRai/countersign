@@ -17,6 +17,7 @@
 //! Every method takes `now` so tests control time.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -27,13 +28,14 @@ use tracing::{debug, info, warn};
 
 use countersign_core::actor::is_identity;
 use countersign_core::{
-    AccessBackend, ActionIntent, ActorId, AdminAction, AnswerError, AnswerIntent, Asker, BackendError, BackendName,
-    ClientId, ConfidentialMode, Confidentiality, Directory, DomainEvent, FormSchema, GrantMode, PendingSubject,
-    PolicySet, Purpose, Question, QuestionPolicySet, Request, RequestFilter, RequestId, RequestState, Role, Roster,
-    Source, Standing, Store, StoreError, Suspension, TransitionError,
+    AccessBackend, ActionIntent, ActorId, AdminAction, AnswerError, AnswerIntent, Asker, Assurance, BackendError,
+    BackendName, ChannelName, ClientId, ConfidentialMode, Confidentiality, Directory, DomainEvent, FormSchema,
+    GrantMode, PendingSubject, PolicySet, Purpose, Question, QuestionPolicySet, Request, RequestFilter, RequestId,
+    RequestState, Role, Roster, Source, Standing, Store, StoreError, Suspension, TransitionError,
 };
 
 use crate::config::{ClientConfig, Unmatched};
+use crate::metrics::Metrics;
 
 /// How many times to retry a change that lost an optimistic-concurrency race.
 const CONFLICT_RETRIES: usize = 3;
@@ -85,8 +87,7 @@ impl Rules {
 }
 
 /// Receives high-visibility administrative actions to announce to channels.
-pub type AdminNotifier =
-    Arc<dyn Fn(AdminAction) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+pub type AdminNotifier = Arc<dyn Fn(AdminAction) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 pub struct Engine {
     store: Arc<dyn Store>,
@@ -98,6 +99,7 @@ pub struct Engine {
     changes: watch::Sender<u64>,
     /// Optional hook to announce suspensions and bulk revokes to all channels.
     admin_notifier: RwLock<Option<AdminNotifier>>,
+    metrics: Arc<Metrics>,
 }
 
 /// Outcome of [`Engine::submit`].
@@ -152,6 +154,15 @@ fn clean_text(s: &str, max: usize, what: &str) -> Result<String, EngineError> {
 
 impl Engine {
     pub fn new(store: Arc<dyn Store>, backends: Vec<Arc<dyn AccessBackend>>, rules: Rules) -> Self {
+        Self::with_metrics(store, backends, rules, Arc::default())
+    }
+
+    pub fn with_metrics(
+        store: Arc<dyn Store>,
+        backends: Vec<Arc<dyn AccessBackend>>,
+        rules: Rules,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self {
             store,
             backends: backends.into_iter().map(|b| (b.name().clone(), b)).collect(),
@@ -159,6 +170,7 @@ impl Engine {
             unmatched_seen: std::sync::Mutex::default(),
             changes: watch::Sender::new(0),
             admin_notifier: RwLock::new(None),
+            metrics,
         }
     }
 
@@ -514,6 +526,7 @@ impl Engine {
             if !self.save(&r, v, &events).await? {
                 continue;
             }
+            self.metrics.record_decision(verdict);
             info!(request = %r.id, %person, ?verdict, %assurance, via = %via, state = r.state.name(), "decision recorded");
             match r.state {
                 RequestState::Approved => return self.apply_grant(r, now).await,
@@ -855,6 +868,7 @@ impl Engine {
         detail: Option<String>,
         now: Timestamp,
     ) -> AdminAction {
+        self.metrics.record_admin_action();
         let a = AdminAction { at: now, by: by.clone(), action: action.to_owned(), target: target.to_owned(), detail };
         if let Err(e) = self.store.record_admin_action(&a).await {
             warn!(error = %e, action, target, "could not record an admin action");
@@ -955,5 +969,39 @@ impl Engine {
             self.audit(by, "unlink", &format!("{channel}:{external_id}"), None, now).await;
         }
         Ok(removed)
+    }
+
+    /// Emergency admin-only approval bypassing normal approver selectors,
+    /// quorum and exclusions. Requires `Role::Admin`, `Assurance::FreshAuth`,
+    /// and a non-empty reason; records an admin action and notifies all
+    /// configured channels.
+    pub async fn break_glass(
+        &self,
+        id: RequestId,
+        admin: &ActorId,
+        assurance: Assurance,
+        via: ChannelName,
+        reason: &str,
+        now: Timestamp,
+    ) -> Result<Request, EngineError> {
+        self.require_admin(admin, now).await?;
+        let reason = clean_text(reason.trim(), 500, "reason")?;
+        if reason.is_empty() {
+            return Err(EngineError::Invalid("break-glass approval requires a reason".into()));
+        }
+        for _ in 0..CONFLICT_RETRIES {
+            let mut r = self.store.get_request(id).await?.ok_or(EngineError::UnknownRequest(id))?;
+            let v = r.version;
+            let events = r.break_glass(admin, assurance, via.clone(), &reason, now)?;
+            if !self.save(&r, v, &events).await? {
+                continue;
+            }
+            self.metrics.record_break_glass();
+            let action = self.audit(admin, "break-glass", &id.to_string(), Some(reason), now).await;
+            warn!(request = %id, %admin, "break-glass approval invoked");
+            self.announce_admin(action).await;
+            return self.apply_grant(r, now).await;
+        }
+        Err(EngineError::Busy)
     }
 }

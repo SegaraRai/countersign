@@ -27,6 +27,8 @@ fresh_auth_window = "5m"
 # How long groups from the IdP's `groups` claim count after a sign-in
 # (only through [[group]] from_idp mappings). Defaults to session_ttl.
 # idp_groups_max_age = "12h"
+# Optional dedicated HTTP listener serving Prometheus `/metrics` (keep on loopback).
+# metrics_listen = "127.0.0.1:9090"
 
 [auth.oidc]
 issuer = "https://id.example.com"

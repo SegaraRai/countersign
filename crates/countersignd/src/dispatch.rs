@@ -16,6 +16,8 @@ use countersign_core::{
     StoreError,
 };
 
+use crate::metrics::Metrics;
+
 const BATCH: u32 = 32;
 const LEASE: Duration = Duration::from_secs(60);
 const MAX_ATTEMPTS: u32 = 12;
@@ -24,6 +26,7 @@ pub struct Dispatcher {
     store: Arc<dyn Store>,
     channels: Vec<Arc<dyn Channel>>,
     public_url: String,
+    metrics: Arc<Metrics>,
 }
 
 impl std::fmt::Debug for Dispatcher {
@@ -57,7 +60,16 @@ fn backoff(attempts: u32) -> SignedDuration {
 
 impl Dispatcher {
     pub fn new(store: Arc<dyn Store>, channels: Vec<Arc<dyn Channel>>, public_url: &str) -> Self {
-        Self { store, channels, public_url: public_url.trim_end_matches('/').to_owned() }
+        Self::with_metrics(store, channels, public_url, Arc::default())
+    }
+
+    pub fn with_metrics(
+        store: Arc<dyn Store>,
+        channels: Vec<Arc<dyn Channel>>,
+        public_url: &str,
+        metrics: Arc<Metrics>,
+    ) -> Self {
+        Self { store, channels, public_url: public_url.trim_end_matches('/').to_owned(), metrics }
     }
 
     /// Deliver one batch of due events. Returns how many were handled.
@@ -122,15 +134,18 @@ impl Dispatcher {
                         self.store.save_message_ref(request_id, &msg).await?;
                     }
                     self.store.mark_delivered(item.id, ch.name()).await?;
+                    self.metrics.record_outbox_ok();
                 }
                 Err(e) if e.is_retryable() => {
                     debug!(channel = %ch.name(), error = %e, "delivery failed; will retry");
+                    self.metrics.record_outbox_retry();
                     retry = true;
                 }
                 Err(e) => {
                     // Permanent for this channel: do not retry it.
                     warn!(channel = %ch.name(), event = item.event.kind(), error = %e, "delivery failed");
                     self.store.mark_delivered(item.id, ch.name()).await?;
+                    self.metrics.record_outbox_failed();
                 }
             }
         }

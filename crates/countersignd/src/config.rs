@@ -80,6 +80,10 @@ pub struct ServerConfig {
     /// Defaults to `session_ttl`.
     #[serde(default, with = "humantime_serde")]
     pub idp_groups_max_age: Option<Duration>,
+    /// Optional dedicated address serving Prometheus `/metrics` over HTTP
+    /// (keep on a loopback or private address, e.g. `127.0.0.1:9090`).
+    #[serde(default)]
+    pub metrics_listen: Option<SocketAddr>,
 }
 
 impl ServerConfig {

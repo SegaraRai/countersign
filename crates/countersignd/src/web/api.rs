@@ -394,3 +394,39 @@ pub(super) async fn push_unsubscribe(
         }
     }
 }
+
+#[derive(Debug, Deserialize)]
+pub(super) struct BreakGlassBody {
+    reason: String,
+}
+
+pub(super) async fn break_glass(
+    State(state): State<AppState>,
+    jar: PrivateCookieJar,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<BreakGlassBody>,
+) -> Response {
+    let now = Timestamp::now();
+    let session = match api_session(&state, &jar).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    if let Err(r) = api_csrf(&headers, &session) {
+        return r;
+    }
+    let Ok(id) = id.parse::<RequestId>() else {
+        return api_error(StatusCode::NOT_FOUND, "not_found", "no such request");
+    };
+    let assurance = session.assurance(now, state.settings.fresh_auth_window);
+    match state.engine.break_glass(id, &session.person, assurance, "web".into(), &body.reason, now).await {
+        Ok(r) => Json(r).into_response(),
+        Err(EngineError::Transition(e @ TransitionError::InsufficientAssurance { .. })) => {
+            fresh_auth_required(id, e.to_string())
+        }
+        Err(e) => {
+            let (status, msg) = human_error(&e);
+            api_error(status, "rejected", msg)
+        }
+    }
+}

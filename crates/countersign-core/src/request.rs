@@ -332,6 +332,43 @@ impl Request {
         Ok(events)
     }
 
+    /// Emergency admin-only approval bypassing policy selectors, quorum, and
+    /// exclusions. Requires [`Assurance::FreshAuth`] and a non-empty reason.
+    pub fn break_glass(
+        &mut self,
+        admin: &ActorId,
+        assurance: Assurance,
+        via: ChannelName,
+        reason: &str,
+        now: Timestamp,
+    ) -> Result<Vec<DomainEvent>, TransitionError> {
+        self.require(RequestState::is_pending, "break-glass approve")?;
+        if now >= self.pending_until {
+            return Err(TransitionError::PendingExpired);
+        }
+        if assurance < Assurance::FreshAuth {
+            return Err(TransitionError::InsufficientAssurance {
+                required: Assurance::FreshAuth,
+                presented: assurance,
+            });
+        }
+        let decision = Decision {
+            approver: admin.clone(),
+            verdict: Verdict::Approve,
+            assurance,
+            via,
+            at: now,
+            comment: Some(format!("[break-glass] {reason}")),
+        };
+        self.decisions.push(decision.clone());
+        self.state = RequestState::Approved;
+        self.touch(now);
+        Ok(vec![
+            DomainEvent::DecisionRecorded { request_id: self.id, decision },
+            DomainEvent::Approved { request_id: self.id, at: now },
+        ])
+    }
+
     /// The backend applied the grant.
     pub fn grant_succeeded(&mut self, grant: GrantHandle, now: Timestamp) -> Result<Vec<DomainEvent>, TransitionError> {
         self.require(|s| matches!(s, RequestState::Approved), "activate")?;
@@ -816,5 +853,19 @@ mod tests {
         assert_eq!((r.state.clone(), r.collected_at), (RequestState::Ended, None));
         // A window is never collected.
         assert!(active(GrantMode::Window).collect(t(3)).is_err());
+    }
+
+    #[test]
+    fn break_glass_requires_fresh_auth_and_approves_immediately() {
+        let mut r = open(2, Assurance::FreshAuth);
+        let admin = ActorId::new("alice");
+        assert!(matches!(
+            r.break_glass(&admin, Assurance::Web, web(), "prod outage", t(10)),
+            Err(TransitionError::InsufficientAssurance { required: Assurance::FreshAuth, presented: Assurance::Web })
+        ));
+        let ev = r.break_glass(&admin, Assurance::FreshAuth, web(), "prod outage", t(10)).unwrap();
+        assert_eq!(ev.len(), 2);
+        assert_eq!(r.state, RequestState::Approved);
+        assert_eq!(r.decisions[0].comment.as_deref(), Some("[break-glass] prod outage"));
     }
 }

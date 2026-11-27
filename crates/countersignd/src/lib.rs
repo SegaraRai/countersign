@@ -5,6 +5,7 @@ pub mod dispatch;
 pub mod engine;
 pub mod intake;
 pub mod link;
+pub mod metrics;
 pub mod tls;
 pub mod web;
 
@@ -269,6 +270,7 @@ pub fn build_channels(
 pub struct Daemon {
     pub engine: Arc<Engine>,
     pub dispatcher: Arc<Dispatcher>,
+    pub metrics: Arc<metrics::Metrics>,
     pub web: web::AppState,
     /// Channels whose [`Channel::run`] should be kept running.
     pub interactive: Vec<Arc<dyn Channel>>,
@@ -289,9 +291,11 @@ impl Daemon {
         let url = format!("sqlite://{}", config.store.path.display());
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&url).await?);
         let backends = build_backends(config, &store)?;
-        let engine = Arc::new(Engine::new(Arc::clone(&store), backends, rules_from(config)));
+        let metrics = Arc::new(metrics::Metrics::default());
+        let engine =
+            Arc::new(Engine::with_metrics(Arc::clone(&store), backends, rules_from(config), Arc::clone(&metrics)));
         let BuiltChannels { channels, vapid_public_key } = build_channels(config, Some(&store), Some(&engine))?;
-        let mut daemon = Self::with_engine(config, store, engine, channels, vapid_public_key)?;
+        let mut daemon = Self::with_engine(config, store, engine, channels, vapid_public_key, metrics)?;
         daemon.web.auth = build_authenticator(config)?;
         daemon.web.key = session_key(config)?;
         daemon.web.pages = web::Pages::start(&daemon.web).await?;
@@ -307,8 +311,10 @@ impl Daemon {
         backends: Vec<Arc<dyn AccessBackend>>,
         channels: Vec<Arc<dyn Channel>>,
     ) -> Result<Self, BuildError> {
-        let engine = Arc::new(Engine::new(Arc::clone(&store), backends, rules_from(config)));
-        Self::with_engine(config, store, engine, channels, None)
+        let metrics = Arc::new(metrics::Metrics::default());
+        let engine =
+            Arc::new(Engine::with_metrics(Arc::clone(&store), backends, rules_from(config), Arc::clone(&metrics)));
+        Self::with_engine(config, store, engine, channels, None, metrics)
     }
 
     fn with_engine(
@@ -317,9 +323,11 @@ impl Daemon {
         engine: Arc<Engine>,
         channels: Vec<Arc<dyn Channel>>,
         vapid_public_key: Option<String>,
+        metrics: Arc<metrics::Metrics>,
     ) -> Result<Self, BuildError> {
         let interactive = channels.iter().filter(|c| c.capabilities().interactive).cloned().collect();
-        let dispatcher = Arc::new(Dispatcher::new(store, channels, &config.server.public_url));
+        let dispatcher =
+            Arc::new(Dispatcher::with_metrics(store, channels, &config.server.public_url, Arc::clone(&metrics)));
         let disp = Arc::clone(&dispatcher);
         engine.set_admin_notifier(Arc::new(move |action| {
             let disp = Arc::clone(&disp);
@@ -351,6 +359,6 @@ impl Daemon {
             }
             None => None,
         };
-        Ok(Self { engine, dispatcher, web, interactive, sink, intake })
+        Ok(Self { engine, dispatcher, metrics, web, interactive, sink, intake })
     }
 }

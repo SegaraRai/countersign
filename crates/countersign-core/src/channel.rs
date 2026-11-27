@@ -263,6 +263,7 @@ impl AdminNotice {
         match self.action.as_str() {
             "suspend" => format!("Admin notice: {} suspended", self.target),
             "revoke-approved-by" => format!("Admin notice: grants approved by {} revoked", self.target),
+            "break-glass" => format!("BREAK-GLASS: request {} approved", self.target),
             other => format!("Admin notice: {other} on {}", self.target),
         }
     }
@@ -272,6 +273,7 @@ impl AdminNotice {
         let base = match self.action.as_str() {
             "suspend" => format!("{} suspended {}.", self.by, self.target),
             "revoke-approved-by" => format!("{} revoked active grants approved by {}.", self.by, self.target),
+            "break-glass" => format!("{} invoked break-glass approval on request {}.", self.by, self.target),
             other => format!("{} ran {other} on {}.", self.by, self.target),
         };
         match self.detail.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
