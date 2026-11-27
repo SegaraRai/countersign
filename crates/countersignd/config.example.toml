@@ -36,6 +36,9 @@ client_secret_file = "/etc/countersign/oidc-client-secret"
 
 [store]
 path = "/var/lib/countersign/countersign.db"
+# Remove finished requests, questions and delivered outbox entries older than
+# this (minimum 1h). Omit to keep history indefinitely.
+# retention = "90d"
 
 [engine]
 poll_interval = "15s"
@@ -107,6 +110,19 @@ id = "agent-bridge"
 auth = { host_key = "sha256:0000000000000000000000000000000000000000000000000000000000000002" }
 scopes = ["question"]
 actor = "deploy-agent"
+
+# A CI client authenticating with OIDC JWTs (no static secrets).
+# [[client]]
+# id = "github-actions"
+# auth = { oidc = {
+#   issuer = "https://token.actions.githubusercontent.com",
+#   audience = "countersign",
+#   claims = { repository = "example/*", environment = "prod" },
+#   initiator_claim = "actor_id",
+#   initiator_scheme = "github",
+# } }
+# scopes = ["question"]
+# actor = "deploy-agent"
 
 [channel.log]
 type = "log"

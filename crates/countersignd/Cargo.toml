@@ -31,6 +31,7 @@ channel-webpush = ["dep:countersign-channel-webpush"]
 async-trait.workspace = true
 axum.workspace = true
 axum-extra.workspace = true
+base64.workspace = true
 clap.workspace = true
 countersign-auth-oidc = { workspace = true, optional = true }
 countersign-backend-exec = { workspace = true, optional = true }
@@ -49,6 +50,8 @@ jiff.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 getrandom.workspace = true
+reqwest.workspace = true
+ring = "0.17"
 subtle.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["signal", "time", "sync", "net"] }

@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::assurance::Assurance;
@@ -240,6 +241,46 @@ pub trait ActionSink: Send + Sync {
     async fn answer(&self, intent: AnswerIntent) -> Result<Question, String>;
 }
 
+/// High-visibility administrative notice (e.g. actor suspension or bulk
+/// revoke), announced to all configured channels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminNotice {
+    pub event_id: EventId,
+    /// `suspend`, `revoke-approved-by`, ...
+    pub action: String,
+    pub by: ActorId,
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub at: Timestamp,
+    /// Absolute URL of the admin page in the web UI.
+    pub web_url: String,
+}
+
+impl AdminNotice {
+    /// Short headline for titles and push notifications.
+    pub fn title(&self) -> String {
+        match self.action.as_str() {
+            "suspend" => format!("Admin notice: {} suspended", self.target),
+            "revoke-approved-by" => format!("Admin notice: grants approved by {} revoked", self.target),
+            other => format!("Admin notice: {other} on {}", self.target),
+        }
+    }
+
+    /// Plain-text one-paragraph summary.
+    pub fn summary(&self) -> String {
+        let base = match self.action.as_str() {
+            "suspend" => format!("{} suspended {}.", self.by, self.target),
+            "revoke-approved-by" => format!("{} revoked active grants approved by {}.", self.by, self.target),
+            other => format!("{} ran {other} on {}.", self.by, self.target),
+        };
+        match self.detail.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(d) => format!("{base} ({})", crate::text::escape(d)),
+            None => base,
+        }
+    }
+}
+
 #[async_trait]
 pub trait Channel: Send + Sync {
     fn name(&self) -> &ChannelName;
@@ -251,6 +292,13 @@ pub trait Channel: Send + Sync {
 
     /// Rewrite an earlier message to reflect the request's new state.
     async fn update(&self, msg: &MessageRef, n: Notification<'_>) -> Result<(), ChannelError>;
+
+    /// Announce a high-visibility administrative action (e.g. suspension or
+    /// bulk revoke) to this channel.
+    async fn announce(&self, notice: &AdminNotice) -> Result<(), ChannelError> {
+        let _ = notice;
+        Ok(())
+    }
 
     /// Receive actions until the connection ends for good. Only called when
     /// [`ChannelCaps::interactive`] is set; the daemon restarts it with a

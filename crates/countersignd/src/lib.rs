@@ -111,6 +111,7 @@ pub fn rules_from(config: &Config) -> Rules {
         clients,
         unmatched: config.engine.unmatched,
         idp_max_age: config.server.idp_max_age(),
+        retention: config.store.retention,
     }
 }
 
@@ -319,6 +320,13 @@ impl Daemon {
     ) -> Result<Self, BuildError> {
         let interactive = channels.iter().filter(|c| c.capabilities().interactive).cloned().collect();
         let dispatcher = Arc::new(Dispatcher::new(store, channels, &config.server.public_url));
+        let disp = Arc::clone(&dispatcher);
+        engine.set_admin_notifier(Arc::new(move |action| {
+            let disp = Arc::clone(&disp);
+            Box::pin(async move {
+                disp.announce_admin(&action).await;
+            })
+        }));
         let codes = Arc::new(link::LinkCodes::default());
         let sink = Arc::new(link::DaemonSink { engine: Arc::clone(&engine), codes: Arc::clone(&codes) });
         let web = web::AppState {

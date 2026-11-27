@@ -45,6 +45,7 @@ use crate::engine::{Ask, Engine, EngineError, Submitted};
 use crate::tls::TlsConfig;
 
 mod mcp;
+mod oidc;
 
 /// Subject kind for `sudo` invocations.
 pub const KIND_SUDO: &str = "sudo";
@@ -218,6 +219,7 @@ pub struct IntakeState {
     /// Behind a proxy: where it puts the client's address.
     client_ip_header: Option<axum::http::HeaderName>,
     signing: Arc<ServerKey>,
+    oidc: Arc<oidc::OidcVerifier>,
 }
 
 impl std::fmt::Debug for IntakeState {
@@ -239,6 +241,7 @@ impl IntakeState {
             max_pending: intake.max_pending_per_client,
             client_ip_header,
             signing,
+            oidc: Arc::new(oidc::OidcVerifier::new()),
         }
     }
 
@@ -250,7 +253,11 @@ impl IntakeState {
         let signature = (state == "approved").then_some(binding).flatten().and_then(|b| b.split_once(':')).map(
             |(invocation, nonce)| {
                 let id = r.id.to_string();
-                let key = client.auth.host_key.strip_prefix(host_key::REFERENCE_PREFIX).unwrap_or_default();
+                let key = client
+                    .auth
+                    .host_key()
+                    .and_then(|k| k.strip_prefix(host_key::REFERENCE_PREFIX))
+                    .unwrap_or(client.id.as_str());
                 self.signing.sign(&Approval { request: &id, client: key, invocation, nonce })
             },
         );
@@ -283,13 +290,13 @@ impl IntakeState {
         format!("{}/requests/{id}", self.public_url)
     }
 
-    fn authenticate(
+    async fn authenticate(
         &self,
         headers: &HeaderMap,
         peer: Option<SocketAddr>,
         scope: Scope,
-    ) -> Result<ClientConfig, ApiError> {
-        let key = headers
+    ) -> Result<(ClientConfig, Option<oidc::VerifiedOidc>), ApiError> {
+        let token = headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
@@ -297,19 +304,46 @@ impl IntakeState {
             .filter(|k| !k.is_empty())
             .ok_or_else(|| error(StatusCode::UNAUTHORIZED, "unauthorized", "missing client key"))?;
         let rules = self.engine.rules();
-        // A malformed key gets the same answer as a wrong one, and is never
-        // hashed. Every configured digest is compared in constant time.
-        let found = host_key::is_well_formed(key).then(|| host_key::digest(key)).and_then(|digest| {
-            rules.clients.values().fold(None, |found, c| {
-                let matches = host_key::parse_reference(&c.auth.host_key).is_ok_and(|d| bool::from(d.ct_eq(&digest)));
-                if matches { Some(c) } else { found }
-            })
-        });
         let ip = self.client_ip(headers, peer);
-        let Some(client) = found else {
+
+        let (client, verified_oidc) = if host_key::is_well_formed(token) {
+            let digest = host_key::digest(token);
+            let found = rules.clients.values().fold(None, |found, c| {
+                let matches = c
+                    .auth
+                    .host_key()
+                    .and_then(|hk| host_key::parse_reference(hk).ok())
+                    .is_some_and(|d| bool::from(d.ct_eq(&digest)));
+                if matches { Some(c.clone()) } else { found }
+            });
+            let Some(client) = found else {
+                tracing::warn!(address = ?ip, "intake request with an unknown client key");
+                return Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "unknown client key"));
+            };
+            (client, None)
+        } else if let Some(issuer) = oidc::OidcVerifier::peek_issuer(token) {
+            let candidates: Vec<ClientConfig> =
+                rules.clients.values().filter(|c| c.auth.oidc().is_some_and(|o| o.issuer == issuer)).cloned().collect();
+            let now = Timestamp::now();
+            let mut matched = None;
+            for c in candidates {
+                if let Some(oidc_cfg) = c.auth.oidc()
+                    && let Ok(v) = self.oidc.verify(token, oidc_cfg, now).await
+                {
+                    matched = Some((c, v));
+                    break;
+                }
+            }
+            let Some((client, verified)) = matched else {
+                tracing::warn!(address = ?ip, %issuer, "intake request with an invalid OIDC token");
+                return Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "invalid client token"));
+            };
+            (client, Some(verified))
+        } else {
             tracing::warn!(address = ?ip, "intake request with an unknown client key");
             return Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "unknown client key"));
         };
+
         if !client.allowed_ips.is_empty() && !ip.is_some_and(|a| client.allowed_ips.contains(&a)) {
             tracing::warn!(client = %client.id, address = ?ip, "client key used from an address that is not allowed");
             return Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "address not allowed for this client"));
@@ -318,7 +352,7 @@ impl IntakeState {
             tracing::warn!(client = %client.id, ?scope, "client key used outside its scopes");
             return Err(error(StatusCode::FORBIDDEN, "scope", "this key may not be used for this"));
         }
-        Ok(client.clone())
+        Ok((client, verified_oidc))
     }
 
     /// The request, if it exists and this client submitted it.
@@ -548,7 +582,7 @@ async fn submit(
     body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
     // Authenticate before looking at the body.
-    let client = state.authenticate(&headers, peer_addr(peer), Scope::Approval)?;
+    let (client, verified_oidc) = state.authenticate(&headers, peer_addr(peer), Scope::Approval).await?;
     let body: SubmitBody = serde_json::from_slice(&body)
         .map_err(|e| error(StatusCode::BAD_REQUEST, "bad-request", format!("invalid request body: {e}")))?;
     let Some(backend) = client.backend.clone() else {
@@ -561,7 +595,10 @@ async fn submit(
         return Err(unknown_user(&client, &body.user));
     }
     let user = body.user.clone();
-    let p = pending_subject(&client, backend, body)?;
+    let mut p = pending_subject(&client, backend, body)?;
+    if let Some(initiator) = verified_oidc.and_then(|v| v.initiator) {
+        p.facts.initiator = Some(countersign_core::Initiator { identity: initiator, actor: None, display_name: None });
+    }
     let binding = p.facts.binding.clone();
 
     // Bound how many undecided requests one client can pile up.
@@ -613,7 +650,7 @@ async fn status(
     Path(raw): Path<String>,
     Query(q): Query<WaitQuery>,
 ) -> Result<Json<StatusBody>, ApiError> {
-    let client = state.authenticate(&headers, peer_addr(peer), Scope::Approval)?;
+    let (client, _) = state.authenticate(&headers, peer_addr(peer), Scope::Approval).await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(q.wait).min(MAX_WAIT);
     let mut changes = state.engine.subscribe();
     loop {
@@ -644,7 +681,7 @@ async fn withdraw(
     headers: HeaderMap,
     Path(raw): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let client = state.authenticate(&headers, peer_addr(peer), Scope::Approval)?;
+    let (client, _) = state.authenticate(&headers, peer_addr(peer), Scope::Approval).await?;
     let r = state.owned(&client, &raw).await?;
     match state.engine.withdraw(r.id, Timestamp::now()).await {
         Ok(_) => Ok(StatusCode::NO_CONTENT),
@@ -748,7 +785,7 @@ async fn ask(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Response, ApiError> {
-    let client = state.authenticate(&headers, peer_addr(peer), Scope::Question)?;
+    let (client, _) = state.authenticate(&headers, peer_addr(peer), Scope::Question).await?;
     if body.len() > MAX_QUESTION_BODY {
         return Err(error(StatusCode::PAYLOAD_TOO_LARGE, "too-large", "the question is too large"));
     }
@@ -811,7 +848,7 @@ async fn question_status(
     Path(raw): Path<String>,
     Query(w): Query<WaitQuery>,
 ) -> Result<Json<QuestionBody>, ApiError> {
-    let client = state.authenticate(&headers, peer_addr(peer), Scope::Question)?;
+    let (client, _) = state.authenticate(&headers, peer_addr(peer), Scope::Question).await?;
     Ok(Json(wait_for_answer(&state, &client, &raw, Duration::from_secs(w.wait)).await?))
 }
 
@@ -821,7 +858,7 @@ async fn withdraw_question(
     headers: HeaderMap,
     Path(raw): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let client = state.authenticate(&headers, peer_addr(peer), Scope::Question)?;
+    let (client, _) = state.authenticate(&headers, peer_addr(peer), Scope::Question).await?;
     withdraw_as(&state, &client, &raw).await?;
     Ok(StatusCode::NO_CONTENT)
 }

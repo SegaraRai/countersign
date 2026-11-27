@@ -11,7 +11,10 @@ use std::time::Duration;
 use jiff::{SignedDuration, Timestamp};
 use tracing::{debug, warn};
 
-use countersign_core::{Channel, ChannelError, DomainEvent, Item, Notification, OutboxItem, Store, StoreError};
+use countersign_core::{
+    AdminAction, AdminNotice, Channel, ChannelError, DomainEvent, EventId, Item, Notification, OutboxItem, Store,
+    StoreError,
+};
 
 const BATCH: u32 = 32;
 const LEASE: Duration = Duration::from_secs(60);
@@ -133,6 +136,25 @@ impl Dispatcher {
         }
         Ok(retry)
     }
+
+    /// Announce a high-visibility administrative action (e.g. suspension or
+    /// bulk revoke) to every configured channel.
+    pub async fn announce_admin(&self, action: &AdminAction) {
+        let notice = AdminNotice {
+            event_id: EventId::new(),
+            action: action.action.clone(),
+            by: action.by.clone(),
+            target: action.target.clone(),
+            detail: action.detail.clone(),
+            at: action.at,
+            web_url: format!("{}/admin", self.public_url),
+        };
+        for ch in &self.channels {
+            if let Err(e) = ch.announce(&notice).await {
+                warn!(channel = %ch.name(), action = %action.action, error = %e, "could not announce admin notice");
+            }
+        }
+    }
 }
 
 /// A channel that writes to the daemon log.
@@ -173,6 +195,19 @@ impl Channel for LogChannel {
     async fn update(&self, _: &countersign_core::MessageRef, _: Notification<'_>) -> Result<(), ChannelError> {
         Err(ChannelError::Unsupported)
     }
+
+    async fn announce(&self, notice: &AdminNotice) -> Result<(), ChannelError> {
+        tracing::warn!(
+            channel = %self.name,
+            action = %notice.action,
+            by = %notice.by,
+            target = %notice.target,
+            detail = notice.detail.as_deref().unwrap_or(""),
+            url = %notice.web_url,
+            "admin notice"
+        );
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -195,6 +230,7 @@ mod tests {
     struct RecordingChannel {
         name: ChannelName,
         seen: Mutex<Vec<countersign_core::RequestId>>,
+        notices: Mutex<Vec<countersign_core::AdminNotice>>,
     }
 
     impl std::fmt::Debug for RecordingChannel {
@@ -208,15 +244,23 @@ mod tests {
         fn name(&self) -> &ChannelName {
             &self.name
         }
+
         fn capabilities(&self) -> ChannelCaps {
             ChannelCaps::default()
         }
+
         async fn notify(&self, n: Notification<'_>) -> Result<Option<MessageRef>, ChannelError> {
             self.seen.lock().unwrap().push(n.item.id());
             Ok(None)
         }
+
         async fn update(&self, _: &MessageRef, _: Notification<'_>) -> Result<(), ChannelError> {
             Err(ChannelError::Unsupported)
+        }
+
+        async fn announce(&self, notice: &countersign_core::AdminNotice) -> Result<(), ChannelError> {
+            self.notices.lock().unwrap().push(notice.clone());
+            Ok(())
         }
     }
 
@@ -263,8 +307,16 @@ mod tests {
     #[tokio::test]
     async fn policy_routes_to_selected_channels_only() {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::in_memory().await.unwrap());
-        let ch_a = Arc::new(RecordingChannel { name: ChannelName::new("slack"), seen: Mutex::default() });
-        let ch_b = Arc::new(RecordingChannel { name: ChannelName::new("discord"), seen: Mutex::default() });
+        let ch_a = Arc::new(RecordingChannel {
+            name: ChannelName::new("slack"),
+            seen: Mutex::default(),
+            notices: Mutex::default(),
+        });
+        let ch_b = Arc::new(RecordingChannel {
+            name: ChannelName::new("discord"),
+            seen: Mutex::default(),
+            notices: Mutex::default(),
+        });
         let dispatcher = Dispatcher::new(Arc::clone(&store), vec![ch_a.clone(), ch_b.clone()], "https://cs.example");
 
         let (r_routed, ev1) = open_request("r1", vec![ChannelName::new("slack")]);
@@ -278,5 +330,19 @@ mod tests {
 
         assert_eq!(*ch_a.seen.lock().unwrap(), vec![r_routed.id, r_all.id]);
         assert_eq!(*ch_b.seen.lock().unwrap(), vec![r_all.id]);
+
+        // Admin notices always broadcast to every channel.
+        dispatcher
+            .announce_admin(&countersign_core::AdminAction {
+                at: now,
+                by: ActorId::new("alice"),
+                action: "suspend".into(),
+                target: "bob".into(),
+                detail: Some("lost laptop".into()),
+            })
+            .await;
+        assert_eq!(ch_a.notices.lock().unwrap().len(), 1);
+        assert_eq!(ch_b.notices.lock().unwrap().len(), 1);
+        assert_eq!(ch_a.notices.lock().unwrap()[0].web_url, "https://cs.example/admin");
     }
 }

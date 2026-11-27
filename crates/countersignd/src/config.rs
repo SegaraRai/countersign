@@ -130,11 +130,15 @@ pub struct AuthConfig {
 pub struct StoreConfig {
     #[serde(default = "default_store_path")]
     pub path: PathBuf,
+    /// How long finished (terminal) requests, questions and delivered outbox
+    /// entries are kept before automatic cleanup. Unset keeps them forever.
+    #[serde(default, with = "humantime_serde")]
+    pub retention: Option<Duration>,
 }
 
 impl Default for StoreConfig {
     fn default() -> Self {
-        Self { path: default_store_path() }
+        Self { path: default_store_path(), retention: None }
     }
 }
 
@@ -241,11 +245,54 @@ pub struct ClientConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ClientAuth {
+    /// Static `cshk_` client key (stored as `sha256:<hex>`).
+    HostKey {
+        /// `sha256:` and the lowercase hex SHA-256 of the client's `cshk_` key,
+        /// as printed by `countersign host-key`. Never the key itself.
+        host_key: String,
+    },
+    /// CI OIDC JWT (GitHub Actions, GitLab CI, etc.), verified via JWKS.
+    Oidc { oidc: OidcClientAuth },
+}
+
+impl ClientAuth {
+    pub fn host_key(&self) -> Option<&str> {
+        match self {
+            Self::HostKey { host_key } => Some(host_key.as_str()),
+            Self::Oidc { .. } => None,
+        }
+    }
+
+    pub fn oidc(&self) -> Option<&OidcClientAuth> {
+        match self {
+            Self::Oidc { oidc } => Some(oidc),
+            Self::HostKey { .. } => None,
+        }
+    }
+}
+
+/// OIDC JWT verification rules for a CI `[[client]]`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ClientAuth {
-    /// `sha256:` and the lowercase hex SHA-256 of the client's `cshk_` key,
-    /// as printed by `countersign host-key`. Never the key itself.
-    pub host_key: String,
+pub struct OidcClientAuth {
+    /// Expected `iss` claim and discovery base URL (`https://...`).
+    pub issuer: String,
+    /// Expected `aud` claim.
+    pub audience: String,
+    /// Optional required claim matches (glob patterns, e.g. `repository = "org/*"`).
+    #[serde(default)]
+    pub claims: BTreeMap<String, String>,
+    /// Claim holding the initiator's subject (e.g. `"actor_id"` for GitHub).
+    #[serde(default)]
+    pub initiator_claim: Option<String>,
+    /// Recognition identity scheme for `initiator_claim` (e.g. `"github"` -> `github:<val>`).
+    #[serde(default)]
+    pub initiator_scheme: Option<String>,
+    /// Optional explicit JWKS URL (skips `.well-known/openid-configuration`).
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
 }
 
 fn default_scopes() -> BTreeSet<Scope> {
@@ -406,6 +453,9 @@ impl Config {
         if self.engine.poll_interval < Duration::from_secs(1) {
             errors.push("engine.poll_interval must be at least 1s".into());
         }
+        if self.store.retention.is_some_and(|d| d < Duration::from_hours(1)) {
+            errors.push("store.retention must be at least 1h".into());
+        }
 
         match Directory::new(self.persons.clone(), self.workloads.clone(), self.groups.clone(), self.roles.clone()) {
             Ok(d) => self.directory = d,
@@ -471,10 +521,32 @@ impl Config {
             if !ids.insert(id) {
                 errors.push(format!("client {id}: duplicate id"));
             }
-            if let Err(why) = host_key::parse_reference(&c.auth.host_key) {
-                errors.push(format!("client {id}: auth.host_key: {why}"));
-            } else if !keys.insert(c.auth.host_key.clone()) {
-                errors.push(format!("client {id}: auth.host_key is used by another client"));
+            match &c.auth {
+                ClientAuth::HostKey { host_key } => {
+                    if let Err(why) = host_key::parse_reference(host_key) {
+                        errors.push(format!("client {id}: auth.host_key: {why}"));
+                    } else if !keys.insert(host_key.clone()) {
+                        errors.push(format!("client {id}: auth.host_key is used by another client"));
+                    }
+                }
+                ClientAuth::Oidc { oidc } => {
+                    if !countersign_core::url::is_secure(&oidc.issuer) {
+                        errors.push(format!(
+                            "client {id}: auth.oidc.issuer must be https:// (http:// only for localhost), got {:?}",
+                            oidc.issuer
+                        ));
+                    }
+                    if oidc.audience.trim().is_empty() {
+                        errors.push(format!("client {id}: auth.oidc.audience must not be empty"));
+                    }
+                    if let Some(jwks) = &oidc.jwks_uri
+                        && !countersign_core::url::is_secure(jwks)
+                    {
+                        errors.push(format!(
+                            "client {id}: auth.oidc.jwks_uri must be https:// (http:// only for localhost), got {jwks:?}"
+                        ));
+                    }
+                }
             }
             if c.scopes.is_empty() {
                 errors.push(format!("client {id}: scopes is empty"));

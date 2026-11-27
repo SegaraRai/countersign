@@ -208,4 +208,12 @@ pub trait Store: Send + Sync {
         let _ = (person, id);
         Ok(false)
     }
+
+    /// Delete closed (non-open) requests and questions last updated before
+    /// `before` (along with their delivered outbox entries and message refs).
+    /// Returns the number of requests/questions removed.
+    async fn purge_before(&self, before: Timestamp) -> Result<u64, StoreError> {
+        let _ = before;
+        Ok(0)
+    }
 }

@@ -224,6 +224,51 @@ impl Channel for WebPushChannel {
     async fn update(&self, _msg: &MessageRef, _n: Notification<'_>) -> Result<(), ChannelError> {
         Err(ChannelError::Unsupported)
     }
+
+    async fn announce(&self, notice: &countersign_core::AdminNotice) -> Result<(), ChannelError> {
+        let subs = self
+            .store
+            .list_push_subscriptions(None)
+            .await
+            .map_err(|e| ChannelError::Unavailable(format!("reading push subscriptions: {e}")))?;
+        if subs.is_empty() {
+            return Ok(());
+        }
+        let now = Timestamp::now();
+        let payload = json!({
+            "title": notice.title(),
+            "body": notice.summary(),
+            "url": notice.web_url,
+            "tag": format!("countersign-admin-{}", notice.event_id),
+            "kind": "admin-notice",
+        })
+        .to_string()
+        .into_bytes();
+
+        for sub in subs {
+            let Some(aud) = vapid::origin_of(&sub.endpoint) else { continue };
+            let Ok(encrypted) = crypto::encrypt(&sub.p256dh, &sub.auth, &payload) else { continue };
+            let auth_header = self.vapid.authorization_header(&aud, &self.subject, now);
+            match self
+                .http
+                .post(&sub.endpoint)
+                .header("Authorization", auth_header)
+                .header("Content-Encoding", "aes128gcm")
+                .header("Content-Type", "application/octet-stream")
+                .header("TTL", "3600")
+                .header("Urgency", "high")
+                .body(encrypted)
+                .send()
+                .await
+            {
+                Ok(r) if r.status() == StatusCode::GONE || r.status() == StatusCode::NOT_FOUND => {
+                    let _ = self.store.delete_push_subscription(&sub.endpoint).await;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

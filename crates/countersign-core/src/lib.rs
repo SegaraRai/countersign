@@ -23,7 +23,7 @@ pub mod backend;
 pub mod channel;
 pub mod event;
 pub mod form;
-mod glob;
+pub mod glob;
 pub mod host_key;
 pub mod id;
 pub mod policy;
@@ -45,8 +45,8 @@ pub use assurance::Assurance;
 pub use auth::{AuthError, Authenticator, LoginStart, VerifiedLogin};
 pub use backend::{AccessBackend, BackendCaps, BackendError, GrantHandle};
 pub use channel::{
-    ActionIntent, ActionSink, AnswerIntent, ApproveMode, Channel, ChannelCaps, ChannelError, Item, MessageRef,
-    Notification,
+    ActionIntent, ActionSink, AdminNotice, AnswerIntent, ApproveMode, Channel, ChannelCaps, ChannelError, Item,
+    MessageRef, Notification,
 };
 pub use event::DomainEvent;
 pub use form::{Choice, Field, FieldKind, FormError, FormSchema, TextFormat};

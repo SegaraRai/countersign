@@ -243,6 +243,46 @@ impl Channel for WebhookChannel {
     async fn update(&self, _: &MessageRef, _: Notification<'_>) -> Result<(), ChannelError> {
         Err(ChannelError::Unsupported)
     }
+
+    async fn announce(&self, notice: &countersign_core::AdminNotice) -> Result<(), ChannelError> {
+        let now = Timestamp::now();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "id": notice.event_id,
+            "type": "admin-notice",
+            "timestamp": now,
+            "url": notice.web_url,
+            "notice": notice,
+        }))
+        .map_err(|e| ChannelError::Other(Box::new(e)))?;
+        let id = notice.event_id.to_string();
+        let ts = now.as_second();
+        let mut req = self
+            .http
+            .post(&self.url)
+            .header("content-type", "application/json")
+            .header("webhook-id", &id)
+            .header("webhook-timestamp", ts.to_string());
+        if let Some(key) = &self.key {
+            req = req.header("webhook-signature", sign(key, &id, ts, &body));
+        }
+        if let Some(token) = &self.bearer {
+            req = req.bearer_auth(token);
+        }
+        let res = req
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| ChannelError::Unavailable(format!("webhook: {}", e.without_url())))?;
+        let status = res.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(if status.is_server_error() {
+            ChannelError::Unavailable(format!("webhook returned {}", status.as_u16()))
+        } else {
+            ChannelError::Other(format!("webhook refused the notice ({})", status.as_u16()).into())
+        })
+    }
 }
 
 #[cfg(test)]

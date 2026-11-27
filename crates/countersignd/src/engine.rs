@@ -74,6 +74,8 @@ pub struct Rules {
     pub unmatched: Unmatched,
     /// How long identity-provider groups from a sign-in count.
     pub idp_max_age: Duration,
+    /// How long closed requests/questions are kept before automatic cleanup.
+    pub retention: Option<Duration>,
 }
 
 impl Rules {
@@ -81,6 +83,10 @@ impl Rules {
         Roster { directory: &self.directory, standing, now, idp_max_age: self.idp_max_age }
     }
 }
+
+/// Receives high-visibility administrative actions to announce to channels.
+pub type AdminNotifier =
+    Arc<dyn Fn(AdminAction) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
 pub struct Engine {
     store: Arc<dyn Store>,
@@ -90,6 +96,8 @@ pub struct Engine {
     unmatched_seen: std::sync::Mutex<BTreeSet<String>>,
     /// Bumped whenever a request or question is stored, so waiters can re-check.
     changes: watch::Sender<u64>,
+    /// Optional hook to announce suspensions and bulk revokes to all channels.
+    admin_notifier: RwLock<Option<AdminNotifier>>,
 }
 
 /// Outcome of [`Engine::submit`].
@@ -150,7 +158,14 @@ impl Engine {
             rules: RwLock::new(Arc::new(rules)),
             unmatched_seen: std::sync::Mutex::default(),
             changes: watch::Sender::new(0),
+            admin_notifier: RwLock::new(None),
         }
+    }
+
+    /// Install a callback invoked on high-visibility admin actions (suspension,
+    /// bulk revoke) so channels can be notified.
+    pub fn set_admin_notifier(&self, notifier: AdminNotifier) {
+        *self.admin_notifier.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(notifier);
     }
 
     /// A receiver that changes whenever any request or question is stored.
@@ -207,6 +222,16 @@ impl Engine {
         }
         if let Err(e) = self.advance_questions(now).await {
             warn!(error = %e, "advancing questions failed");
+        }
+        if let Some(retention) = self.rules().retention
+            && let Ok(dur) = jiff::SignedDuration::try_from(retention)
+            && let Ok(cutoff) = now.checked_sub(dur)
+        {
+            match self.store.purge_before(cutoff).await {
+                Ok(0) => {}
+                Ok(n) => info!(purged = n, "purged expired records past retention"),
+                Err(e) => warn!(error = %e, "purging expired records failed"),
+            }
         }
     }
 
@@ -822,10 +847,25 @@ impl Engine {
 
     // ---- Admin ----------------------------------------------------------
 
-    async fn audit(&self, by: &ActorId, action: &str, target: &str, detail: Option<String>, now: Timestamp) {
+    async fn audit(
+        &self,
+        by: &ActorId,
+        action: &str,
+        target: &str,
+        detail: Option<String>,
+        now: Timestamp,
+    ) -> AdminAction {
         let a = AdminAction { at: now, by: by.clone(), action: action.to_owned(), target: target.to_owned(), detail };
         if let Err(e) = self.store.record_admin_action(&a).await {
             warn!(error = %e, action, target, "could not record an admin action");
+        }
+        a
+    }
+
+    async fn announce_admin(&self, action: AdminAction) {
+        let notifier = self.admin_notifier.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        if let Some(notify) = notifier {
+            notify(action).await;
         }
     }
 
@@ -853,9 +893,10 @@ impl Engine {
         }
         let reason = reason.map(|r| r.trim().chars().take(500).collect::<String>()).filter(|r| !r.is_empty());
         self.store.suspend(actor, &Suspension { since: now, by: by.clone(), reason: reason.clone() }).await?;
-        self.audit(by, "suspend", actor.as_str(), reason, now).await;
+        let action = self.audit(by, "suspend", actor.as_str(), reason, now).await;
         info!(%actor, %by, "actor suspended");
         self.enforce_standing(now).await?;
+        self.announce_admin(action).await;
         self.changed();
         Ok(())
     }
@@ -893,7 +934,10 @@ impl Engine {
                 Err(e) => warn!(request = %id, error = %e, "could not revoke"),
             }
         }
-        self.audit(by, "revoke-approved-by", person.as_str(), Some(format!("{} revoked", revoked.len())), now).await;
+        let action = self
+            .audit(by, "revoke-approved-by", person.as_str(), Some(format!("{} revoked", revoked.len())), now)
+            .await;
+        self.announce_admin(action).await;
         Ok(revoked)
     }
 

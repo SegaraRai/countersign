@@ -443,3 +443,41 @@ async fn push_subscriptions_crud() {
     assert!(store.delete_push_subscription("https://push.example/2").await.unwrap());
     assert_eq!(store.list_push_subscriptions(None).await.unwrap(), [] as [countersign_core::PushSubscription; 0]);
 }
+
+#[tokio::test]
+async fn purge_before_removes_only_old_closed_delivered_records() {
+    let store = SqliteStore::in_memory().await.unwrap();
+
+    // 1. Old closed request with all outbox events delivered -> should be purged.
+    let (mut old_closed, ev1) = open_request("s-old", t(10));
+    store.insert_request(&old_closed, &ev1).await.unwrap();
+    let v = old_closed.version;
+    let expired_old = old_closed.withdraw(t(1000)).unwrap();
+    store.update_request(&old_closed, v, &expired_old).await.unwrap();
+    for item in store.claim_outbox(10, Duration::from_mins(1), t(1001)).await.unwrap() {
+        store.complete_outbox(item.id).await.unwrap();
+    }
+
+    // 2. Old open request -> must NOT be purged.
+    let (old_open, ev2) = open_request("s-open", t(10));
+    store.insert_request(&old_open, &ev2).await.unwrap();
+    for item in store.claim_outbox(10, Duration::from_mins(1), t(1002)).await.unwrap() {
+        store.complete_outbox(item.id).await.unwrap();
+    }
+
+    // 3. Recent closed request -> must NOT be purged.
+    let (mut recent_closed, ev3) = open_request("s-recent", t(5000));
+    store.insert_request(&recent_closed, &ev3).await.unwrap();
+    let v3 = recent_closed.version;
+    let withdrawn_recent = recent_closed.withdraw(t(6000)).unwrap();
+    store.update_request(&recent_closed, v3, &withdrawn_recent).await.unwrap();
+    for item in store.claim_outbox(10, Duration::from_mins(1), t(6001)).await.unwrap() {
+        store.complete_outbox(item.id).await.unwrap();
+    }
+
+    let purged = store.purge_before(t(3000)).await.unwrap();
+    assert_eq!(purged, 1);
+    assert!(store.get_request(old_closed.id).await.unwrap().is_none());
+    assert!(store.get_request(old_open.id).await.unwrap().is_some());
+    assert!(store.get_request(recent_closed.id).await.unwrap().is_some());
+}

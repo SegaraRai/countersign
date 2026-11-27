@@ -179,6 +179,37 @@ impl Channel for NtfyChannel {
     async fn update(&self, _: &MessageRef, _: Notification<'_>) -> Result<(), ChannelError> {
         Err(ChannelError::Unsupported)
     }
+
+    async fn announce(&self, notice: &countersign_core::AdminNotice) -> Result<(), ChannelError> {
+        let web = (notice.web_url.starts_with("https://") || notice.web_url.starts_with("http://"))
+            .then(|| notice.web_url.clone());
+        let body = Publish {
+            topic: self.config.topic.clone(),
+            title: clean(&notice.title(), 200),
+            message: clean(&notice.summary(), MAX_MESSAGE_CHARS),
+            tags: vec!["warning".to_owned()],
+            priority: 4,
+            click: web.clone(),
+            actions: web
+                .map(|url| ViewAction { action: "view".to_owned(), label: "Admin".to_owned(), url, clear: true })
+                .into_iter()
+                .collect(),
+        };
+        let mut req = self.http.post(&self.endpoint).json(&body);
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+        let res = req.send().await.map_err(|e| ChannelError::Unavailable(format!("ntfy: {}", e.without_url())))?;
+        let status = res.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(if status.is_server_error() {
+            ChannelError::Unavailable(format!("ntfy returned {}", status.as_u16()))
+        } else {
+            ChannelError::Other(format!("ntfy refused the notice ({})", status.as_u16()).into())
+        })
+    }
 }
 
 /// The notification for an event.

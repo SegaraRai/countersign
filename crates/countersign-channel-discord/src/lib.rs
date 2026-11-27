@@ -39,7 +39,8 @@ use twilight_model::id::Id;
 use twilight_model::id::marker::{ChannelMarker, GuildMarker, MessageMarker, RoleMarker};
 
 use countersign_core::{
-    ActionSink, Assurance, Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, MessageRef, Notification,
+    ActionSink, AdminNotice, Assurance, Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, MessageRef,
+    Notification,
 };
 
 pub use crate::interact::{Action, LINK_COMMAND, Scope, custom_id, parse_custom_id};
@@ -148,6 +149,35 @@ impl Channel for DiscordChannel {
             .components(Some(&v.components))
             .await
             .map_err(http_error)?;
+        Ok(())
+    }
+
+    async fn announce(&self, notice: &AdminNotice) -> Result<(), ChannelError> {
+        use twilight_model::channel::message::embed::{Embed, EmbedFooter};
+        let web = (notice.web_url.starts_with("https://") || notice.web_url.starts_with("http://"))
+            .then(|| notice.web_url.clone());
+        let embed = Embed {
+            author: None,
+            color: Some(0x00e7_4c3c),
+            description: Some(render::markdown(&notice.summary())),
+            fields: Vec::new(),
+            flags: None,
+            footer: Some(EmbedFooter {
+                icon_url: None,
+                proxy_icon_url: None,
+                text: format!("countersign · admin · {}", notice.event_id),
+            }),
+            image: None,
+            kind: "rich".to_owned(),
+            provider: None,
+            thumbnail: None,
+            timestamp: None,
+            title: Some(render::markdown(&notice.title())),
+            url: web,
+            video: None,
+        };
+        let embeds = [embed];
+        self.http.create_message(self.config.channel_id).embeds(&embeds).await.map_err(http_error)?;
         Ok(())
     }
 

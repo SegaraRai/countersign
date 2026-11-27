@@ -38,7 +38,8 @@ use serde_json::{Value, json};
 use tokio_websockets::{ClientBuilder, Message};
 
 use countersign_core::{
-    ActionSink, Assurance, Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, MessageRef, Notification,
+    ActionSink, AdminNotice, Assurance, Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, MessageRef,
+    Notification,
 };
 
 pub use crate::interact::{Action, Envelope, LINK_COMMAND, Scope, action_id, parse_action_id};
@@ -245,6 +246,45 @@ impl Channel for SlackChannel {
             "attachments": v.attachments,
         });
         let _ = self.post_api("chat.update", &self.bot_token, &body).await?;
+        Ok(())
+    }
+
+    async fn announce(&self, notice: &AdminNotice) -> Result<(), ChannelError> {
+        let title = notice.title();
+        let summary = render::mrkdwn(&notice.summary());
+        let mut blocks = vec![
+            json!({
+                "type": "header",
+                "text": { "type": "plain_text", "text": title, "emoji": true }
+            }),
+            json!({
+                "type": "section",
+                "text": { "type": "mrkdwn", "text": summary }
+            }),
+        ];
+        if notice.web_url.starts_with("https://") || notice.web_url.starts_with("http://") {
+            blocks.push(json!({
+                "type": "actions",
+                "elements": [{
+                    "type": "button",
+                    "text": { "type": "plain_text", "text": "Open admin page", "emoji": true },
+                    "url": notice.web_url,
+                    "action_id": format!("cs:admin:{}", notice.event_id),
+                }]
+            }));
+        }
+        blocks.push(json!({
+            "type": "context",
+            "elements": [{ "type": "mrkdwn", "text": format!("countersign · admin · `{}`", notice.event_id) }]
+        }));
+        let body = json!({
+            "channel": self.config.channel_id,
+            "text": notice.summary(),
+            "attachments": [{ "color": "#e74c3c", "blocks": blocks }],
+            "unfurl_links": false,
+            "unfurl_media": false,
+        });
+        let _ = self.post_api("chat.postMessage", &self.bot_token, &body).await?;
         Ok(())
     }
 

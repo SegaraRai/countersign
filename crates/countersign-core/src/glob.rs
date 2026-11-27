@@ -1,6 +1,6 @@
 //! Minimal glob matching: `*` matches any run of characters, `?` matches one.
 
-pub(crate) fn matches(pattern: &str, text: &str) -> bool {
+pub fn matches(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
     let (mut pi, mut ti) = (0, 0);

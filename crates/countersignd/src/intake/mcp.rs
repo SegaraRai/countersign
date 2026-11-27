@@ -66,7 +66,7 @@ pub(super) async fn post(
     {
         return (StatusCode::BAD_REQUEST, "unsupported MCP-Protocol-Version").into_response();
     }
-    let client = match state.authenticate(&headers, peer_addr(peer), Scope::Question) {
+    let (client, _) = match state.authenticate(&headers, peer_addr(peer), Scope::Question).await {
         Ok(c) => c,
         Err(e) => {
             let mut r = e.into_response();
