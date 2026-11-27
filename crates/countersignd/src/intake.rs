@@ -120,6 +120,9 @@ impl IntakeConfig {
                 errors.push(format!("intake: client_ip_header {h:?} is not a header name"));
             }
         }
+        if self.max_pending_per_client == 0 {
+            errors.push("intake: max_pending_per_client must be at least 1".into());
+        }
         errors
     }
 

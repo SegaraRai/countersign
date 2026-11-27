@@ -10,8 +10,11 @@ User=countersign
 Group=countersign
 ConfigurationDirectory=countersign
 StateDirectory=countersign
+# Optional environment file for RUST_LOG or COUNTERSIGN_* secrets (0600, root:countersign).
+# EnvironmentFile=-/etc/countersign/env
 ExecStartPre=/usr/local/bin/countersignd --config /etc/countersign/config.toml check
 ExecStart=/usr/local/bin/countersignd --config /etc/countersign/config.toml run
+# Reloads directory, clients, policies, retention, and TLS certificates.
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5s
@@ -28,7 +31,6 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-ReadWritePaths=/var/lib/countersign
 
 [Install]
 WantedBy=multi-user.target

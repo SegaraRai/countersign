@@ -249,30 +249,27 @@ pub struct ClientConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(untagged)]
+#[serde(rename_all = "snake_case")]
 pub enum ClientAuth {
-    /// Static `cshk_` client key (stored as `sha256:<hex>`).
-    HostKey {
-        /// `sha256:` and the lowercase hex SHA-256 of the client's `cshk_` key,
-        /// as printed by `countersign host-key`. Never the key itself.
-        host_key: String,
-    },
+    /// Static `cshk_` client key (stored as `sha256:<hex>`), as printed by
+    /// `countersign host-key`. Never the key itself.
+    HostKey(String),
     /// CI OIDC JWT (GitHub Actions, GitLab CI, etc.), verified via JWKS.
-    Oidc { oidc: OidcClientAuth },
+    Oidc(OidcClientAuth),
 }
 
 impl ClientAuth {
     pub fn host_key(&self) -> Option<&str> {
         match self {
-            Self::HostKey { host_key } => Some(host_key.as_str()),
-            Self::Oidc { .. } => None,
+            Self::HostKey(host_key) => Some(host_key.as_str()),
+            Self::Oidc(_) => None,
         }
     }
 
     pub fn oidc(&self) -> Option<&OidcClientAuth> {
         match self {
-            Self::Oidc { oidc } => Some(oidc),
-            Self::HostKey { .. } => None,
+            Self::Oidc(oidc) => Some(oidc),
+            Self::HostKey(_) => None,
         }
     }
 }
@@ -451,8 +448,26 @@ impl Config {
         if self.server.session_ttl < Duration::from_secs(60) {
             errors.push("server.session_ttl must be at least 1m".into());
         }
+        if self.server.session_ttl < self.server.fresh_auth_window {
+            errors.push("server.session_ttl must be at least server.fresh_auth_window".into());
+        }
         if self.server.idp_groups_max_age.is_some_and(|d| d < Duration::from_secs(60)) {
             errors.push("server.idp_groups_max_age must be at least 1m".into());
+        }
+        if let Some(intake) = &self.intake
+            && intake.listen == self.server.listen
+        {
+            errors.push(format!("intake.listen and server.listen both use {}", self.server.listen));
+        }
+        if let Some(metrics) = self.server.metrics_listen {
+            if metrics == self.server.listen {
+                errors.push(format!("server.metrics_listen and server.listen both use {metrics}"));
+            }
+            if let Some(intake) = &self.intake
+                && metrics == intake.listen
+            {
+                errors.push(format!("server.metrics_listen and intake.listen both use {metrics}"));
+            }
         }
         if self.engine.poll_interval < Duration::from_secs(1) {
             errors.push("engine.poll_interval must be at least 1s".into());
@@ -526,14 +541,14 @@ impl Config {
                 errors.push(format!("client {id}: duplicate id"));
             }
             match &c.auth {
-                ClientAuth::HostKey { host_key } => {
+                ClientAuth::HostKey(host_key) => {
                     if let Err(why) = host_key::parse_reference(host_key) {
                         errors.push(format!("client {id}: auth.host_key: {why}"));
                     } else if !keys.insert(host_key.clone()) {
                         errors.push(format!("client {id}: auth.host_key is used by another client"));
                     }
                 }
-                ClientAuth::Oidc { oidc } => {
+                ClientAuth::Oidc(oidc) => {
                     if !countersign_core::url::is_secure(&oidc.issuer) {
                         errors.push(format!(
                             "client {id}: auth.oidc.issuer must be https:// (http:// only for localhost), got {:?}",
@@ -548,6 +563,24 @@ impl Config {
                     {
                         errors.push(format!(
                             "client {id}: auth.oidc.jwks_uri must be https:// (http:// only for localhost), got {jwks:?}"
+                        ));
+                    }
+                    for (k, v) in &oidc.claims {
+                        if k.trim().is_empty() || v.trim().is_empty() {
+                            errors.push(format!("client {id}: auth.oidc.claims keys and patterns must not be empty"));
+                            break;
+                        }
+                    }
+                    if let Some(claim) = &oidc.initiator_claim
+                        && claim.trim().is_empty()
+                    {
+                        errors.push(format!("client {id}: auth.oidc.initiator_claim must not be empty"));
+                    }
+                    if let Some(scheme) = &oidc.initiator_scheme
+                        && !countersign_core::actor::is_name(scheme)
+                    {
+                        errors.push(format!(
+                            "client {id}: auth.oidc.initiator_scheme {scheme:?} must be letters, digits, '-', '_' or '.'"
                         ));
                     }
                 }
@@ -621,9 +654,9 @@ fn expand_include(base: &Path, pattern: &str) -> Result<Vec<PathBuf>, ConfigErro
     };
     let mut files: Vec<PathBuf> = entries
         .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .filter(|e| e.file_name().to_str().is_some_and(|n| wildcard(&name, n)))
         .map(|e| e.path())
+        .filter(|p| p.is_file())
         .collect();
     files.sort();
     Ok(files)

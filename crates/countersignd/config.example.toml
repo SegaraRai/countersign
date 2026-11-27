@@ -1,12 +1,12 @@
 # countersignd configuration. Validate with: countersignd --config <file> check
 # Secrets never go in this file; components read them from *_file paths or
 # environment variables. SIGHUP reloads [[person]], [[workload]], [[group]],
-# [roles], [[client]], [[policy]] and [[question_policy]]; other sections need
-# a restart.
+# [roles], [[client]], [[policy]], [[question_policy]], store.retention, and
+# TLS certificates; other sections need a restart.
 
 # Extra files with [[person]] / [[workload]] / [[group]] / [[client]] /
 # [[policy]] / [[question_policy]] tables, relative to this file.
-include = ["policies.d/*.toml"]
+# include = ["policies.d/*.toml"]
 
 [server]
 # Base URL of the web UI, used in links sent to channels and for the login
@@ -16,10 +16,10 @@ public_url = "https://countersign.example.com"
 # Without `tls`, the web UI serves plain HTTP for a reverse proxy or tunnel
 # that terminates TLS: keep it on a loopback or private address.
 listen = "127.0.0.1:8080"
-# Or terminate TLS here (certificates are read at startup):
+# Or terminate TLS here (reloaded on SIGHUP):
 # tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/countersign/tls/key.pem" }
-# 32+ random bytes, e.g. `head -c 64 /dev/urandom > session.key`. Without it,
-# web sessions end whenever the daemon restarts.
+# 32+ random bytes, e.g. `countersign keygen /etc/countersign/session.key`.
+# Without it, web sessions end whenever the daemon restarts.
 session_key_file = "/etc/countersign/session.key"
 session_ttl = "12h"
 # A decision is `fresh-auth` while the IdP sign-in is at most this old.
@@ -35,6 +35,8 @@ issuer = "https://id.example.com"
 client_id = "00000000-0000-0000-0000-000000000000"
 # Or set COUNTERSIGN_OIDC_CLIENT_SECRET.
 client_secret_file = "/etc/countersign/oidc-client-secret"
+# Default scopes are ["profile", "email"]; add "groups" when using [[group]] from_idp.
+# scopes = ["profile", "email", "groups"]
 
 [store]
 path = "/var/lib/countersign/countersign.db"
@@ -122,6 +124,7 @@ actor = "deploy-agent"
 #   claims = { repository = "example/*", environment = "prod" },
 #   initiator_claim = "actor_id",
 #   initiator_scheme = "github",
+#   # jwks_uri = "https://token.actions.githubusercontent.com/.well-known/jwks", # optional; skips discovery
 # } }
 # scopes = ["question"]
 # actor = "deploy-agent"
@@ -151,6 +154,7 @@ type = "log"
 # url = "https://hooks.example.com/countersign"
 # secret_file = "/etc/countersign/webhook-secret"    # "whsec_<base64>" or raw bytes (>= 16)
 # bearer_token_file = "/etc/countersign/hook-token"  # optional
+# unsigned = false                                   # set true only if omitting secret_file
 
 # Discord: requests are posted with Approve/Deny buttons; presses arrive over
 # the bot's Gateway connection (outbound only). The bot needs View Channel,
@@ -232,13 +236,19 @@ admin = ["person:alice"]
 # auditor = ["group:security"]
 
 # ------------------------------------------------------------------ policies
+# Available `match` fields: backend, source, kind, requester, requester_identity,
+# requester_group, backend_group, target, attributes = { key = "glob*" }.
 [[policy]]
 name = "elevated-agents"
 match = { backend = "oct-main", requester_group = "agents" }
 approvers = ["group:approvers"]
+# Number of distinct eligible persons required to approve (default: 1).
+# quorum = 2
 # Who may not decide although selected: "requester" (default), "owners" of
 # the requesting workload, "initiator" of the request.
 exclude = ["requester", "owners", "initiator"]
+# Refuse requests that do not carry a recognized initiator (default: false).
+# require_initiator = false
 max_ttl = "30m"
 default_ttl = "15m"
 pending_timeout = "10m"
@@ -275,6 +285,7 @@ sensitive = "honor" # `countersign-sudo run --sensitive -- ...`
 
 # Questions from clients with the "question" scope. An answer is information
 # for the asker, never access: it grants nothing.
+# Available `match` fields: asker (client id glob), asker_actor (actor id glob).
 [[question_policy]]
 name = "agent-questions"
 match = { asker = "agent-bridge" }
@@ -283,6 +294,8 @@ min_assurance = "linked"
 answer_timeout = "30m"
 max_pending = 5
 # allow_self_answer = false     # let the person a client asks for answer its questions
+# Route notifications only to specific channels (omit to notify all channels).
+# channels = ["slack", "webpush"]
 # Confidential questions: "deny" (default), "allow", or "require". Their text
 # and answers stay out of chat and logs and are removed once no longer needed.
 confidential = "allow"

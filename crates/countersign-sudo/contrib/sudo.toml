@@ -36,5 +36,11 @@ key_file = "/etc/countersign/host.key"
 timeout = "5m"
 
 # Programs accepted as the calling sudo (the helper refuses to run for
-# anything else). The defaults cover sudo and sudo-rs on Debian and Ubuntu.
-# sudo_binaries = ["/usr/bin/sudo", "/usr/lib/cargo/bin/sudo"]
+# anything else). The defaults cover sudo, sudoedit, and sudo-rs on Debian/Ubuntu.
+# sudo_binaries = [
+#   "/usr/bin/sudo",
+#   "/usr/bin/sudoedit",
+#   "/usr/bin/sudo-rs",
+#   "/usr/lib/cargo/bin/sudo",
+#   "/usr/lib/cargo/bin/sudoedit",
+# ]

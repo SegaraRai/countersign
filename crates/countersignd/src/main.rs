@@ -173,15 +173,19 @@ async fn run(path: PathBuf, config: Config) -> Result<(), Box<dyn std::error::Er
     wait_for_shutdown(&path, &config, &daemon, &tls_reloaders).await;
     info!("shutting down");
     let _ = stop_tx.send(true);
-    let _ = tokio::join!(ticker, delivery, server);
-    if let Some(i) = intake {
-        let _ = i.await;
-    }
-    if let Some(m) = metrics_server {
-        let _ = m.await;
-    }
-    for r in receivers {
-        let _ = r.await;
+    let mut tasks = vec![ticker, delivery, server];
+    tasks.extend(intake);
+    tasks.extend(metrics_server);
+    tasks.extend(receivers);
+    if tokio::time::timeout(Duration::from_secs(10), async {
+        for task in tasks {
+            let _ = task.await;
+        }
+    })
+    .await
+    .is_err()
+    {
+        warn!("graceful shutdown timed out after 10s; exiting");
     }
     Ok(())
 }
@@ -301,13 +305,16 @@ fn reload(
     match Config::load(path) {
         Ok(new) => {
             if new.server != running.server
-                || new.store != running.store
+                || new.auth != running.auth
+                || new.store.path != running.store.path
                 || new.engine.poll_interval != running.engine.poll_interval
                 || new.backends != running.backends
                 || new.intake != running.intake
                 || new.channels != running.channels
             {
-                warn!("server, store, engine timing, backend, intake and channel changes take effect after a restart");
+                warn!(
+                    "server, auth, store.path, engine.poll_interval, backend, intake and channel changes take effect after a restart"
+                );
             }
             daemon.engine.set_rules(rules_from(&new));
             info!(
