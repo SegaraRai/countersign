@@ -199,6 +199,15 @@ Approve only when the action and claims are shown in full and assurance
 allows it; otherwise "Approve in web UI" plus Deny. Withheld: headline, From,
 Policy, deadline, link.
 
+**Slack** (Block Kit): same layout and safety rules as Discord (Approve/Deny
+or single-field answer buttons when shown in full and assurance permits,
+otherwise a link to the web UI; withheld requests show only headline, From,
+Policy, and link).
+
+**Web Push**: delivered only to eligible active approvers/responders. By
+default (`details = false`), shows only a safe title on lock screens; clicking
+opens the request page in the web UI / installed PWA.
+
 **ntfy**: title = headline; message = grant sentence and, with `details`,
 the first line of the command and the reason; click opens the web UI.
 
@@ -284,11 +293,12 @@ Waiting for approval — Sensitive approval request from web-1 (agent-sudo)
   submission shape; hosts need the new helper.)
 - Backends set `facts.action`; `Use.action` keeps the line of each command
   run under a window.
-- Discord, ntfy, webhook (`presentation` in the payload), the web UI request
-  and list pages, the question page header and the CLI (`show --verbose`,
-  `show --json` = `{approval|question, presentation}`) use it. Times: the
-  web UI and CLI show UTC with a relative time, Discord its own `<t:…>`
-  tags.
+- Discord, Slack, Web Push, ntfy, webhook (`presentation` in the payload), the
+  web UI request and list pages, the question page header and the CLI
+  (`show --verbose`, `show --json` = `{approval|question, presentation}`) use
+  it. Times: the web UI renders UTC in SSR and switches to the viewer's local
+  time zone on hydration with a relative time, the CLI shows UTC, and Discord
+  uses `<t:…>` tags.
 
 ## Open questions
 

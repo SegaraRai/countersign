@@ -25,14 +25,14 @@ particular network, identity provider or access system; see
 ```
                  ┌──────────── countersign-core ─────────────┐
 AccessBackend ◀─▶│ request state machine · policy · events   │◀── PolicySet
-(host/sudo, exec,│ questions · outbox                         │
+(host/sudo, exec,│ questions · outbox                        │
  Octelium)       │                                            │
                  └───────▲──────────────────────▲────────────┘
                          │                      │
              Channel (notify + decide)    Authenticator (web approvers)
-        (ntfy, webhook, Discord, Slack)          (OIDC)
+     (Discord, Slack, Web Push, ntfy, webhook)   (OIDC)
                          │
-                       Store (SQLite, Postgres)
+                       Store (SQLite)
 ```
 
 - **Backends** hold the actual access. countersign re-reads facts from the
@@ -154,7 +154,18 @@ countersign links                     # chat accounts linked to persons
 countersign unlink discord 123456789012345678 --as alice
 countersign keygen /etc/countersign/session.key            # 256-bit hex
 countersign keygen /etc/countersign/webhook-secret --format whsec
+countersign signing-key /etc/countersign/signing.key       # approval signing key (cssk_…)
+countersign vapid-key /etc/countersign/vapid.key           # Web Push VAPID key (csvk_…)
 countersign host-key /etc/countersign/host.key             # on a client; prints its [[client]] auth line
+```
+
+To ask a human a structured question from CI or a script:
+
+```sh
+countersign-ask --server https://countersign.example.com:8443 \
+  --github-oidc \
+  --message "Deploy v1.2.3 to production?" \
+  --yes-no
 ```
 
 Approving and answering are intentionally not possible from the CLI; they go
@@ -174,8 +185,20 @@ their key alone; `allowed_ips` is an optional extra. Approvals are signed by
 countersign, and `countersign-sudo` checks the signature against a pinned
 public key, so nothing in between can approve a `sudo`.
 
-See [`crates/countersignd/config.example.toml`](crates/countersignd/config.example.toml)
-and [`docs/design/deployment.md`](docs/design/deployment.md).
+## Documentation
+
+- **Configuration & deployment**
+  - [`crates/countersignd/config.example.toml`](crates/countersignd/config.example.toml) — annotated server configuration reference
+  - [`docs/guides/deployment.md`](docs/guides/deployment.md) — systemd, Docker, reverse proxy (`/intake/` + `/mcp`), SIGHUP reload, and Prometheus metrics
+  - [`docs/guides/sudo-host-setup.md`](docs/guides/sudo-host-setup.md) — installing and verifying `countersign-sudo` on Linux hosts (with [`contrib/`](crates/countersign-sudo/contrib/) examples)
+  - [`docs/guides/ci-questions.md`](docs/guides/ci-questions.md) — using `countersign-ask` and CI OIDC JWTs in pipelines
+  - [`deploy/systemd/countersignd.service`](deploy/systemd/countersignd.service) & [`Dockerfile`](Dockerfile)
+- **Design documents**
+  - [`docs/design/deployment.md`](docs/design/deployment.md) — platform boundaries, TLS modes, and connectors
+  - [`docs/design/identity-model.md`](docs/design/identity-model.md) — persons, workloads, identities, groups, roles, and exclusions
+  - [`docs/design/questions.md`](docs/design/questions.md) — structured questions, MCP server, and confidentiality
+  - [`docs/design/presentation.md`](docs/design/presentation.md) — unified presentation model across all surfaces
+  - [`docs/design/sudo-approval.md`](docs/design/sudo-approval.md) — `sudo` PAM flow, signed approvals, and windows
 
 ## License
 

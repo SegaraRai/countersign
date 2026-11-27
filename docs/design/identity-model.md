@@ -1,12 +1,10 @@
 # Design: people, workloads, identities, groups, roles and relationships
 
-Status: implemented, except CI OIDC client authentication
-(`ClientAuth::Oidc`; clients authenticate with host keys only), notifying all
-channels on suspension and bulk revoke (both are recorded in the admin log
-and shown on the admin page), and break-glass policies. Exclusions are a
-policy's `exclude` list (`requester`, `owners`, `initiator`; default
-`["requester"]`), and `require_initiator` refuses requests whose source names
-no initiator.
+Status: implemented — including persons, workloads, groups (with IdP `from_idp`
+mappings), roles, exclusions (`exclude = ["requester", "owners", "initiator"]`),
+`require_initiator`, CI OIDC client authentication (`ClientAuth::Oidc`), admin
+channel notices on suspension/bulk revoke/break-glass, and emergency
+`break-glass` approval (`POST /api/requests/{id}/break-glass`).
 
 This replaced the earlier `[[approver]]` entries (id, groups, identity
 strings) and requesters described only by the backend. countersign is
@@ -113,9 +111,9 @@ behind an Octelium session. It is matched against `Recognition` identities
 | Involved                     | What it is                                                                                          |
 | ---------------------------- | --------------------------------------------------------------------------------------------------- |
 | **Decider**                  | an Active **person**; never a workload                                                              |
-| **Identity used**            | the account they act through: `SignIn` (web UI, OIDC session) or `Chat` (Discord)                   |
-| **Assurance**                | what that identity and session prove now: `linked` (chat), `session`, `fresh-auth` (recent passkey) |
-| **Channel**                  | where the decision was made (web, Discord)                                                          |
+| **Identity used**            | the account they act through: `SignIn` (web UI, OIDC session) or `Chat` (Discord, Slack)     |
+| **Assurance**                | what that identity and session prove now: `linked` (chat), `web`, `fresh-auth` (recent login)|
+| **Channel**                  | where the decision was made (web, Discord, Slack)                                            |
 | **Eligibility**              | the policy's selectors frozen with the request, current group membership and status, exclusions     |
 | **Relations to the request** | same person as the requester? owner of the requester? the initiator?                                |
 

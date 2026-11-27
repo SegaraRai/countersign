@@ -17,8 +17,8 @@ what it needs, how it is exposed, and which boundaries keep it that way.
    directly or through a reverse proxy or tunnel. Only one address is needed:
    the web UI and the intake API may share a proxy, or each listen on its own
    port.
-3. **Somewhere to send notifications**: a chat channel, an ntfy topic or a
-   webhook receiver.
+3. **Somewhere to send notifications**: a chat channel (Discord, Slack),
+   browser Web Push, an ntfy topic, or a webhook receiver.
 
 Nothing else is required. Access systems (backends) are optional: without
 one, countersign still handles sudo approval for hosts running
@@ -46,8 +46,8 @@ HTTPS in one of two ways:
 
 - **countersign terminates TLS**: `tls = { cert_file, key_file }` (PEM;
   PKCS#8, PKCS#1 or SEC1 keys). The listener may then use any address,
-  including a public one. Certificates are read at startup; restart the
-  daemon after renewing them.
+  including a public one. Certificates are reloaded without restarting on
+  `SIGHUP` (`systemctl reload countersignd`).
 - **Something in front terminates TLS**: a reverse proxy (Caddy, nginx), a
   tunnel, or a mesh VPN's HTTPS feature. The listener serves plain HTTP and
   must sit on a loopback or private address. For `[intake]` this is stated
@@ -60,8 +60,9 @@ whenever it is HTTPS.
 
 ### Client authentication does not depend on the network
 
-Clients authenticate with their key alone (`cshk_…`, sent as a bearer token
-and compared by hash). The network is not trusted for anything:
+Clients authenticate with either a static host key (`cshk_…`, sent as a
+bearer token and compared by hash) or a CI OIDC JWT (`auth = { oidc = { … } }`,
+verified via JWKS). The network is not trusted for anything:
 
 - the key is only ever sent over TLS (`countersign-sudo` refuses an
   `http://` server other than this machine, and follows no redirects);
@@ -89,8 +90,12 @@ These are examples, not requirements:
 - **Public with its own certificate**: `[intake] listen = "0.0.0.0:8443"`
   with `tls`, the web UI behind a reverse proxy on 443.
 - **Reverse proxy on the same host**: both listeners on `127.0.0.1`, the
-  proxy terminates TLS for one hostname and routes `/intake/` to the intake
-  listener (`behind_proxy = true`).
+  proxy terminates TLS for one hostname and routes `/intake/` and `/mcp` to
+  the intake listener (`behind_proxy = true`).
+- **Containers**: bind `[server].listen` to a reachable interface with `tls`
+  (or a container bridge IP behind a proxy). Because `[intake]` with
+  `behind_proxy = true` refuses `0.0.0.0`, either terminate TLS inside the
+  container or bind `[intake].listen` to the container's private IP.
 - **Mesh VPN** (Tailscale, WireGuard, …): the listeners on the VPN address
   with `tls` (e.g. a certificate the VPN issues), so hosts reach the intake
   API without any public port. The VPN is defence in depth; the key is still
@@ -155,17 +160,17 @@ The `Channel` trait has `notify`, `update` and an optional long-running
 `run` for receiving actions. Channels differ along two axes, and adapters
 are expected for each combination:
 
-|                               | how people act               | how actions arrive                       |
-| ----------------------------- | ---------------------------- | ---------------------------------------- |
-| link-only (ntfy today, email) | open the web UI              | —                                        |
-| buttons (Discord, Slack)      | press a button in chat       | persistent connection, or HTTP callbacks |
-| webhook (Standard Webhooks)   | a program decides what to do | —                                        |
+|                                          | how people act               | how actions arrive                       |
+| ---------------------------------------- | ---------------------------- | ---------------------------------------- |
+| link-only (Web Push, ntfy, email)        | open the web UI              | —                                        |
+| buttons (Discord, Slack)                 | press a button in chat       | persistent connection, or HTTP callbacks |
+| webhook (Standard Webhooks)              | a program decides what to do | —                                        |
 
 How actions arrive:
 
 - **Persistent connection** (Discord Gateway, Slack Socket Mode): the channel
-  connects out from `run`. No inbound endpoint is needed; this is what the
-  Discord channel does today.
+  connects out from `run`. No inbound endpoint is needed; this is what both
+  the Discord and Slack channels do today.
 - **HTTP callbacks** (Discord HTTP Interactions, Slack's request URLs): the
   platform calls countersign. This needs an inbound route on the public
   address, with the platform's signature checked before anything is parsed.

@@ -1,8 +1,10 @@
 # Design: approving `sudo` on target hosts
 
 Status: implemented — countersign side (intake API, `host` backend, grant
-modes) and the host helper (`countersign-sudo`, with PAM, sudoers and config
-examples in `crates/countersign-sudo/contrib/`). Not yet tried on a real host.
+modes, signed approvals) and the host helper (`countersign-sudo`, with PAM,
+sudoers and config examples in `crates/countersign-sudo/contrib/`). For
+step-by-step installation and verification on a Linux host, see
+[`docs/guides/sudo-host-setup.md`](../guides/sudo-host-setup.md).
 
 ## Goal
 
@@ -49,7 +51,7 @@ both `sudo` and `sudo-rs`. Both read `/etc/pam.d/sudo` (and `sudo-i` for
 
 ```sudoers
 # The agent must authenticate for every sudo, so every sudo reaches PAM.
-agent   ALL=(ALL) NOSETENV: ALL
+agent   ALL=(ALL:ALL) NOSETENV: ALL
 Defaults:agent timestamp_timeout=0
 # sudo -n (and sudo without a terminal) only reaches PAM with this.
 Defaults:agent noninteractive_auth
@@ -142,7 +144,7 @@ path names, customer identifiers). The caller can ask for that with
 
 What it changes — display only:
 
-- Discord, ntfy and webhooks get "Sensitive approval request from
+- Discord, Slack, Web Push, ntfy and webhooks get "Sensitive approval request from
   &lt;host&gt; (&lt;policy&gt;)" and countersign's link, nothing from the
   command line. Approving happens in the web UI only, as for commands too long
   for chat.
@@ -384,7 +386,7 @@ New policy field:
 ```toml
 [[policy]]
 name = "sudo-packages"
-match = { backend = "host", attributes = { command = "apt *" } }
+match = { backend = "sudo", attributes = { command = "apt *" } }
 grant = "window" # "once" (default) | "window"
 max_ttl = "15m"
 approvers = ["group:approvers"]
@@ -393,7 +395,7 @@ pending_timeout = "5m"
 
 [[policy]]
 name = "sudo-other"
-match = { backend = "host" }
+match = { backend = "sudo" }
 grant = "once"
 max_ttl = "1m" # time for the helper to collect the answer
 approvers = ["group:approvers"]

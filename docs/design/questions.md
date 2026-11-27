@@ -1,12 +1,14 @@
 # Design: questions alongside approvals
 
-Status: implemented. Step 6 became an MCP endpoint in the intake API
-(`POST /mcp`, below) instead of a separate bridge; there is no
-`countersign ask` CLI. One deviation from the model below: a question is its own
-type (`Question`), not a `RequestKind` variant inside `Request`. Both are
-stored in the `requests` table with a `kind` column, and the engine's grant,
-revoke and window code takes a `Request`, which a question cannot be, so the
-type system keeps questions out of those paths.
+Status: implemented — including REST intake (`/intake/v1/questions`), Streamable
+HTTP MCP (`POST /mcp`), the standalone `countersign-ask` CLI (with host keys and
+GitHub Actions OIDC), Slack/Discord in-place buttons, Web Push/ntfy/webhook
+notifications, confidentiality, and `store.retention` cleanup. One deviation
+from the sketch below: a question is its own type (`Question`), not a
+`RequestKind` variant inside `Request`. Both are stored in the `requests` table
+with a `kind` column, and the engine's grant, revoke and window code takes a
+`Request`, which a question cannot be, so the type system keeps questions out
+of those paths.
 
 ## Goal
 
@@ -150,7 +152,7 @@ answer_timeout = "30m"
 max_pending = 5 # per asker
 confidential = "allow" # "deny" (default) | "allow" | "require"
 confidential_min_assurance = "fresh-auth"
-answer_retention = "7d" # how long a confidential answer stays readable by the asker
+answer_retention = "24h" # how long a confidential answer stays readable by the asker (default: 24h)
 ```
 
 `[[policy]]` (approvals) is unchanged. A question matching no
@@ -275,7 +277,7 @@ in backups until those expire.
 
 ### Where it is shown
 
-- Chat channels (Discord, ntfy, webhook) never get confidential text:
+- Channels (Discord, Slack, Web Push, ntfy, webhook) never get confidential text:
   - A confidential question is announced as "Confidential question from
     &lt;asker&gt; (&lt;policy&gt;)" with only countersign's link, and it can
     only be answered in the web UI.
@@ -345,9 +347,9 @@ The message and schema text come from the asker and are untrusted.
   This stops a question from passing itself off as an approval ("Approve
   sudo on web-1?").
 
-- Discord can answer in place only for schemas that fit its components
-  (a single enum or boolean). Anything else links to the web form, the same
-  way long commands do today.
+- Discord and Slack can answer in place only for schemas that fit their
+  components (a single required boolean or choice with up to 4 options).
+  Anything else links to the web form, the same way long commands do today.
 
 ### What answers contain
 
@@ -398,5 +400,3 @@ The message and schema text come from the asker and are untrusted.
   countersign's store).
 - Whether a question may carry a follow-up approval in one step ("pick a
   branch, then approve the deploy"): kept as two requests for now.
-- Retention of non-confidential answers: they follow the same cleanup as
-  finished requests once that exists.

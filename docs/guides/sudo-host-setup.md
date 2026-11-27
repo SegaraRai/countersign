@@ -42,7 +42,7 @@ Install `crates/countersign-sudo/contrib/sudoers` as
 your automated user:
 
 ```sudoers
-agent ALL=(ALL) NOSETENV: ALL
+agent ALL=(ALL:ALL) NOSETENV: ALL
 Defaults:agent timestamp_timeout=0
 Defaults:agent noninteractive_auth
 ```
