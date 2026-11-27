@@ -202,6 +202,7 @@ impl Engine {
     /// checked against the new directory from now on.
     pub fn set_rules(&self, rules: Rules) {
         *self.rules.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(rules);
+        self.unmatched_seen.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     }
 
     /// The rules and the current standing (suspensions, sign-in groups).
@@ -590,25 +591,36 @@ impl Engine {
 
     async fn revoke_unchecked(
         &self,
-        mut r: Request,
+        initial: Request,
         by: Option<ActorId>,
         now: Timestamp,
     ) -> Result<Request, EngineError> {
-        let v = r.version;
-        let events = r.revoke(by.clone(), now)?;
-        let backend = self.backend(&r.subject.backend)?;
-        if let Some(g) = &r.grant {
-            if backend.capabilities().revoke {
-                backend.revoke(g).await?;
-            } else {
-                return Err(BackendError::Unsupported.into());
+        let id = initial.id;
+        let mut r = initial;
+        let mut revoked_at_backend = false;
+        for attempt in 0..CONFLICT_RETRIES {
+            if attempt > 0 {
+                r = self.store.get_request(id).await?.ok_or(EngineError::UnknownRequest(id))?;
+            }
+            let v = r.version;
+            let events = r.revoke(by.clone(), now)?;
+            if !revoked_at_backend {
+                let backend = self.backend(&r.subject.backend)?;
+                if let Some(g) = &r.grant {
+                    if backend.capabilities().revoke {
+                        backend.revoke(g).await?;
+                        revoked_at_backend = true;
+                    } else {
+                        return Err(BackendError::Unsupported.into());
+                    }
+                }
+            }
+            if self.save(&r, v, &events).await? {
+                info!(request = %r.id, by = ?by, "grant revoked");
+                return Ok(r);
             }
         }
-        if !self.save(&r, v, &events).await? {
-            return Err(EngineError::Busy);
-        }
-        info!(request = %r.id, by = ?by, "grant revoked");
-        Ok(r)
+        Err(EngineError::Busy)
     }
 
     /// Re-verify the subject and grant access. Transient backend failures

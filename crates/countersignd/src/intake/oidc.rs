@@ -19,6 +19,8 @@ use crate::config::OidcClientAuth;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const JWKS_TTL_SECS: i64 = 600;
+const JWKS_REFRESH_COOLDOWN_SECS: i64 = 30;
+const MAX_OIDC_RESPONSE_BYTES: usize = 256 * 1024;
 const CLOCK_SKEW_SECS: i64 = 30;
 
 /// Verified identity and claims extracted from a CI OIDC token.
@@ -71,6 +73,7 @@ struct Discovery {
 #[derive(Debug, Clone)]
 struct CachedJwks {
     jwks: JwkSet,
+    fetched_at: i64,
     expires_at: i64,
 }
 
@@ -119,17 +122,35 @@ impl OidcVerifier {
 
     /// Cryptographically verify `token` against `config` at `now`.
     pub async fn verify(&self, token: &str, config: &OidcClientAuth, now: Timestamp) -> Result<VerifiedOidc, String> {
-        let jwks = self.fetch_jwks(config, now).await?;
-        verify_with_jwks(token, config, &jwks, now)
+        let (jwks, from_cache) = self.fetch_jwks(config, now, false).await?;
+        match verify_with_jwks(token, config, &jwks, now) {
+            Ok(verified) => Ok(verified),
+            Err(_err) if from_cache && needs_jwks_refresh(token, &jwks) => {
+                let (fresh, _) = self.fetch_jwks(config, now, true).await?;
+                verify_with_jwks(token, config, &fresh, now)
+            }
+            Err(err) => Err(err),
+        }
     }
 
-    async fn fetch_jwks(&self, config: &OidcClientAuth, now: Timestamp) -> Result<JwkSet, String> {
+    async fn fetch_jwks(
+        &self,
+        config: &OidcClientAuth,
+        now: Timestamp,
+        force_refresh: bool,
+    ) -> Result<(JwkSet, bool), String> {
         let cache_key = config.jwks_uri.as_deref().unwrap_or(&config.issuer);
         if let Some(entry) =
             self.cache.read().unwrap_or_else(std::sync::PoisonError::into_inner).get(cache_key).cloned()
-            && now.as_second() < entry.expires_at
         {
-            return Ok(entry.jwks);
+            let fresh_enough = if force_refresh {
+                now.as_second().saturating_sub(entry.fetched_at) < JWKS_REFRESH_COOLDOWN_SECS
+            } else {
+                now.as_second() < entry.expires_at
+            };
+            if fresh_enough {
+                return Ok((entry.jwks, true));
+            }
         }
 
         let jwks_uri = if let Some(u) = &config.jwks_uri {
@@ -145,7 +166,8 @@ impl OidcVerifier {
             if !resp.status().is_success() {
                 return Err(format!("OIDC discovery returned {}", resp.status()));
             }
-            let disc: Discovery = resp.json().await.map_err(|e| format!("invalid OIDC discovery: {e}"))?;
+            let bytes = read_capped_body(resp, "OIDC discovery").await?;
+            let disc: Discovery = serde_json::from_slice(&bytes).map_err(|e| format!("invalid OIDC discovery: {e}"))?;
             if !countersign_core::url::is_secure(&disc.jwks_uri) {
                 return Err("OIDC discovery returned non-HTTPS jwks_uri".to_owned());
             }
@@ -157,14 +179,38 @@ impl OidcVerifier {
         if !resp.status().is_success() {
             return Err(format!("JWKS endpoint returned {}", resp.status()));
         }
-        let jwks: JwkSet = resp.json().await.map_err(|e| format!("invalid JWKS: {e}"))?;
-        let expires_at = now.as_second().saturating_add(JWKS_TTL_SECS);
+        let bytes = read_capped_body(resp, "JWKS").await?;
+        let jwks: JwkSet = serde_json::from_slice(&bytes).map_err(|e| format!("invalid JWKS: {e}"))?;
+        let fetched_at = now.as_second();
+        let expires_at = fetched_at.saturating_add(JWKS_TTL_SECS);
         self.cache
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(cache_key.to_owned(), CachedJwks { jwks: jwks.clone(), expires_at });
-        Ok(jwks)
+            .insert(cache_key.to_owned(), CachedJwks { jwks: jwks.clone(), fetched_at, expires_at });
+        Ok((jwks, false))
     }
+}
+
+async fn read_capped_body(mut resp: reqwest::Response, label: &str) -> Result<Vec<u8>, String> {
+    if resp.content_length().is_some_and(|n| n > MAX_OIDC_RESPONSE_BYTES as u64) {
+        return Err(format!("{label} response exceeds {MAX_OIDC_RESPONSE_BYTES} bytes"));
+    }
+    let mut buf = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("reading {label} failed: {}", e.without_url()))? {
+        if buf.len().saturating_add(chunk.len()) > MAX_OIDC_RESPONSE_BYTES {
+            return Err(format!("{label} response exceeds {MAX_OIDC_RESPONSE_BYTES} bytes"));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    Ok(buf)
+}
+
+fn needs_jwks_refresh(token: &str, jwks: &JwkSet) -> bool {
+    let Some(header_b64) = token.split('.').next() else { return false };
+    let Some(bytes) = decode_b64url(header_b64) else { return false };
+    let Ok(header) = serde_json::from_slice::<JwtHeader>(&bytes) else { return false };
+    let Some(kid) = header.kid else { return false };
+    !jwks.keys.iter().any(|k| k.kid.as_deref() == Some(kid.as_str()))
 }
 
 pub(crate) fn verify_with_jwks(

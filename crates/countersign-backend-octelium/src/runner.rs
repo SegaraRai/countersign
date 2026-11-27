@@ -7,6 +7,12 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::io::{AsyncRead, AsyncReadExt as _};
+
+/// Upper bound on bytes read from `octeliumctl`'s stdout (4 MiB).
+const MAX_STDOUT: usize = 4 * 1024 * 1024;
+/// Upper bound on bytes read from `octeliumctl`'s stderr (64 KiB).
+const MAX_STDERR: usize = 64 * 1024;
 
 /// Result of one command invocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -62,14 +68,42 @@ impl Runner for ProcessRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let out = match tokio::time::timeout(self.timeout, cmd.output()).await {
-            Ok(r) => r.map_err(RunError::Spawn)?,
-            Err(_) => return Err(RunError::Timeout(self.timeout)),
+        let mut child = cmd.spawn().map_err(RunError::Spawn)?;
+        let Some(stdout) = child.stdout.take() else {
+            return Err(RunError::Spawn(std::io::Error::other("stdout was not piped")));
         };
-        Ok(CmdOutput {
-            success: out.status.success(),
-            stdout: out.stdout,
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
+        let Some(stderr) = child.stderr.take() else {
+            return Err(RunError::Spawn(std::io::Error::other("stderr was not piped")));
+        };
+        let run = async {
+            let (out, err, status) =
+                tokio::join!(read_bounded(stdout, MAX_STDOUT), read_bounded(stderr, MAX_STDERR), child.wait());
+            let status = status.map_err(RunError::Spawn)?;
+            let stdout = out.map_err(RunError::Spawn)?;
+            let stderr = err.map_err(RunError::Spawn)?;
+            Ok(CmdOutput { success: status.success(), stdout, stderr: String::from_utf8_lossy(&stderr).into_owned() })
+        };
+        if let Ok(r) = tokio::time::timeout(self.timeout, run).await {
+            r
+        } else {
+            let _ = child.kill().await;
+            Err(RunError::Timeout(self.timeout))
+        }
     }
+}
+
+async fn read_bounded(mut reader: impl AsyncRead + Unpin, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut chunk = vec![0u8; 8192];
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        let room = limit.saturating_sub(buf.len());
+        if room > 0 {
+            buf.extend_from_slice(&chunk[..n.min(room)]);
+        }
+    }
+    Ok(buf)
 }

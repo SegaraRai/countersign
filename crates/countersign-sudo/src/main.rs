@@ -107,15 +107,18 @@ fn open_caller_stderr(pid: u32) -> Option<std::fs::File> {
         return None;
     }
     let link = format!("/proc/{pid}/fd/2");
+    use std::os::unix::fs::OpenOptionsExt as _;
+    // Open before inspecting with fstat so a swapped target cannot race the check.
+    let file =
+        std::fs::OpenOptions::new().append(true).custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK).open(&link).ok()?;
+    let kind = file.metadata().ok()?.file_type();
+    if kind.is_fifo() {
+        return Some(file);
+    }
     let target = std::fs::read_link(&link).ok()?;
-    let kind = std::fs::metadata(&link).ok()?.file_type();
     let terminal = kind.is_char_device()
         && target.to_str().is_some_and(|t| t.starts_with("/dev/pts/") || t.starts_with("/dev/tty"));
-    if !(kind.is_fifo() || terminal) {
-        return None;
-    }
-    use std::os::unix::fs::OpenOptionsExt as _;
-    std::fs::OpenOptions::new().append(true).custom_flags(libc::O_NOCTTY).open(&link).ok()
+    terminal.then_some(file)
 }
 
 /// Resolve when the first of several futures does.

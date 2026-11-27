@@ -21,6 +21,8 @@ use crate::metrics::Metrics;
 const BATCH: u32 = 32;
 const LEASE: Duration = Duration::from_secs(60);
 const MAX_ATTEMPTS: u32 = 12;
+const CHANNEL_TIMEOUT: Duration = Duration::from_secs(30);
+const ADMIN_NOTICE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct Dispatcher {
     store: Arc<dyn Store>,
@@ -113,6 +115,7 @@ impl Dispatcher {
 
         let allowed = subject.channels();
         let mut retry = false;
+        let mut tasks = Vec::new();
         for ch in &self.channels {
             if !allowed.is_empty() && !allowed.contains(ch.name()) {
                 continue;
@@ -121,30 +124,48 @@ impl Dispatcher {
                 continue;
             }
             let existing = refs.iter().find(|m| &m.channel == ch.name());
-            let result = match existing {
+            let action = match existing {
                 // Already announced (this is a retry).
                 Some(_) if is_new => continue,
-                Some(m) if ch.capabilities().update => ch.update(m, n).await.map(|()| None),
-                _ if worth_a_new_message(&item.event) => ch.notify(n).await,
+                Some(m) if ch.capabilities().update => Some(m),
+                _ if worth_a_new_message(&item.event) => None,
                 _ => continue,
             };
+            tasks.push(async move {
+                let fut = async {
+                    match action {
+                        Some(m) => ch.update(m, n).await.map(|()| None),
+                        None => ch.notify(n).await,
+                    }
+                };
+                let outcome = tokio::time::timeout(CHANNEL_TIMEOUT, fut)
+                    .await
+                    .unwrap_or_else(|_| Err(ChannelError::Unavailable("delivery timed out".into())));
+                (ch.name(), outcome)
+            });
+        }
+        let results: Vec<_> = tasks.into_iter().map(Box::pin).collect();
+        // Drive all eligible channels concurrently so one slow endpoint never
+        // stalls delivery to other channels.
+        let outcomes = join_all_pinned(results).await;
+        for (channel, result) in outcomes {
             match result {
                 Ok(msg) => {
                     if let Some(msg) = msg {
                         self.store.save_message_ref(request_id, &msg).await?;
                     }
-                    self.store.mark_delivered(item.id, ch.name()).await?;
+                    self.store.mark_delivered(item.id, channel).await?;
                     self.metrics.record_outbox_ok();
                 }
                 Err(e) if e.is_retryable() => {
-                    debug!(channel = %ch.name(), error = %e, "delivery failed; will retry");
+                    debug!(channel = %channel, error = %e, "delivery failed; will retry");
                     self.metrics.record_outbox_retry();
                     retry = true;
                 }
                 Err(e) => {
                     // Permanent for this channel: do not retry it.
-                    warn!(channel = %ch.name(), event = item.event.kind(), error = %e, "delivery failed");
-                    self.store.mark_delivered(item.id, ch.name()).await?;
+                    warn!(channel = %channel, event = item.event.kind(), error = %e, "delivery failed");
+                    self.store.mark_delivered(item.id, channel).await?;
                     self.metrics.record_outbox_failed();
                 }
             }
@@ -153,7 +174,7 @@ impl Dispatcher {
     }
 
     /// Announce a high-visibility administrative action (e.g. suspension or
-    /// bulk revoke) to every configured channel.
+    /// bulk revoke) to every configured channel concurrently.
     pub async fn announce_admin(&self, action: &AdminAction) {
         let notice = AdminNotice {
             event_id: EventId::new(),
@@ -164,12 +185,41 @@ impl Dispatcher {
             at: action.at,
             web_url: format!("{}/admin", self.public_url),
         };
-        for ch in &self.channels {
-            if let Err(e) = ch.announce(&notice).await {
-                warn!(channel = %ch.name(), action = %action.action, error = %e, "could not announce admin notice");
+        let notice = &notice;
+        let tasks: Vec<_> = self
+            .channels
+            .iter()
+            .map(|ch| {
+                Box::pin(async move {
+                    let res = tokio::time::timeout(ADMIN_NOTICE_TIMEOUT, ch.announce(notice))
+                        .await
+                        .unwrap_or_else(|_| Err(ChannelError::Unavailable("admin notice timed out".into())));
+                    if let Err(e) = res {
+                        warn!(channel = %ch.name(), action = %action.action, error = %e, "could not announce admin notice");
+                    }
+                })
+            })
+            .collect();
+        let _ = join_all_pinned(tasks).await;
+    }
+}
+
+async fn join_all_pinned<F: Future + Unpin>(mut futs: Vec<F>) -> Vec<F::Output> {
+    let mut results: Vec<Option<F::Output>> = (0..futs.len()).map(|_| None).collect();
+    std::future::poll_fn(|cx| {
+        let mut all_done = true;
+        for (i, fut) in futs.iter_mut().enumerate() {
+            if results[i].is_none() {
+                match std::pin::Pin::new(fut).poll(cx) {
+                    std::task::Poll::Ready(val) => results[i] = Some(val),
+                    std::task::Poll::Pending => all_done = false,
+                }
             }
         }
-    }
+        if all_done { std::task::Poll::Ready(()) } else { std::task::Poll::Pending }
+    })
+    .await;
+    results.into_iter().map(Option::unwrap).collect()
 }
 
 /// A channel that writes to the daemon log.

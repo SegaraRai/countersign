@@ -32,6 +32,9 @@ pub const EXIT_WITHDRAWN: u8 = 4;
 
 const POLL_WAIT_SECS: u64 = 50;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(70);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const WITHDRAW_TIMEOUT: Duration = Duration::from_secs(5);
+const POLL_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -143,6 +146,28 @@ pub struct QuestionResponse {
     pub answered_at: Option<String>,
     #[serde(default)]
     pub confidential: Option<bool>,
+    #[serde(default)]
+    pub content_removed: Option<bool>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorBody {
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+async fn read_error_message(resp: reqwest::Response) -> String {
+    let text = resp.text().await.unwrap_or_default();
+    if let Ok(body) = serde_json::from_str::<ErrorBody>(&text)
+        && let Some(msg) = body.message.or(body.error).filter(|s| !s.is_empty())
+    {
+        return msg;
+    }
+    text
 }
 
 /// Build the `requestedSchema` JSON from CLI flags.
@@ -215,6 +240,7 @@ fn build_http(server: &str, ca_file: Option<&Path>) -> Result<reqwest::Client, A
     }
     let mut builder = reqwest::Client::builder()
         .https_only(!countersign_core::url::is_local_http(server))
+        .connect_timeout(CONNECT_TIMEOUT)
         .timeout(HTTP_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("countersign-ask/", env!("CARGO_PKG_VERSION")));
@@ -262,10 +288,9 @@ async fn fetch_github_oidc_token(http: &reqwest::Client, audience: &str) -> Resu
     if !countersign_core::url::is_secure(&url) {
         return Err(AskError::Usage("ACTIONS_ID_TOKEN_REQUEST_URL must be https://".into()));
     }
-    let sep = if url.contains('?') { '&' } else { '?' };
-    let full = format!("{url}{sep}audience={audience}");
     let resp = http
-        .get(&full)
+        .get(&url)
+        .query(&[("audience", audience)])
         .bearer_auth(req_token)
         .send()
         .await
@@ -287,7 +312,45 @@ async fn fetch_github_oidc_token(http: &reqwest::Client, audience: &str) -> Resu
 
 async fn withdraw(http: &reqwest::Client, base: &str, token: &str, id: &str) {
     let url = format!("{base}/intake/v1/questions/{id}");
-    let _ = http.delete(&url).bearer_auth(token).send().await;
+    let _ = tokio::time::timeout(WITHDRAW_TIMEOUT, http.delete(&url).bearer_auth(token).send()).await;
+}
+
+async fn cancel_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let term = signal(SignalKind::terminate());
+        match term {
+            Ok(mut sigterm) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+fn withdrawn_response(id: String, url: Option<String>) -> QuestionResponse {
+    QuestionResponse {
+        id,
+        state: "withdrawn".into(),
+        url,
+        action: Some("cancel".into()),
+        content: None,
+        answered_by: None,
+        answered_at: None,
+        confidential: None,
+        content_removed: None,
+        note: None,
+    }
 }
 
 /// Submit the question, wait for the outcome (withdrawing on timeout or signal),
@@ -321,8 +384,8 @@ pub async fn run(cli: &Cli) -> Result<QuestionResponse, AskError> {
         .map_err(|e| AskError::Http(e.without_url().to_string()))?;
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        return Err(AskError::Rejected { status: status.as_u16(), message: text });
+        let message = read_error_message(resp).await;
+        return Err(AskError::Rejected { status: status.as_u16(), message });
     }
     let created: QuestionResponse = resp.json().await.map_err(|e| AskError::Http(e.to_string()))?;
     if let Some(url) = &created.url {
@@ -339,40 +402,40 @@ pub async fn run(cli: &Cli) -> Result<QuestionResponse, AskError> {
         if remaining.is_zero() {
             eprintln!("countersign: local timeout reached; withdrawing question");
             withdraw(&http, base, &token, &created.id).await;
-            return Ok(QuestionResponse {
-                id: created.id,
-                state: "withdrawn".into(),
-                url: created.url,
-                action: Some("cancel".into()),
-                content: None,
-                answered_by: None,
-                answered_at: None,
-                confidential: None,
-            });
+            return Ok(withdrawn_response(created.id, created.url));
         }
         let wait = remaining.as_secs().clamp(1, POLL_WAIT_SECS);
         let req = http.get(&poll_url).bearer_auth(&token).query(&[("wait", wait)]).send();
         let resp = tokio::select! {
-            res = req => res.map_err(|e| AskError::Http(e.without_url().to_string()))?,
-            _ = tokio::signal::ctrl_c() => {
+            res = req => match res {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("countersign: temporary poll error ({}); retrying", e.without_url());
+                    tokio::select! {
+                        () = tokio::time::sleep(POLL_RETRY_DELAY.min(remaining)) => continue,
+                        () = cancel_signal() => {
+                            eprintln!("countersign: interrupted; withdrawing question");
+                            withdraw(&http, base, &token, &created.id).await;
+                            return Ok(withdrawn_response(created.id, created.url));
+                        }
+                    }
+                }
+            },
+            () = cancel_signal() => {
                 eprintln!("countersign: interrupted; withdrawing question");
                 withdraw(&http, base, &token, &created.id).await;
-                return Ok(QuestionResponse {
-                    id: created.id,
-                    state: "withdrawn".into(),
-                    url: created.url,
-                    action: Some("cancel".into()),
-                    content: None,
-                    answered_by: None,
-                    answered_at: None,
-                    confidential: None,
-                });
+                return Ok(withdrawn_response(created.id, created.url));
             }
         };
         let status = resp.status();
+        if status.is_server_error() {
+            eprintln!("countersign: temporary server error ({status}); retrying");
+            tokio::time::sleep(POLL_RETRY_DELAY.min(remaining)).await;
+            continue;
+        }
         if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(AskError::Rejected { status: status.as_u16(), message: text });
+            let message = read_error_message(resp).await;
+            return Err(AskError::Rejected { status: status.as_u16(), message });
         }
         let current: QuestionResponse = resp.json().await.map_err(|e| AskError::Http(e.to_string()))?;
         if current.state != "pending" {

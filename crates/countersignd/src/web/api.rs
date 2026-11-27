@@ -128,7 +128,7 @@ pub(super) async fn get(State(state): State<AppState>, jar: PrivateCookieJar, Pa
         Ok(Some(r)) if sees_approval(&s.roster(Timestamp::now()), &s, &r) => Json(r).into_response(),
         Ok(_) => missing(),
         Err(e) => {
-            tracing::error!(error = %e, "listing requests failed");
+            tracing::error!(error = %e, "reading request failed");
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", "internal error")
         }
     }
@@ -201,7 +201,7 @@ pub(super) async fn questions(
             Json(visible).into_response()
         }
         Err(e) => {
-            tracing::error!(error = %e, "listing requests failed");
+            tracing::error!(error = %e, "listing questions failed");
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", "internal error")
         }
     }
@@ -225,7 +225,7 @@ pub(super) async fn question(State(state): State<AppState>, jar: PrivateCookieJa
         }
         Ok(_) => missing(),
         Err(e) => {
-            tracing::error!(error = %e, "listing requests failed");
+            tracing::error!(error = %e, "reading question failed");
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", "internal error")
         }
     }
@@ -342,8 +342,8 @@ pub(super) async fn push_subscribe(
         return api_error(StatusCode::NOT_FOUND, "disabled", "web push is not enabled");
     }
     let endpoint = body.endpoint.trim();
-    if !endpoint.starts_with("https://") || endpoint.len() > 2048 || endpoint.contains('@') {
-        return api_error(StatusCode::BAD_REQUEST, "invalid_endpoint", "push endpoint must be a valid https:// URL");
+    if let Err(msg) = validate_push_endpoint(endpoint).await {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_endpoint", msg);
     }
     if body.keys.p256dh.len() > 256 || body.keys.auth.len() > 128 {
         return api_error(StatusCode::BAD_REQUEST, "invalid_keys", "push subscription keys are invalid");
@@ -427,6 +427,66 @@ pub(super) async fn break_glass(
         Err(e) => {
             let (status, msg) = human_error(&e);
             api_error(status, "rejected", msg)
+        }
+    }
+}
+
+/// Validate a browser Web Push endpoint URL and guard against SSRF to
+/// loopback, private, link-local, or unspecified addresses.
+async fn validate_push_endpoint(endpoint: &str) -> Result<(), &'static str> {
+    if endpoint.len() > 2048 || endpoint.contains('@') {
+        return Err("push endpoint must be a valid https:// URL");
+    }
+    let parsed = reqwest::Url::parse(endpoint).map_err(|_| "push endpoint must be a valid https:// URL")?;
+    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("push endpoint must be a valid https:// URL");
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err("push endpoint must include a host");
+    };
+    let lower = host.to_ascii_lowercase();
+    if matches!(lower.rsplit('.').next(), Some("localhost" | "local" | "internal")) {
+        return Err("push endpoint host is not allowed");
+    }
+    if let Ok(ip) = host.trim_matches(|c| c == '[' || c == ']').parse::<std::net::IpAddr>() {
+        if !is_public_ip(ip) {
+            return Err("push endpoint must not target a private or loopback address");
+        }
+        return Ok(());
+    }
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    if let Ok(addrs) = tokio::net::lookup_host((host, port)).await {
+        for addr in addrs {
+            if !is_public_ip(addr.ip()) {
+                return Err("push endpoint resolved to a private or loopback address");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                // Carrier-grade NAT 100.64.0.0/10
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0b1100_0000) == 64))
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_ip(std::net::IpAddr::V4(v4));
+            }
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (v6.segments()[0] & 0xffc0) == 0xfe80) // link-local fe80::/10
         }
     }
 }
