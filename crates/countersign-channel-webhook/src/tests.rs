@@ -63,7 +63,8 @@ fn signing_is_required_unless_explicitly_waived() {
         )
         .is_err()
     );
-    assert!(WebhookChannel::new(name, &cfg("url = \"file:///etc/passwd\"\nunsigned = true")).is_err());
+    assert!(WebhookChannel::new(name.clone(), &cfg("url = \"file:///etc/passwd\"\nunsigned = true")).is_err());
+    assert!(WebhookChannel::new(name, &cfg("url = \"http://h.example/x\"\nunsigned = true")).is_err());
     assert!(toml::from_str::<WebhookConfig>("url = \"https://x\"\nsecret = \"inline\"").is_err());
 }
 

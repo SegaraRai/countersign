@@ -164,8 +164,11 @@ pub fn sign(key: &[u8], id: &str, timestamp: i64, body: &[u8]) -> String {
 impl WebhookChannel {
     /// Validates the configuration and reads secrets; does not connect.
     pub fn new(name: ChannelName, config: &WebhookConfig) -> Result<Self, ChannelError> {
-        if !(config.url.starts_with("https://") || config.url.starts_with("http://")) {
-            return Err(config_error(format!("webhook url must be http(s), got {:?}", config.url)));
+        if !countersign_core::url::is_secure(&config.url) {
+            return Err(config_error(format!(
+                "webhook url must be an https:// URL (http:// only for localhost), got {:?}",
+                config.url
+            )));
         }
         let key = match (&config.secret_file, config.unsigned) {
             (Some(_), true) => return Err(config_error("set either secret_file or unsigned, not both".to_owned())),
@@ -181,6 +184,7 @@ impl WebhookChannel {
         };
         let bearer = config.bearer_token_file.as_deref().map(|p| read_secret_file(p, "bearer token")).transpose()?;
         let http = reqwest::Client::builder()
+            .https_only(!countersign_core::url::is_local_http(&config.url))
             .timeout(TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .user_agent(concat!("countersign/", env!("CARGO_PKG_VERSION")))

@@ -107,8 +107,11 @@ impl NtfyChannel {
     pub fn new(name: ChannelName, config: NtfyConfig) -> Result<Self, ChannelError> {
         let bad = |m: String| ChannelError::Other(m.into());
         let server = config.server.trim_end_matches('/');
-        if !(server.starts_with("https://") || server.starts_with("http://")) {
-            return Err(bad(format!("ntfy server must be an http(s) URL, got {:?}", config.server)));
+        if !countersign_core::url::is_secure(server) {
+            return Err(bad(format!(
+                "ntfy server must be an https:// URL (http:// only for localhost), got {:?}",
+                config.server
+            )));
         }
         if !valid_topic(&config.topic) {
             return Err(bad("ntfy topic must be 1-64 characters of A-Z, a-z, 0-9, '-' or '_'".to_owned()));
@@ -127,6 +130,7 @@ impl NtfyChannel {
         }
         .filter(|t| !t.is_empty());
         let http = reqwest::Client::builder()
+            .https_only(!countersign_core::url::is_local_http(server))
             .timeout(TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()

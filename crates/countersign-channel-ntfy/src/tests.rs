@@ -144,6 +144,7 @@ fn bad_configs_are_rejected() {
     let name = ChannelName::new("n");
     let mk = |s: &str| NtfyChannel::new(name.clone(), toml::from_str(s).unwrap());
     assert!(mk("server = \"ftp://x\"\ntopic = \"t\"").is_err());
+    assert!(mk("server = \"http://ntfy.example\"\ntopic = \"t\"").is_err());
     assert!(mk("server = \"https://x\"\ntopic = \"a/b\"").is_err());
     assert!(mk("server = \"https://x\"\ntopic = \"t\"\npriority = 9").is_err());
     assert!(toml::from_str::<NtfyConfig>("server = \"https://x\"\ntopic = \"t\"\ntoken = \"x\"").is_err());

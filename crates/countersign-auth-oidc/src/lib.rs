@@ -86,6 +86,12 @@ fn other(e: impl std::fmt::Display) -> AuthError {
 impl OidcAuthenticator {
     /// `redirect_url` is the absolute URL of the web UI's callback route.
     pub fn new(config: OidcConfig, redirect_url: &str) -> Result<Self, AuthError> {
+        if !countersign_core::url::is_secure(&config.issuer) {
+            return Err(other(format!(
+                "issuer must be an https:// URL (http:// only for localhost), got {:?}",
+                config.issuer
+            )));
+        }
         IssuerUrl::new(config.issuer.clone()).map_err(|e| other(format!("invalid issuer: {e}")))?;
         let redirect_url =
             RedirectUrl::new(redirect_url.to_owned()).map_err(|e| other(format!("invalid redirect URL: {e}")))?;
@@ -229,6 +235,13 @@ mod tests {
         let bad =
             OidcConfig { issuer: "not a url".into(), client_id: "x".into(), client_secret_file: None, scopes: vec![] };
         assert!(OidcAuthenticator::new(bad, "https://cs.example.com/cb").is_err());
+        let plain = OidcConfig {
+            issuer: "http://id.example.com".into(),
+            client_id: "x".into(),
+            client_secret_file: None,
+            scopes: vec![],
+        };
+        assert!(OidcAuthenticator::new(plain, "https://cs.example.com/cb").is_err());
         assert!(toml::from_str::<OidcConfig>("issuer='https://x'\nclient_id='y'\nclient_secret='z'\n").is_err());
     }
 
