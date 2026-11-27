@@ -1,41 +1,34 @@
 //! Domain core of countersign.
 //!
-//! This crate holds the approval state machine, questions and their form
-//! schemas, the identity model (persons, workloads, groups, roles), policy
-//! evaluation, domain events, and the traits that pluggable components
-//! implement:
+//! Organized by domain area:
 //!
-//! - [`AccessBackend`]: the system that actually holds access (e.g. Octelium
-//!   sessions, an external command speaking JSON).
-//! - [`Channel`]: where requests are announced and, if interactive, decided
-//!   (ntfy, webhooks, Discord, Slack, ...).
-//! - [`Store`]: durable state plus the event outbox.
-//! - [`Authenticator`]: signs persons in to the web UI.
+//! - [`identity`]: persons, workloads, identities, groups, roles, and assurance levels.
+//! - [`approval`]: access subjects, policies, the approval state machine, and `sudo` parsing.
+//! - [`question`]: structured questions and MCP elicitation form schemas.
+//! - [`ports`]: pluggable traits ([`AccessBackend`], [`Channel`], [`Store`], [`Authenticator`]) and [`DomainEvent`].
+//! - [`crypto`]: checksummed host keys and Ed25519 approval signing.
+//! - [`present`]: unified human-facing presentation shared by every surface.
+//! - [`support`]: pure helpers (glob matching, text escaping, URL validation).
 //!
 //! It deliberately has no network, database, or web-framework dependencies so
-//! that the rules can be tested in isolation.
+//! that the rules can be tested in isolation and compiled to `wasm32`.
 
-pub mod actor;
-pub mod approval_signing;
-pub mod assurance;
-pub mod auth;
-pub mod backend;
-pub mod channel;
-pub mod event;
-pub mod form;
-pub mod glob;
-pub mod host_key;
-pub mod id;
-pub mod policy;
+pub mod approval;
+pub mod crypto;
+pub mod identity;
+pub mod ports;
 pub mod present;
 pub mod question;
-pub mod request;
-pub mod store;
-pub mod subject;
-pub mod sudo;
-pub mod text;
-mod time;
-pub mod url;
+pub mod support;
+
+// Flat module re-exports for concise access (`countersign_core::host_key`, etc.).
+pub use approval::{policy, request, subject, sudo};
+pub use crypto::{approval_signing, host_key};
+pub use identity::{actor, assurance, id};
+pub use ports::{auth, backend, channel, event, store};
+pub use question::form;
+use support::time;
+pub use support::{glob, text, url};
 
 pub use actor::{
     Actor, ActorKind, Directory, GroupConfig, IdpGroup, IdpSnapshot, PersonConfig, Purpose, Role, Roles, Roster,

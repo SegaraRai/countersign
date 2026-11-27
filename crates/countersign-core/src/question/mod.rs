@@ -18,6 +18,8 @@
 //! ([`Question::remove_content`]); the record of who asked and who answered
 //! stays.
 
+pub mod form;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
