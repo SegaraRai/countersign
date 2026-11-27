@@ -157,10 +157,10 @@
 </script>
 
 {#if config?.enabled}
-  <section {...style("mt-8 flex p-6 flex-col gap-4 bg-surface rounded-panel border border-border")}>
+  <section {...style("flex mt-8 p-6 flex-col gap-4 bg-surface rounded-panel border border-border")}>
     <div {...style("flex flex-wrap items-start justify-between gap-4")}>
       <div>
-        <h2 {...style("text-foreground text-base font-semibold")}>Browser push notifications</h2>
+        <h2 {...style("text-base text-foreground font-semibold")}>Browser push notifications</h2>
         <p {...style("mt-1 text-foreground-secondary text-sm leading-relaxed")}>
           Receive alerts on this device only for requests and questions you are eligible to decide.
         </p>
@@ -187,7 +187,7 @@
     {/if}
 
     {#if config.subscriptions.length > 0}
-      <ul {...style("divide-y divide-border border-t border-border")}>
+      <ul {...style("border-border border-t divide-y divide-border")}>
         {#each config.subscriptions as sub (sub.id)}
           <li {...style("flex py-3 items-center justify-between gap-4")}>
             <div {...style("min-w-0")}>
