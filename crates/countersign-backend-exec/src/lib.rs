@@ -64,7 +64,7 @@ pub use crate::runner::{CmdOutput, ProcessRunner, RunError, Runner};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-const MAX_OUTPUT: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_OUTPUT: usize = 4 * 1024 * 1024;
 const MAX_MESSAGE: usize = 500;
 const MAX_ID: usize = 256;
 

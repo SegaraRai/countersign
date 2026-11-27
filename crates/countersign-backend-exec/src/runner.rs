@@ -7,7 +7,10 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+/// Cap on stderr read into memory (stdout is capped at `crate::MAX_OUTPUT + 1`).
+const MAX_STDERR_BYTES: u64 = 64 * 1024;
 
 /// Result of one invocation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,16 +70,33 @@ impl Runner for ProcessRunner {
                 let _ = stdin.write_all(input).await;
                 drop(stdin);
             }
-            child.wait_with_output().await
+            let stdout_cap = (crate::MAX_OUTPUT + 1) as u64;
+            let child_stdout = child.stdout.take();
+            let child_stderr = child.stderr.take();
+            let read_stdout = async {
+                let mut buf = Vec::new();
+                if let Some(out) = child_stdout {
+                    out.take(stdout_cap).read_to_end(&mut buf).await?;
+                }
+                Ok::<_, std::io::Error>(buf)
+            };
+            let read_stderr = async {
+                let mut buf = Vec::new();
+                if let Some(err) = child_stderr {
+                    err.take(MAX_STDERR_BYTES).read_to_end(&mut buf).await?;
+                }
+                Ok::<_, std::io::Error>(buf)
+            };
+            let (stdout, stderr, status) = tokio::try_join!(read_stdout, read_stderr, child.wait())?;
+            Ok::<_, std::io::Error>(CmdOutput {
+                success: status.success(),
+                stdout,
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            })
         };
-        let out = match tokio::time::timeout(self.timeout, run).await {
-            Ok(r) => r.map_err(RunError::Spawn)?,
-            Err(_) => return Err(RunError::Timeout(self.timeout)),
-        };
-        Ok(CmdOutput {
-            success: out.status.success(),
-            stdout: out.stdout,
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
+        match tokio::time::timeout(self.timeout, run).await {
+            Ok(r) => r.map_err(RunError::Spawn),
+            Err(_) => Err(RunError::Timeout(self.timeout)),
+        }
     }
 }

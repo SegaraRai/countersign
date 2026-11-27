@@ -108,7 +108,10 @@ pub(super) async fn list(State(state): State<AppState>, jar: PrivateCookieJar, Q
             let roster = s.roster(Timestamp::now());
             Json(list.into_iter().filter(|r| sees_approval(&roster, &s, r)).collect::<Vec<_>>()).into_response()
         }
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", e.to_string()),
+        Err(e) => {
+            tracing::error!(error = %e, "listing requests failed");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", "internal error")
+        }
     }
 }
 
@@ -124,7 +127,10 @@ pub(super) async fn get(State(state): State<AppState>, jar: PrivateCookieJar, Pa
     match state.engine.store().get_request(id).await {
         Ok(Some(r)) if sees_approval(&s.roster(Timestamp::now()), &s, &r) => Json(r).into_response(),
         Ok(_) => missing(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", e.to_string()),
+        Err(e) => {
+            tracing::error!(error = %e, "listing requests failed");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", "internal error")
+        }
     }
 }
 
@@ -194,7 +200,10 @@ pub(super) async fn questions(
                 .collect();
             Json(visible).into_response()
         }
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", e.to_string()),
+        Err(e) => {
+            tracing::error!(error = %e, "listing requests failed");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", "internal error")
+        }
     }
 }
 
@@ -215,7 +224,10 @@ pub(super) async fn question(State(state): State<AppState>, jar: PrivateCookieJa
             Json(redacted(&q, access)).into_response()
         }
         Ok(_) => missing(),
-        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", e.to_string()),
+        Err(e) => {
+            tracing::error!(error = %e, "listing requests failed");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", "internal error")
+        }
     }
 }
 

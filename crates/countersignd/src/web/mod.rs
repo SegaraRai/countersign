@@ -157,24 +157,31 @@ async fn notice(state: &AppState, status: StatusCode, heading: &str, body: &str,
 }
 
 fn human_error(e: &EngineError) -> (StatusCode, String) {
-    let status = match e {
-        EngineError::UnknownRequest(_) | EngineError::UnknownQuestion(_) => StatusCode::NOT_FOUND,
+    match e {
+        EngineError::UnknownRequest(_) | EngineError::UnknownQuestion(_) => (StatusCode::NOT_FOUND, e.to_string()),
         EngineError::Forbidden(_)
         | EngineError::Refused(_)
         | EngineError::Transition(
             TransitionError::NotEligible | TransitionError::Inactive | TransitionError::Excluded(_),
         )
         | EngineError::Answer(AnswerError::NotEligible | AnswerError::Inactive | AnswerError::SelfAnswer) => {
-            StatusCode::FORBIDDEN
+            (StatusCode::FORBIDDEN, e.to_string())
         }
         EngineError::Invalid(_) | EngineError::Answer(AnswerError::Invalid(_) | AnswerError::MustStayConfidential) => {
-            StatusCode::BAD_REQUEST
+            (StatusCode::BAD_REQUEST, e.to_string())
         }
-        EngineError::Transition(_) | EngineError::Answer(_) | EngineError::Busy => StatusCode::CONFLICT,
-        EngineError::Backend(_) => StatusCode::BAD_GATEWAY,
-        EngineError::Store(_) | EngineError::UnknownBackend(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    (status, e.to_string())
+        EngineError::Transition(_) | EngineError::Answer(_) | EngineError::Busy => {
+            (StatusCode::CONFLICT, e.to_string())
+        }
+        EngineError::Backend(_) => {
+            tracing::warn!(error = %e, "backend error handling web request");
+            (StatusCode::BAD_GATEWAY, "backend error".to_owned())
+        }
+        EngineError::Store(_) | EngineError::UnknownBackend(_) => {
+            tracing::error!(error = %e, "internal error handling web request");
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_owned())
+        }
+    }
 }
 
 fn clean_comment(c: Option<String>) -> Option<String> {

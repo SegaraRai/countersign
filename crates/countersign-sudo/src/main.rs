@@ -98,6 +98,16 @@ fn say(message: &str) {
 #[cfg(unix)]
 fn open_caller_stderr(pid: u32) -> Option<std::fs::File> {
     use std::os::unix::fs::FileTypeExt as _;
+    // Verify the caller actually had fd 2 open for writing so reopening as
+    // root never upgrades a read-only descriptor.
+    let fdinfo = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/2")).ok()?;
+    let flags = fdinfo
+        .lines()
+        .find_map(|l| l.strip_prefix("flags:"))
+        .and_then(|v| i32::from_str_radix(v.trim(), 8).ok())?;
+    if (flags & libc::O_ACCMODE) == libc::O_RDONLY {
+        return None;
+    }
     let link = format!("/proc/{pid}/fd/2");
     let target = std::fs::read_link(&link).ok()?;
     let kind = std::fs::metadata(&link).ok()?.file_type();
