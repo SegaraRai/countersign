@@ -186,6 +186,11 @@ fn signing_key_file() -> std::path::PathBuf {
     static PATH: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
         let p = std::env::temp_dir().join(format!("countersign-test-signing-{}.key", std::process::id()));
         std::fs::write(&p, countersign_core::approval_signing::ServerKey::generate(&SIGNING_SEED)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
         p
     });
     PATH.clone()
