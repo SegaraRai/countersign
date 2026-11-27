@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: ./.github/actions/build-web
+      - uses: $/.github/actions/build-web
         with:
           check: "true"
       - uses: actions/upload-artifact@v7.0.2
