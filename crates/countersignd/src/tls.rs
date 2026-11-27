@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::pem::PemObject;
@@ -23,6 +23,8 @@ use tokio_rustls::server::TlsStream;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Handshakes finished but not yet picked up by the server.
 const BACKLOG: usize = 64;
+/// Most TLS handshakes running concurrently.
+const MAX_CONCURRENT_HANDSHAKES: usize = 64;
 
 /// `tls = { cert_file = "...", key_file = "..." }`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -71,11 +73,16 @@ impl TlsListener {
         let local = tcp.local_addr()?;
         let acceptor = TlsAcceptor::from(config);
         let (tx, rx) = mpsc::channel(BACKLOG);
+        let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_HANDSHAKES));
         let task = tokio::spawn(async move {
             loop {
+                let Ok(permit) = Arc::clone(&permits).acquire_owned().await else {
+                    break;
+                };
                 let (stream, peer) = match tcp.accept().await {
                     Ok(c) => c,
                     Err(e) => {
+                        drop(permit);
                         // Usually running out of file descriptors; back off.
                         tracing::warn!(error = %e, "accepting a connection failed");
                         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -84,9 +91,12 @@ impl TlsListener {
                 };
                 let (acceptor, tx) = (acceptor.clone(), tx.clone());
                 tokio::spawn(async move {
+                    let _permit = permit;
                     match tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream)).await {
                         Ok(Ok(tls)) => {
-                            let _ = tx.send((tls, peer)).await;
+                            if tx.try_send((tls, peer)).is_err() {
+                                tracing::debug!(%peer, "TLS accept backlog full; dropping connection");
+                            }
                         }
                         Ok(Err(e)) => tracing::debug!(%peer, error = %e, "TLS handshake failed"),
                         Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),
