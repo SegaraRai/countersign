@@ -172,9 +172,12 @@ pub(super) fn sees_approval(roster: &Roster<'_>, s: &Session, r: &Request) -> bo
         || relates_to(roster, s, r.facts.requester.actor.as_ref())
 }
 
-/// A responder of the question: selected now, or the one who answered.
+/// A responder of the question: selected now (and not excluded as self-answer),
+/// or the one who answered.
 pub(super) fn responds_to(roster: &Roster<'_>, s: &Session, q: &Question) -> bool {
-    roster.selected(&q.requirements.responders, &s.person) || answered_by(q) == Some(&s.person)
+    let selected = roster.selected(&q.requirements.responders, &s.person)
+        && (q.requirements.allow_self_answer || q.asker.actor.as_ref() != Some(&s.person));
+    selected || answered_by(q) == Some(&s.person)
 }
 
 fn answered_by(q: &Question) -> Option<&ActorId> {
@@ -194,8 +197,9 @@ pub(super) fn sees_question(roster: &Roster<'_>, s: &Session, q: &Question) -> b
 /// What of a question's content `s` may see now: (question text, answer).
 pub(super) fn question_access(roster: &Roster<'_>, s: &Session, q: &Question, assurance: Assurance) -> (bool, bool) {
     let responder = responds_to(roster, s, q);
-    let text = !q.confidentiality.question || (responder && assurance >= q.required_assurance());
-    let answer = !q.answer_confidential() || (responder && text);
+    let confidential_min = q.requirements.min_assurance.max(q.requirements.confidential_min_assurance);
+    let text = !q.confidentiality.question || (responder && assurance >= confidential_min);
+    let answer = !q.answer_confidential() || (responder && text && assurance >= confidential_min);
     (text, answer)
 }
 
@@ -253,5 +257,75 @@ mod tests {
         assert_eq!(s.assurance(at(1301), w), Assurance::Web);
         let none = Session { data: SessionData { auth_time: None, ..s.data.clone() }, ..s };
         assert_eq!(none.assurance(at(1000), w), Assurance::Web);
+    }
+
+    #[test]
+    fn confidential_answer_requires_confidential_min_assurance() {
+        use countersign_core::actor::{Directory, GroupConfig, PersonConfig, Roles};
+        use countersign_core::{Asker, Confidentiality, QuestionPolicy, Response};
+
+        let p = |id: &str| PersonConfig { id: id.into(), display_name: None, identities: vec![] };
+        let dir = Directory::new(
+            vec![p("alice"), p("bob")],
+            vec![],
+            vec![GroupConfig { name: "ops".into(), members: vec!["alice".into(), "bob".into()], from_idp: vec![] }],
+            Roles::default(),
+        )
+        .unwrap();
+        let standing = Standing::default();
+        let now = Timestamp::from_second(1_800_000_000).unwrap();
+        let roster = Roster { directory: &dir, standing: &standing, now, idp_max_age: Duration::from_secs(60) };
+        let policy: QuestionPolicy = toml::from_str(
+            r#"
+            name = "q"
+            responders = ["group:ops"]
+            min_assurance = "web"
+            confidential = "allow"
+            confidential_min_assurance = "fresh-auth"
+            "#,
+        )
+        .unwrap();
+        let schema = serde_json::json!({ "type": "object", "properties": { "x": { "type": "string" } } });
+        let (mut q, _) = Question::ask(
+            Asker { client: "c".into(), actor: Some("alice".into()) },
+            "public question".into(),
+            schema,
+            std::collections::BTreeMap::new(),
+            &policy,
+            Confidentiality { question: false, answer_may_be: true },
+            now,
+        );
+        let content = serde_json::json!({ "x": "secret" }).as_object().unwrap().clone();
+        q.respond(
+            &roster,
+            &"bob".into(),
+            Response::Accept { content, confidential: true },
+            Assurance::Web,
+            "web".into(),
+            now,
+        )
+        .unwrap();
+
+        let make_session = |person: &str| Session {
+            person: person.into(),
+            name: person.into(),
+            roles: BTreeSet::from([Role::Member]),
+            data: SessionData {
+                person: person.into(),
+                identity: format!("oidc:idp#{person}"),
+                auth_time: None,
+                issued: now.as_second(),
+                csrf: "c".into(),
+            },
+            rules: Arc::default(),
+            standing: Arc::default(),
+        };
+        let bob = make_session("bob");
+        let alice = make_session("alice");
+
+        assert_eq!(question_access(&roster, &bob, &q, Assurance::Web), (true, false));
+        assert_eq!(question_access(&roster, &bob, &q, Assurance::FreshAuth), (true, true));
+        // alice is the asker and allow_self_answer is false, so she is not a responder.
+        assert_eq!(question_access(&roster, &alice, &q, Assurance::FreshAuth), (true, false));
     }
 }
