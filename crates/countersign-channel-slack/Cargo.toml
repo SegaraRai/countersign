@@ -1,6 +1,6 @@
 [package]
 name = "countersign-channel-slack"
-description = "Slack channel for countersign: posts requests with Block Kit buttons, receives actions over Socket Mode"
+description = "Slack channel for Countersign: posts requests with Block Kit buttons, receives actions over Socket Mode"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

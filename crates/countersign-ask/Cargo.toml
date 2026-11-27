@@ -1,6 +1,6 @@
 [package]
 name = "countersign-ask"
-description = "CLI client for asking human questions through countersign (for CI gates, scripts, and agents)"
+description = "CLI client for asking human questions through Countersign (for CI gates, scripts, and agents)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

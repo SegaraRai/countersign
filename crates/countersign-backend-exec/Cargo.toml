@@ -1,6 +1,6 @@
 [package]
 name = "countersign-backend-exec"
-description = "Exec backend for countersign: delegates to any program speaking a small JSON protocol"
+description = "Exec backend for Countersign: delegates to any program speaking a small JSON protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

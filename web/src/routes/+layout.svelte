@@ -39,7 +39,7 @@
       <div {...style("flex min-w-0 items-center gap-6")}>
         <a
           href="/"
-          aria-label="countersign"
+          aria-label="Countersign"
           {...style(
             "flex shrink-0 items-center rounded-control focus-visible:outline-2 focus-visible:outline-action focus-visible:outline-offset-2",
           )}

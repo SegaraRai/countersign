@@ -1,6 +1,6 @@
 [package]
 name = "countersign-store-sqlite"
-description = "SQLite store for countersign"
+description = "SQLite store for Countersign"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

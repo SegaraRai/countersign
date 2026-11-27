@@ -1,6 +1,6 @@
 [package]
 name = "countersign-core"
-description = "Domain core of countersign: requests, decisions, policy, and the plug-in traits"
+description = "Domain core of Countersign: requests, decisions, policy, and the plug-in traits"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

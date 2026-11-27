@@ -1,5 +1,5 @@
 [Unit]
-Description=countersign - human approval for just-in-time access
+Description=Countersign - human approval for just-in-time access
 Documentation=https://github.com/SegaraRai/countersign
 After=network-online.target
 Wants=network-online.target

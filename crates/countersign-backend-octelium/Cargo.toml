@@ -1,6 +1,6 @@
 [package]
 name = "countersign-backend-octelium"
-description = "Octelium backend for countersign: approves, rejects and revokes pending Octelium sessions"
+description = "Octelium backend for Countersign: approves, rejects and revokes pending Octelium sessions"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

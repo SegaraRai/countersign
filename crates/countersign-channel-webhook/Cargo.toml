@@ -1,6 +1,6 @@
 [package]
 name = "countersign-channel-webhook"
-description = "Webhook channel for countersign: signed JSON events (Standard Webhooks)"
+description = "Webhook channel for Countersign: signed JSON events (Standard Webhooks)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

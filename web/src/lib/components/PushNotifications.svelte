@@ -174,7 +174,7 @@
 
     {#if !supported}
       <p {...style("text-muted text-xs leading-relaxed")}>
-        This browser does not expose Web Push here (on iOS, add countersign to your Home Screen
+        This browser does not expose Web Push here (on iOS, add Countersign to your Home Screen
         first).
       </p>
     {/if}

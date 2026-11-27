@@ -1,6 +1,6 @@
 [package]
 name = "countersign-channel-ntfy"
-description = "ntfy channel for countersign: push notifications that link to the web UI"
+description = "ntfy channel for Countersign: push notifications that link to the web UI"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

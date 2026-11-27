@@ -1,7 +1,7 @@
 self.addEventListener("push", (event) => {
   let payload = {
-    title: "countersign",
-    body: "Open countersign to review.",
+    title: "Countersign",
+    body: "Open Countersign to review.",
     url: "/",
     tag: "countersign",
   };

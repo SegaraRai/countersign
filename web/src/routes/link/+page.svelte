@@ -33,7 +33,7 @@
 </script>
 
 <svelte:head>
-  <title>Chat account · countersign</title>
+  <title>Chat account · Countersign</title>
 </svelte:head>
 
 <PageHeader
@@ -52,7 +52,7 @@
     <li {...style("flex gap-3")}>
       <span {...style(step)}>2</span>
       <p {...style("text-foreground-secondary text-sm leading-relaxed")}>
-        Send it to countersign from the chat app. On Discord or Slack, run
+        Send it to Countersign from the chat app. On Discord or Slack, run
         <code
           {...style(
             "px-1.5 py-0.5 font-mono text-foreground text-xs bg-code rounded border border-border/70",
@@ -115,7 +115,7 @@
       <div>
         <h2 {...style("text-foreground text-sm font-semibold")}>One-time link code</h2>
         <p {...style("mt-1 max-w-xs text-muted text-xs leading-relaxed")}>
-          Generate a short-lived code to connect your chat account to countersign.
+          Generate a short-lived code to connect your chat account to Countersign.
         </p>
       </div>
     {/if}

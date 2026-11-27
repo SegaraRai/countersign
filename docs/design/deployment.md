@@ -4,11 +4,11 @@ Status: the requirements, TLS modes and the platform-neutral core are
 implemented. Outbound connectors for backends and the further channel kinds
 below are design only.
 
-countersign is software you run yourself, not a hosted service. It assumes no
+Countersign is software you run yourself, not a hosted service. It assumes no
 particular network, identity provider or access system. This document says
 what it needs, how it is exposed, and which boundaries keep it that way.
 
-## What countersign needs
+## What Countersign needs
 
 1. **An OpenID Connect provider** for people signing in to the web UI. Any
    provider with the authorization code flow and PKCE will do. Identities are
@@ -21,7 +21,7 @@ what it needs, how it is exposed, and which boundaries keep it that way.
    browser Web Push, an ntfy topic, or a webhook receiver.
 
 Nothing else is required. Access systems (backends) are optional: without
-one, countersign still handles sudo approval for hosts running
+one, Countersign still handles sudo approval for hosts running
 `countersign-sudo`, and questions from programs, both over the intake API.
 
 ### The core and the rest
@@ -30,7 +30,7 @@ These are the core:
 
 - **sudo approval**: the `host` backend plus `countersign-sudo` on target
   hosts (`sudo-approval.md`);
-- **the intake API**: how clients (hosts, agents, CI) reach countersign;
+- **the intake API**: how clients (hosts, agents, CI) reach Countersign;
 - **questions**: structured questions from programs, answered by people
   (`questions.md`).
 
@@ -39,12 +39,12 @@ octelium`) is one of them; `countersign-backend-exec` covers any system a
 small program can drive. None of them is assumed by the core, the
 configuration or the identity model.
 
-## Exposing countersign
+## Exposing Countersign
 
 Each listener (`[server]` for the web UI, `[intake]` for clients) serves
 HTTPS in one of two ways:
 
-- **countersign terminates TLS**: `tls = { cert_file, key_file }` (PEM;
+- **Countersign terminates TLS**: `tls = { cert_file, key_file }` (PEM;
   PKCS#8, PKCS#1 or SEC1 keys). The listener may then use any address,
   including a public one. Certificates are reloaded without restarting on
   `SIGHUP` (`systemctl reload countersignd`).
@@ -67,7 +67,7 @@ verified via JWKS). The network is not trusted for anything:
 - the key is only ever sent over TLS (`countersign-sudo` refuses an
   `http://` server other than this machine, and follows no redirects);
 - `allowed_ips` on a `[[client]]` is an optional extra check, never a
-  substitute for the key. Behind a proxy, countersign only knows the
+  substitute for the key. Behind a proxy, Countersign only knows the
   client's address if the proxy passes it: set `intake.client_ip_header`
   (e.g. `x-forwarded-for`; the last entry counts, because earlier ones come
   from the client). A client with `allowed_ips` behind a proxy without that
@@ -76,7 +76,7 @@ verified via JWKS). The network is not trusted for anything:
 `countersign-sudo` trusts the system's usual roots plus, with `ca_file`, the
 PEM certificates given there (a private CA or a self-signed certificate).
 
-TLS is not what makes an approval trustworthy, though. countersign signs
+TLS is not what makes an approval trustworthy, though. Countersign signs
 every approval with its own key over the host, the exact command and a
 fresh nonce, and the helper accepts only signatures from the keys it pinned
 (`server_keys`). A proxy, tunnel or anyone else holding the TLS session can
@@ -133,15 +133,15 @@ The SQLite store (`countersign-store-sqlite`) is one implementation of
 
 ## Backends and future connectors
 
-The `AccessBackend` trait is the whole boundary between countersign and an
+The `AccessBackend` trait is the whole boundary between Countersign and an
 access system: discover pending subjects, re-read facts, grant, deny, revoke.
 Today every backend runs inside the daemon and reaches its system directly
 (`octeliumctl`, a local program, or hosts that call the intake API).
 
 That boundary is kept narrow on purpose, so that later a backend can be a
 **connector**: an agent running next to an inner system (an Octelium cluster,
-a program that needs local credentials), connecting _out_ to countersign and
-carrying these same calls over that connection. countersign then needs no
+a program that needs local credentials), connecting _out_ to Countersign and
+carrying these same calls over that connection. Countersign then needs no
 route into the inner network. Requirements for that to stay possible:
 
 - backends exchange only data (`PendingSubject`, `SubjectFacts`,
@@ -152,7 +152,7 @@ route into the inner network. Requirements for that to stay possible:
   so a connector can only vouch for its own namespace.
 
 The `host` backend already works this way in miniature: hosts connect out to
-the intake API and countersign never connects to them.
+the intake API and Countersign never connects to them.
 
 ## Channels
 

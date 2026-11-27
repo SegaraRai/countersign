@@ -21,7 +21,7 @@
 </script>
 
 <svelte:head>
-  <title>{headline} · countersign</title>
+  <title>{headline} · Countersign</title>
 </svelte:head>
 
 <a

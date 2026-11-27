@@ -34,9 +34,9 @@ policy        agent-sudo
 needs         1 approval(s) at linked, once for 60s, excluding requester
 ```
 
-1. **The command is countersign's reading, not what was typed.** Approvers
+1. **The command is Countersign's reading, not what was typed.** Approvers
    see `id`, not `sudo id`; with options they see either a rewritten form or,
-   for options countersign does not trust (`-E`, `-D`, ...), the raw
+   for options Countersign does not trust (`-E`, `-D`, ...), the raw
    arguments without `sudo`. The two forms look alike but mean different
    things.
 2. **Backend attributes are dumped as-is.** `attr.*`, the subject id, host and
@@ -54,7 +54,7 @@ needs         1 approval(s) at linked, once for 60s, excluding requester
 
 1. **Show what will run, verbatim.** For sudo, the command line exactly as
    `sudo` received it. It is what `sudo` will interpret, so it is the most
-   precise thing to show; countersign's own reading of it is used for policy
+   precise thing to show; Countersign's own reading of it is used for policy
    matching, not as the primary display.
 2. **Lead with the consequence.** The first thing after the headline is what
    approving allows: scope, identity, duration.
@@ -156,7 +156,7 @@ the raw line displayed, the digest is computed over the raw `sudo` argv (plus
 user and cwd), so what the approver saw is exactly what the signature allows
 and the helper verifies. The helper already has the raw argv; the intake
 request gains `sudo_argv` and drops the separate `runas`/`argv` pair, which
-countersign derives itself.
+Countersign derives itself.
 
 ## Wording
 
@@ -171,7 +171,7 @@ States, in words, the same everywhere (the machine value stays in JSON):
 | expired           | No decision          | Nobody decided in time                          |
 | withdrawn         | Withdrawn            | The requester gave up                           |
 | revoked           | Revoked              | by alice at 14:40                               |
-| failed            | Failed               | countersign could not apply the decision: …     |
+| failed            | Failed               | Countersign could not apply the decision: …     |
 
 Questions: Waiting for an answer / Answered / Declined / No answer /
 Withdrawn.
@@ -254,7 +254,7 @@ Waiting for approval — agent wants root on web-1
   $ sudo apt update
 ```
 
-Options countersign does not interpret are still shown as typed, with a
+Options Countersign does not interpret are still shown as typed, with a
 note on why command-specific policies (such as an `apt*` window) did not
 match:
 
@@ -302,7 +302,7 @@ Waiting for approval — Sensitive approval request from web-1 (agent-sudo)
 
 ## Open questions
 
-- Should the web UI show countersign's parsed reading next to the raw line
+- Should the web UI show Countersign's parsed reading next to the raw line
   when they differ (e.g. `sudo -u postgres psql` → runs `psql` as
   `postgres`), or is the headline's "as postgres" enough?
 - Per-policy display hints (e.g. emphasise certain arguments, colour

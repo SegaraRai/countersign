@@ -76,7 +76,7 @@ docker run -d --name countersignd \
 > container (`tls = { cert_file, key_file }`) or bind `[intake].listen` to the
 > container's private bridge IP.
 
-## 3. Exposing countersign: two independent listeners
+## 3. Exposing Countersign: two independent listeners
 
 `countersignd` exposes two distinct HTTP surfaces with different clients and
 authentication models:

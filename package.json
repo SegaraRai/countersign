@@ -2,7 +2,7 @@
   "name": "countersign",
   "version": "0.1.0",
   "private": true,
-  "description": "Workspace for countersign's JavaScript parts: the web UI in web/.",
+  "description": "Workspace for Countersign's JavaScript parts: the web UI in web/.",
   "type": "module",
   "devDependencies": {
     "@stillwind/cli": "catalog:",

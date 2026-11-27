@@ -1,6 +1,6 @@
 # Design: approving `sudo` on target hosts
 
-Status: implemented — countersign side (intake API, `host` backend, grant
+Status: implemented — Countersign side (intake API, `host` backend, grant
 modes, signed approvals) and the host helper (`countersign-sudo`, with PAM,
 sudoers and config examples in `crates/countersign-sudo/contrib/`). For
 step-by-step installation and verification on a Linux host, see
@@ -10,10 +10,10 @@ step-by-step installation and verification on a Linux host, see
 
 An automated account (the _agent user_) logs in to target hosts without
 approval, as today. When it runs `sudo`, a human approves that command (or a
-short window of similar commands) through countersign before it runs.
+short window of similar commands) through Countersign before it runs.
 
-- Other accounts' `sudo` is unaffected, including when countersign is down.
-- When countersign is unreachable, the agent's `sudo` fails (fail closed).
+- Other accounts' `sudo` is unaffected, including when Countersign is down.
+- When Countersign is unreachable, the agent's `sudo` fails (fail closed).
 - Policy decides, per command pattern, whether an approval covers one
   invocation or a time window (e.g. package management for 15 minutes).
 - The existing Octelium pending-session backend stays for cases where the
@@ -62,7 +62,7 @@ A `NOPASSWD` entry for the agent would skip PAM entirely and must not exist.
 caller set any variable on the command line (`sudo LD_PRELOAD=… id`) or keep
 its environment (`-E`), bypassing sudo's environment checks. An approved
 command could then run anything.
-Windows are tracked by countersign, not by sudo's timestamp, because sudo's
+Windows are tracked by Countersign, not by sudo's timestamp, because sudo's
 timestamp cannot be scoped to a command pattern.
 
 ### PAM
@@ -79,7 +79,7 @@ auth [success=done default=die]  pam_exec.so quiet seteuid /usr/local/libexec/co
 
 For any user other than the agent, `pam_succeed_if` fails, `default=1` skips
 the `pam_exec` line, and authentication proceeds as before. The helper is
-never run for them, so countersign's availability cannot affect them.
+never run for them, so Countersign's availability cannot affect them.
 
 `seteuid` runs the helper with root as its real uid too, so the calling user
 cannot signal or inspect it. `pam_exec`'s `stdout` option must not be used:
@@ -120,7 +120,7 @@ Configuration: `/etc/countersign/sudo.toml` (server URL, key file, timeout).
 
 The helper sends the command line exactly as `sudo` received it, and
 approvers see exactly that, shell-quoted: `sudo -u postgres psql -c 'select
-1'` (see `presentation.md`). countersign reads it itself
+1'` (see `presentation.md`). Countersign reads it itself
 (`countersign_core::sudo`) for policies: sudo's options that do not change
 what runs (`-u`, `-n`, `-H`, `--`, ...) give `runas` and the command. Anything
 else makes the command the raw arguments, which only match policies that do
@@ -145,7 +145,7 @@ path names, customer identifiers). The caller can ask for that with
 What it changes — display only:
 
 - Discord, Slack, Web Push, ntfy and webhooks get "Sensitive approval request from
-  &lt;host&gt; (&lt;policy&gt;)" and countersign's link, nothing from the
+  &lt;host&gt; (&lt;policy&gt;)" and Countersign's link, nothing from the
   command line. Approving happens in the web UI only, as for commands too long
   for chat.
 - The web UI shows the full request to approvers as usual.
@@ -192,13 +192,13 @@ with the command, nothing else.
 - It runs as the caller, unprivileged; the same binary acts as the PAM helper
   only when started by `pam_exec` (`PAM_TYPE` set, parent is sudo).
 
-## countersign side
+## Countersign side
 
 ### Intake listener
 
 A second listener for machines. It always serves HTTPS, because the host key
 is the only thing that authenticates a host and the network is not trusted
-(see `deployment.md`): countersign either terminates TLS itself or sits
+(see `deployment.md`): Countersign either terminates TLS itself or sits
 behind a reverse proxy or tunnel on a loopback or private address.
 
 ```toml
@@ -215,7 +215,7 @@ welcome as defence in depth, but nothing relies on it.
 ### Host authentication
 
 Each target host is a `[[client]]` with the `approval` scope (the default),
-configured with an id and the SHA-256 of its key, so countersign never stores
+configured with an id and the SHA-256 of its key, so Countersign never stores
 the key itself (see `identity-model.md` for clients and scopes):
 
 ```toml
@@ -230,7 +230,7 @@ The key is sent as `Authorization: Bearer <key>` and compared by hash in
 constant time.
 
 A single SHA-256 is only safe for high-entropy keys, and a hash says nothing
-about the key behind it. countersign therefore accepts only keys in the
+about the key behind it. Countersign therefore accepts only keys in the
 format its own generator produces:
 
 ```text
@@ -255,7 +255,7 @@ cshk_<43 chars: base64url of 32 random bytes><6 chars: base64url checksum>
   is not taken from the body).
 
 Decided: per-host keys. Network-level identity (for example a mesh VPN's
-peer lookup) was considered and rejected: it would tie countersign to one
+peer lookup) was considered and rejected: it would tie Countersign to one
 network product, and the key works over any network.
 
 ### Signed approvals
@@ -263,15 +263,15 @@ network product, and the key works over any network.
 The helper turns "approved" into root, so that answer must not depend on
 TLS alone: TLS may be terminated by a proxy or tunnel, and a leaked TLS key
 or a mis-issued certificate would let anyone in between say "approved".
-countersign therefore signs every approval, and the helper checks the
+Countersign therefore signs every approval, and the helper checks the
 signature against keys it pinned at setup.
 
-- countersign holds an Ed25519 signing key (`intake.signing_key_file`,
+- Countersign holds an Ed25519 signing key (`intake.signing_key_file`,
   `cssk_…`, made by `countersign signing-key`). Its public key (`ed25519:…`)
   is printed by that command, logged at startup and served at
   `GET /intake/v1/server-key`.
 - Each submission carries a `nonce`: 32 fresh random bytes from the helper.
-  countersign stores `<invocation digest>:<nonce>` with the request
+  Countersign stores `<invocation digest>:<nonce>` with the request
   (`facts.binding`, not displayed).
 - Every answer with `state = "approved"` carries `signature`, over:
 
@@ -289,7 +289,7 @@ signature against keys it pinned at setup.
 - The helper computes the digest from what it sent, uses the hash of its
   own key as `client`, and runs the command only if one of its
   `server_keys` verifies the signature. A missing or wrong signature reads
-  as "not signed by countersign" and fails closed.
+  as "not signed by Countersign" and fails closed.
 
 What this stops: an answer forged by anything between helper and daemon,
 an approval for a different command (someone who also holds the bearer key
@@ -317,7 +317,7 @@ Pinning the key:
   prints the `[[client]]` entry. Pinning never happens implicitly during a
   `sudo`.
 - Rotation: list the new key next to the old one on every host, switch
-  countersign to the new key, then remove the old one.
+  Countersign to the new key, then remove the old one.
 
 ### API
 
@@ -364,13 +364,13 @@ A new push-style backend, `host`, with `discover = false`. Its subjects are
 created by the intake API, not discovered:
 
 - `subject`: `{ backend: <backend name>, kind: "sudo", id: <uuid> }`
-- `facts.requester.id`: the OS user. countersign sets the requester identity
+- `facts.requester.id`: the OS user. Countersign sets the requester identity
   to `unix:<client>#<user>` and resolves it to a `[[workload]]` or
-  `[[person]]` listing that identity; its countersign groups are what
+  `[[person]]` listing that identity; its Countersign groups are what
   `requester_group` matches. Users that resolve to no active actor are
   refused (`unknown-user`).
 - `facts.source`: the client; `facts.target`: the client id (the host name).
-- `facts.attributes`: `host`, `user`, `runas`, `command` (countersign's
+- `facts.attributes`: `host`, `user`, `runas`, `command` (Countersign's
   reading of the command, shell-quoted), `cwd`. `facts.action` is the raw
   line, `runas` and `cwd`, as shown to approvers.
 - `grant` / `deny` / `revoke` have nothing external to do; the result is the
@@ -440,7 +440,7 @@ pending_timeout = "5m"
 
 - Reason: is `COUNTERSIGN_REASON` in the caller's environment enough? (The
   optional `countersign-sudo run` wrapper only makes it easier to set.)
-- Sensitive commands: should countersign also mark a request sensitive by
+- Sensitive commands: should Countersign also mark a request sensitive by
   itself when the command looks like it carries a secret (`password=`,
   `token`)? Not planned yet; such commands are a mistake to fix at the
   caller.

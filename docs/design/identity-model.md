@@ -7,7 +7,7 @@ channel notices on suspension/bulk revoke/break-glass, and emergency
 `break-glass` approval (`POST /api/requests/{id}/break-glass`).
 
 This replaced the earlier `[[approver]]` entries (id, groups, identity
-strings) and requesters described only by the backend. countersign is
+strings) and requesters described only by the backend. Countersign is
 unreleased: `[[approver]]`, `approver:<id>` selectors and the old `Requester`
 shape went away without compatibility shims, and state databases from before
 need to be recreated.
@@ -17,12 +17,12 @@ need to be recreated.
 - One record per **person**, however many accounts they use.
 - Requests say **who sent them** (an authenticated source), **who they are
   for** (the requester), and **who started them** (a person, if any), and
-  countersign knows how far each of those is vouched for.
+  Countersign knows how far each of those is vouched for.
 - "Do not approve your own agent's request" and "do not approve the deploy
   you pushed" can be enforced.
 - Group membership can come from the **IdP**, without the IdP being able to
   create approvers by accident.
-- **Roles** (what someone may do in countersign) are separate from
+- **Roles** (what someone may do in Countersign) are separate from
   **eligibility** (which requests they may decide).
 - Removing or suspending someone takes effect immediately, including on
   requests in progress. Audit records stay readable after people leave.
@@ -45,7 +45,7 @@ Non-goals: managing people in the IdP, SCIM, delegation of approval rights.
 
 | Role in the request   | What it is                                                                    | Example: sudo                           | Example: CI deploy                                   | Example: Octelium                           |
 | --------------------- | ----------------------------------------------------------------------------- | --------------------------------------- | ---------------------------------------------------- | ------------------------------------------- |
-| **Source**            | the authenticated party that delivered the request; its credential is checked | host `web-1` (host key)                 | GitHub Actions (OIDC token)                          | the Octelium backend (countersign polls it) |
+| **Source**            | the authenticated party that delivered the request; its credential is checked | host `web-1` (host key)                 | GitHub Actions (OIDC token)                          | the Octelium backend (Countersign polls it) |
 | **Requester**         | whose action needs approval; vouched for by the source                        | OS user `agent` on web-1                | workload "repo X, workflow deploy, environment prod" | Octelium user `agent-ops`                   |
 | **Initiator**         | the person who caused it, if known                                            | — (or the agent's owner, via relations) | GitHub user who pushed / ran the workflow            | —                                           |
 | **Target and action** | what would happen                                                             | `apt upgrade` as root on web-1          | deploy commit abc to prod                            | connect to service ssh-web-1                |
@@ -117,7 +117,7 @@ behind an Octelium session. It is matched against `Recognition` identities
 | **Eligibility**              | the policy's selectors frozen with the request, current group membership and status, exclusions |
 | **Relations to the request** | same person as the requester? owner of the requester? the initiator?                            |
 
-The decider's identity comes only from countersign's own sign-in or a chat
+The decider's identity comes only from Countersign's own sign-in or a chat
 link the person made; nothing in the request can influence who the decider
 is.
 
@@ -212,7 +212,7 @@ struct Group {
 
 ### Role
 
-What a person may do in countersign, not which requests they may decide.
+What a person may do in Countersign, not which requests they may decide.
 
 | Role      | Capabilities                                                                                           |
 | --------- | ------------------------------------------------------------------------------------------------------ |

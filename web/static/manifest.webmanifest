@@ -1,6 +1,6 @@
 {
-  "name": "countersign",
-  "short_name": "countersign",
+  "name": "Countersign",
+  "short_name": "Countersign",
   "description": "Human approval for just-in-time access",
   "start_url": "/",
   "display": "standalone",

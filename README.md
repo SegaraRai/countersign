@@ -1,9 +1,9 @@
-# countersign
+# Countersign
 
 **Human-in-the-loop approval and structured questions for AI agents, CI/CD, and `sudo`.**
 
 When an AI agent runs `sudo` on a server, a CI pipeline is about to deploy to
-production, or an automated tool needs a human decision, countersign pauses it,
+production, or an automated tool needs a human decision, Countersign pauses it,
 notifies the right people (Slack, Discord, browser Web Push, ntfy, or webhook),
 enforces your approval policy, and returns a cryptographically signed decision.
 
@@ -20,7 +20,7 @@ enforces your approval policy, and returns a cryptographically signed decision.
   choice, or form question from GitHub Actions (using passwordless OIDC JWTs) or
   any script, and get validated JSON back on `stdout`.
 - **Let AI agents ask humans over MCP (`POST /mcp`)** — Point any MCP client at
-  countersign's built-in Streamable HTTP endpoint so agents can ask structured
+  Countersign's built-in Streamable HTTP endpoint so agents can ask structured
   questions without extra glue code. Answers never grant access.
 - **Plug in external access systems** — Approve pending Octelium sessions
   (`countersign-backend-octelium`) or integrate any custom system via a simple
@@ -39,7 +39,7 @@ enforces your approval policy, and returns a cryptographically signed decision.
 
 ### Core security guarantees
 
-- **Fail-closed & re-verified:** If countersign is unreachable or nobody decides
+- **Fail-closed & re-verified:** If Countersign is unreachable or nobody decides
   in time, access is denied. Backends re-verify facts before granting.
 - **No self-approval:** Policies separate **persons** (who sign in and decide)
   from **workloads** (agents, CI, host users) and can exclude the requester, the
@@ -148,7 +148,7 @@ Prometheus `/metrics` setup, see [`docs/guides/deployment.md`](docs/guides/deplo
 
 ### Approve `sudo` on a Linux host
 
-Enroll the target host (pins countersign's signing key, generates a host key,
+Enroll the target host (pins Countersign's signing key, generates a host key,
 and prints the `[[client]]` block to paste into `config.toml`):
 
 ```sh
@@ -182,7 +182,7 @@ and `[[client]]` OIDC configuration.
 
 ### Connect an AI agent over MCP
 
-Add countersign's `/mcp` endpoint to your MCP client with a `question`-scoped
+Add Countersign's `/mcp` endpoint to your MCP client with a `question`-scoped
 client key:
 
 ```json

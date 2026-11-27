@@ -1,6 +1,6 @@
 [package]
 name = "countersign-sudo"
-description = "PAM helper for target hosts: asks countersign to approve a sudo invocation and waits for the answer"
+description = "PAM helper for target hosts: asks Countersign to approve a sudo invocation and waits for the answer"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

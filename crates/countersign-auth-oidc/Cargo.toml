@@ -1,6 +1,6 @@
 [package]
 name = "countersign-auth-oidc"
-description = "OpenID Connect authenticator for the countersign web UI"
+description = "OpenID Connect authenticator for the Countersign web UI"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

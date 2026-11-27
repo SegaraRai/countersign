@@ -2,7 +2,7 @@
   "name": "countersign-web",
   "version": "0.1.0",
   "private": true,
-  "description": "The countersign web UI: SvelteKit pages rendered by countersignd through fetchlet.",
+  "description": "The Countersign web UI: SvelteKit pages rendered by countersignd through fetchlet.",
   "type": "module",
   "imports": {
     "#lib/*.ts": "./src/lib/*.ts",

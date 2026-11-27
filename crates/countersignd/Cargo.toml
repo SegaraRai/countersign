@@ -1,6 +1,6 @@
 [package]
 name = "countersignd"
-description = "The countersign daemon: watches backends, applies decisions, and delivers notifications"
+description = "The Countersign daemon: watches backends, applies decisions, and delivers notifications"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

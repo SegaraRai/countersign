@@ -105,7 +105,7 @@ members = ["alice", "bob"]
 name = "agents"
 members = ["deploy-agent"]
 
-# Roles control what persons may do in countersign (not which requests they decide):
+# Roles control what persons may do in Countersign (not which requests they decide):
 # - member:  sign in, view & decide requests they are eligible for, link chat accounts
 # - auditor: read all requests & audit records (confidential content excepted)
 # - admin:   suspend/reinstate actors, bulk revoke, unlink chat accounts, break-glass
@@ -246,7 +246,7 @@ domain = "octelium.example.com"
 # command_timeout = "30s"
 # auth_token_file = "/etc/countersign/octelium-token"
 
-# Optional: generic external helper speaking countersign's stdin/stdout JSON protocol.
+# Optional: generic external helper speaking Countersign's stdin/stdout JSON protocol.
 # [backend.helper]
 # type = "exec"
 # command = ["/usr/local/lib/countersign/helper"]

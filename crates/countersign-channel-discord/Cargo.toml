@@ -1,6 +1,6 @@
 [package]
 name = "countersign-channel-discord"
-description = "Discord channel for countersign: posts requests with approve/deny buttons, receives presses over the Gateway"
+description = "Discord channel for Countersign: posts requests with approve/deny buttons, receives presses over the Gateway"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -4,7 +4,7 @@
 </script>
 
 <svelte:head>
-  <title>{page.status} · countersign</title>
+  <title>{page.status} · Countersign</title>
 </svelte:head>
 
 <div {...style("flex min-h-[55vh] py-10 items-center justify-center")}>

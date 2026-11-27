@@ -12,7 +12,7 @@ of those paths.
 
 ## Goal
 
-countersign stops something at a hook, asks the right people, and hands their
+Countersign stops something at a hook, asks the right people, and hands their
 answer back. Today the only thing it asks is "may this happen?" (an
 _approval_). This document adds a second kind, a _question_: "what should
 happen?", answered with structured data.
@@ -34,7 +34,7 @@ need everyone's answer (see "Later").
 | After the answer   | a grant that lasts for a TTL or window, can be revoked | nothing; the answer is a fact                                          |
 | No answer in time  | expired, and that means **no** (fail closed)           | expired, recorded as **unanswered**; the asker decides what that means |
 | Self-answer        | forbidden by default                                   | allowed if policy says so                                              |
-| Effect             | the backend grants access                              | none inside countersign                                                |
+| Effect             | the backend grants access                              | none inside Countersign                                                |
 
 Folding these into one schema would make every approval field optional and
 every question field meaningless for approvals. Most security bugs in a merged
@@ -58,15 +58,15 @@ Only widely adopted specifications are used as references.
     both sides; show clearly who is asking; no clickable URLs inside form
     fields.
 
-  countersign adopts the schema subset and the action names as they are, so an
-  MCP server or agent framework can forward an elicitation to countersign
+  Countersign adopts the schema subset and the action names as they are, so an
+  MCP server or agent framework can forward an elicitation to Countersign
   without translation. It adds what a remote, multi-person, asynchronous
   setting needs: who may answer, a deadline, and the `expired` and
   `withdrawn` outcomes.
 
-- **JSON Schema** (draft 2020-12) defines the keywords above; countersign
+- **JSON Schema** (draft 2020-12) defines the keywords above; Countersign
   validates against the subset only and rejects any other keyword.
-- Approvals keep the existing countersign model (quorum, assurance,
+- Approvals keep the existing Countersign model (quorum, assurance,
   once/window grants), which follows the usual access-request shape of
   Teleport Access Requests and similar systems. It is not changed here.
 
@@ -121,7 +121,7 @@ cannot reach them.
 ### Timeouts and "no answer"
 
 - `answer_timeout` is the only clock. When it passes, the outcome is
-  `Expired`, stored and returned as such. countersign never fills in a
+  `Expired`, stored and returned as such. Countersign never fills in a
   default answer.
 - The response tells the asker plainly: `"state": "expired"`. An asker that
   wants a default applies it itself, and the record still shows that no
@@ -279,7 +279,7 @@ in backups until those expire.
 
 - Channels (Discord, Slack, Web Push, ntfy, webhook) never get confidential text:
   - A confidential question is announced as "Confidential question from
-    &lt;asker&gt; (&lt;policy&gt;)" with only countersign's link, and it can
+    &lt;asker&gt; (&lt;policy&gt;)" with only Countersign's link, and it can
     only be answered in the web UI.
   - A confidential answer is never echoed back into the channel message; it
     shows only "Answered by &lt;responder&gt;".
@@ -338,7 +338,7 @@ The message and schema text come from the asker and are untrusted.
 - Length limits: message, each title/description, number of fields and enum
   options, schema size. Over the limit is refused (400), not truncated.
 - No links: URLs in question text are not made clickable in any channel (MCP
-  rule). The only link is countersign's own request URL.
+  rule). The only link is Countersign's own request URL.
 - Questions look different from approvals everywhere:
   - a "Question" label and a different colour;
   - buttons say "Answer" / "Decline", never "Approve";
@@ -397,6 +397,6 @@ The message and schema text come from the asker and are untrusted.
 
 - Polls that need every responder's answer, or n matching answers.
 - URL-mode style questions for secrets (answer never passes through
-  countersign's store).
+  Countersign's store).
 - Whether a question may carry a follow-up approval in one step ("pick a
   branch, then approve the deploy"): kept as two requests for now.

@@ -1,6 +1,6 @@
 [package]
 name = "countersign"
-description = "Administration CLI for countersign: inspect requests, deny or revoke, manage account links, generate keys"
+description = "Administration CLI for Countersign: inspect requests, deny or revoke, manage account links, generate keys"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

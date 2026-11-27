@@ -19,7 +19,7 @@ sudo install -o root -g root -m 0755 countersign-sudo /usr/local/libexec/counter
 ## 2. Enroll the host
 
 Run `enroll` as root so it creates `/etc/countersign/host.key` (`0600`), pins
-countersign's Ed25519 approval signing key, and writes `/etc/countersign/sudo.toml`:
+Countersign's Ed25519 approval signing key, and writes `/etc/countersign/sudo.toml`:
 
 ```sh
 sudo /usr/local/libexec/countersign-sudo enroll \
@@ -28,7 +28,7 @@ sudo /usr/local/libexec/countersign-sudo enroll \
 ```
 
 Add the printed `[[client]]` block to `/etc/countersign/config.toml` on the
-countersign server (plus a `[[workload]]` with identity `unix:<host>#<agent>`),
+Countersign server (plus a `[[workload]]` with identity `unix:<host>#<agent>`),
 then reload the daemon:
 
 ```sh

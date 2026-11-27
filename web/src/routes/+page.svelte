@@ -22,7 +22,7 @@
 </script>
 
 <svelte:head>
-  <title>{waiting.length > 0 ? `(${waiting.length}) ` : ""}Requests · countersign</title>
+  <title>{waiting.length > 0 ? `(${waiting.length}) ` : ""}Requests · Countersign</title>
 </svelte:head>
 
 <PageHeader

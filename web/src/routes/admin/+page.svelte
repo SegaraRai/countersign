@@ -39,7 +39,7 @@ member = ["person:alice"]`;
 </script>
 
 <svelte:head>
-  <title>People · countersign</title>
+  <title>People · Countersign</title>
 </svelte:head>
 
 <PageHeader
