@@ -540,6 +540,7 @@ mod tests {
             grant: GrantMode::Once,
             require_initiator: false,
             scope: std::collections::BTreeMap::default(),
+            channels: Vec::new(),
         };
         let (r, ev) = Request::open(pending, reqs, false, t(0));
         assert_eq!(ev.len(), 1);

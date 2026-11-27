@@ -14,6 +14,7 @@ path = "src/main.rs"
 [dependencies]
 base64 = "0.22"
 clap.workspace = true
+countersign-channel-webpush.workspace = true
 countersign-core.workspace = true
 countersign-store-sqlite.workspace = true
 countersignd = { path = "../countersignd" }

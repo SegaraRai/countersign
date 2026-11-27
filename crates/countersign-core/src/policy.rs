@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::actor::Selector;
 use crate::assurance::Assurance;
 use crate::glob;
-use crate::id::{BackendName, PolicyName};
+use crate::id::{BackendName, ChannelName, PolicyName};
 use crate::subject::PendingSubject;
 
-const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_mins(15);
 
 /// A set of ordered policy rules, typically read from `[[policy]]` tables.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +60,9 @@ pub struct Policy {
     /// Whether requests may be kept out of chat channels.
     #[serde(default)]
     pub sensitive: SensitiveMode,
+    /// Channels that receive notifications for this policy. Empty means all configured channels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<ChannelName>,
 }
 
 /// Relations to the request that disqualify a decider.
@@ -222,6 +225,9 @@ pub struct Requirements {
     /// for a window, what later subjects must match to be covered.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub scope: BTreeMap<String, String>,
+    /// Channels routed for this request; empty means all configured channels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<ChannelName>,
 }
 
 impl Policy {
@@ -245,6 +251,7 @@ impl Policy {
             grant: self.grant,
             require_initiator: self.require_initiator,
             scope: self.matcher.attributes.clone(),
+            channels: self.channels.clone(),
         }
     }
 
@@ -393,7 +400,7 @@ mod tests {
     fn ttl_is_clamped() {
         let s = set();
         let pol = &s.policies[0];
-        assert_eq!(pol.resolve_ttl(Some(Duration::from_secs(3600 * 5))), Duration::from_secs(1800));
+        assert_eq!(pol.resolve_ttl(Some(Duration::from_hours(5))), Duration::from_mins(30));
         assert_eq!(pol.resolve_ttl(Some(Duration::from_secs(60))), Duration::from_secs(60));
         assert_eq!(pol.resolve_ttl(Some(Duration::ZERO)), Duration::from_secs(600));
         assert_eq!(pol.resolve_ttl(None), Duration::from_secs(600));

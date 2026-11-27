@@ -231,7 +231,7 @@ fn question_components(q: &Question, web: Option<&str>, caps: ChannelCaps, compl
     }
     let mut buttons = match answer_buttons(q, caps, complete) {
         Some(b) => b,
-        None => web.map(|url| vec![link_button("Answer in web UI", url)]).unwrap_or_default(),
+        None => web.map_or_default(|url| vec![link_button("Answer in web UI", url)]),
     };
     if caps.interactive && !q.confidentiality.question {
         buttons.push(Component::Button(Button {

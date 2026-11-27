@@ -51,12 +51,13 @@ fn request(min_assurance: Assurance, reason: Option<&str>) -> Request {
         approvers: vec![Selector::Person(ActorId::new("bob"))],
         quorum: 1,
         min_assurance,
-        ttl: Duration::from_secs(5400),
+        ttl: Duration::from_mins(90),
         pending_timeout: Duration::from_secs(600),
         exclude: BTreeSet::from([countersign_core::Exclusion::Requester]),
         require_initiator: false,
         scope: std::collections::BTreeMap::default(),
         grant: countersign_core::GrantMode::Once,
+        channels: Vec::new(),
     };
     Request::open(pending, reqs, false, Timestamp::UNIX_EPOCH).0
 }

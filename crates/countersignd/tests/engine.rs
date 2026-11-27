@@ -360,7 +360,7 @@ async fn approve_flow_grants_with_policy_ttl() {
 
     let r = h.decide(r.id, "bob", Verdict::Approve, t(10)).await.unwrap();
     assert_eq!(r.state, RequestState::Active { until: t(10 + 1800) });
-    assert_eq!(h.backend.state("s1"), Some(SessionState::Active { ttl: Duration::from_secs(1800) }));
+    assert_eq!(h.backend.state("s1"), Some(SessionState::Active { ttl: Duration::from_mins(30) }));
 
     // The grant ends on its own (native expiry): no revoke call.
     h.daemon.engine.tick(t(10 + 1800)).await;

@@ -5,12 +5,13 @@
   import Banner from "#lib/components/Banner.svelte";
   import Button from "#lib/components/Button.svelte";
   import PageHeader from "#lib/components/PageHeader.svelte";
+  import PushNotifications from "#lib/components/PushNotifications.svelte";
   import Time from "#lib/components/Time.svelte";
   import { Submission } from "#lib/submit.svelte.ts";
 
   import type { PageProps } from "./$types";
 
-  let { form }: PageProps = $props();
+  let { data, form }: PageProps = $props();
 
   const issuing = new Submission();
   const code = $derived(form && "done" in form ? form.done : null);
@@ -51,7 +52,7 @@
     <li {...style("flex gap-3")}>
       <span {...style(step)}>2</span>
       <p {...style("text-foreground-secondary text-sm leading-relaxed")}>
-        Send it to countersign from the chat app. On Discord, run
+        Send it to countersign from the chat app. On Discord or Slack, run
         <code
           {...style(
             "px-1.5 py-0.5 font-mono text-foreground text-xs bg-code rounded border border-border/70",
@@ -125,3 +126,7 @@
     </form>
   </section>
 </div>
+
+{#if data.me}
+  <PushNotifications csrf={data.me.csrf} />
+{/if}

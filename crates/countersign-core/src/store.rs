@@ -50,6 +50,19 @@ pub struct AccountLink {
     pub linked_at: Timestamp,
 }
 
+/// A browser Web Push subscription belonging to a person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushSubscription {
+    pub id: String,
+    pub person: ActorId,
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub created_at: Timestamp,
+}
+
 /// Something an admin did, kept as an audit record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdminAction {
@@ -170,5 +183,29 @@ pub trait Store: Send + Sync {
     /// Suspensions and identity-provider snapshots together.
     async fn standing(&self) -> Result<Standing, StoreError> {
         Ok(Standing { suspended: self.suspensions().await?, idp: self.idp_snapshots().await? })
+    }
+
+    /// Save or update a browser Web Push subscription for a person.
+    async fn save_push_subscription(&self, sub: &PushSubscription) -> Result<(), StoreError> {
+        let _ = sub;
+        Ok(())
+    }
+
+    /// List Web Push subscriptions, optionally filtered to one person.
+    async fn list_push_subscriptions(&self, person: Option<&ActorId>) -> Result<Vec<PushSubscription>, StoreError> {
+        let _ = person;
+        Ok(Vec::new())
+    }
+
+    /// Delete a Web Push subscription by its endpoint (e.g. after 404/410 Gone).
+    async fn delete_push_subscription(&self, endpoint: &str) -> Result<bool, StoreError> {
+        let _ = endpoint;
+        Ok(false)
+    }
+
+    /// Delete one of `person`'s Web Push subscriptions by id.
+    async fn delete_push_subscription_for_person(&self, person: &ActorId, id: &str) -> Result<bool, StoreError> {
+        let _ = (person, id);
+        Ok(false)
     }
 }

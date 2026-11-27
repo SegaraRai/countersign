@@ -214,7 +214,7 @@ impl Presentation {
                     details.push(Detail::new("Directory", text::escape(cwd)));
                 }
                 notes.extend(n.iter().map(|n| text::escape(n)));
-                let place = target.as_ref().map(|t| format!(" on {t}")).unwrap_or_default();
+                let place = target.as_ref().map_or_default(|t| format!(" on {t}"));
                 (format!("{who} wants {runas}{place}"), Some(Shown::Command { line: text::shell_join(line) }))
             }
             Some(Action::Session { kind, device, client, credential, browser }) => {
@@ -235,7 +235,7 @@ impl Presentation {
                     lines.push(Detail::new("Browser", "yes"));
                 }
                 let backend = text::escape(r.subject.backend.as_str());
-                let place = target.as_ref().map(|t| format!(" to {t}")).unwrap_or_default();
+                let place = target.as_ref().map_or_default(|t| format!(" to {t}"));
                 (
                     format!("{who} wants a session{place}"),
                     Some(Shown::Lines { title: format!("Session on {backend}"), lines }),
@@ -253,7 +253,7 @@ impl Presentation {
                 if let Some(t) = &target {
                     details.push(Detail::new("Target", t.clone()));
                 }
-                let place = target.as_ref().map(|t| format!(" to {t}")).unwrap_or_default();
+                let place = target.as_ref().map_or_default(|t| format!(" to {t}"));
                 (format!("{who} wants access{place}"), None)
             }
         };
@@ -392,7 +392,7 @@ fn grant(r: &Request, who: &str, target: Option<&str>) -> String {
             for (k, v) in scope.iter().filter(|(k, _)| !matches!(k.as_str(), "command" | "runas" | "host" | "user")) {
                 let _ = write!(more, ", with {} `{}`", text::escape(k), text::escape(v));
             }
-            let place = target.map(|t| format!(", on {t}")).unwrap_or_default();
+            let place = target.map_or_default(|t| format!(", on {t}"));
             format!("Allows {who} to run {commands}, {runas}{more}{place}, for {d}")
         }
         (Some(Action::Session { .. }), GrantMode::Once) => format!("Lets this session through for up to {d}"),
@@ -408,7 +408,7 @@ fn grant(r: &Request, who: &str, target: Option<&str>) -> String {
                     text::escape(v)
                 );
             }
-            let place = target.map(|t| format!(" for {t}")).unwrap_or_default();
+            let place = target.map_or_default(|t| format!(" for {t}"));
             format!("Allows further requests from {who}{place}{matching} for {d}")
         }
     }

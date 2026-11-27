@@ -77,7 +77,7 @@ async fn discover_maps_subjects_and_facts() {
     assert_eq!(pending.len(), 2);
     assert_eq!(pending[0].subject, subject());
     assert_eq!(pending[0].facts.requester.id, "alice");
-    assert_eq!(pending[0].facts.requested_ttl, Some(Duration::from_secs(900)));
+    assert_eq!(pending[0].facts.requested_ttl, Some(Duration::from_mins(15)));
     assert_eq!(pending[0].facts.attributes["cmd"], "systemctl");
     assert_eq!(
         pending[0].facts.action,
@@ -116,7 +116,7 @@ async fn grant_verify_deny_revoke_send_the_documented_requests() {
     let facts = b.verify(&subject()).await.unwrap();
     assert_eq!(facts.reason.as_deref(), Some("deploy"));
 
-    let g = b.grant(&subject(), Duration::from_secs(900)).await.unwrap();
+    let g = b.grant(&subject(), Duration::from_mins(15)).await.unwrap();
     assert_eq!(g.backend_ref.as_deref(), Some("tok-9"));
     assert_eq!(g.expires_at.unwrap().to_string(), "2026-01-02T03:19:05Z");
 

@@ -268,3 +268,129 @@ pub(super) async fn answer(
         }
     }
 }
+
+#[derive(Debug, Serialize)]
+struct PushSubscriptionSummary {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
+    created_at: Timestamp,
+}
+
+#[derive(Debug, Serialize)]
+struct PushConfigResponse {
+    enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vapid_public_key: Option<String>,
+    subscriptions: Vec<PushSubscriptionSummary>,
+}
+
+pub(super) async fn push_config(State(state): State<AppState>, jar: PrivateCookieJar) -> Response {
+    let session = match api_session(&state, &jar).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let Some(vapid_public_key) = state.vapid_public_key.clone() else {
+        return Json(PushConfigResponse { enabled: false, vapid_public_key: None, subscriptions: Vec::new() })
+            .into_response();
+    };
+    match state.engine.store().list_push_subscriptions(Some(&session.person)).await {
+        Ok(list) => Json(PushConfigResponse {
+            enabled: true,
+            vapid_public_key: Some(vapid_public_key),
+            subscriptions: list
+                .into_iter()
+                .map(|s| PushSubscriptionSummary { id: s.id, label: s.label, created_at: s.created_at })
+                .collect(),
+        })
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "listing push subscriptions failed");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", "internal error")
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct SubscribeBody {
+    endpoint: String,
+    keys: SubscribeKeys,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubscribeKeys {
+    p256dh: String,
+    auth: String,
+}
+
+pub(super) async fn push_subscribe(
+    State(state): State<AppState>,
+    jar: PrivateCookieJar,
+    headers: HeaderMap,
+    Json(body): Json<SubscribeBody>,
+) -> Response {
+    let session = match api_session(&state, &jar).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    if let Err(r) = api_csrf(&headers, &session) {
+        return r;
+    }
+    if state.vapid_public_key.is_none() {
+        return api_error(StatusCode::NOT_FOUND, "disabled", "web push is not enabled");
+    }
+    let endpoint = body.endpoint.trim();
+    if !endpoint.starts_with("https://") || endpoint.len() > 2048 || endpoint.contains('@') {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_endpoint", "push endpoint must be a valid https:// URL");
+    }
+    if body.keys.p256dh.len() > 256 || body.keys.auth.len() > 128 {
+        return api_error(StatusCode::BAD_REQUEST, "invalid_keys", "push subscription keys are invalid");
+    }
+    let label =
+        body.label.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(|s| s.chars().take(100).collect::<String>());
+    let sub = countersign_core::PushSubscription {
+        id: uuid::Uuid::new_v4().to_string(),
+        person: session.person.clone(),
+        endpoint: endpoint.to_owned(),
+        p256dh: body.keys.p256dh.trim().to_owned(),
+        auth: body.keys.auth.trim().to_owned(),
+        label,
+        created_at: Timestamp::now(),
+    };
+    match state.engine.store().save_push_subscription(&sub).await {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(PushSubscriptionSummary { id: sub.id, label: sub.label, created_at: sub.created_at }),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "saving push subscription failed");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", "internal error")
+        }
+    }
+}
+
+pub(super) async fn push_unsubscribe(
+    State(state): State<AppState>,
+    jar: PrivateCookieJar,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let session = match api_session(&state, &jar).await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    if let Err(r) = api_csrf(&headers, &session) {
+        return r;
+    }
+    match state.engine.store().delete_push_subscription_for_person(&session.person, &id).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => api_error(StatusCode::NOT_FOUND, "not_found", "no such subscription"),
+        Err(e) => {
+            tracing::error!(error = %e, "deleting push subscription failed");
+            api_error(StatusCode::INTERNAL_SERVER_ERROR, "store", "internal error")
+        }
+    }
+}

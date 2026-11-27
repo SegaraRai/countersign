@@ -96,8 +96,12 @@ impl Dispatcher {
         let is_new = matches!(item.event, DomainEvent::Requested { .. });
         let done = self.store.delivered_channels(item.id).await?;
 
+        let allowed = subject.channels();
         let mut retry = false;
         for ch in &self.channels {
+            if !allowed.is_empty() && !allowed.contains(ch.name()) {
+                continue;
+            }
             if done.contains(ch.name()) {
                 continue;
             }
@@ -173,11 +177,106 @@ impl Channel for LogChannel {
 
 #[cfg(test)]
 mod tests {
-    use super::backoff;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use jiff::Timestamp;
+
+    use countersign_core::{
+        ActorId, Assurance, Channel, ChannelCaps, ChannelError, ChannelName, Exclusion, GrantMode, MessageRef,
+        Notification, PendingSubject, PolicyName, Request, Requester, Requirements, Selector, Store, SubjectFacts,
+        SubjectRef,
+    };
+    use countersign_store_sqlite::SqliteStore;
+
+    use super::{Dispatcher, backoff};
+
+    struct RecordingChannel {
+        name: ChannelName,
+        seen: Mutex<Vec<countersign_core::RequestId>>,
+    }
+
+    impl std::fmt::Debug for RecordingChannel {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("RecordingChannel").field("name", &self.name).finish_non_exhaustive()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Channel for RecordingChannel {
+        fn name(&self) -> &ChannelName {
+            &self.name
+        }
+        fn capabilities(&self) -> ChannelCaps {
+            ChannelCaps::default()
+        }
+        async fn notify(&self, n: Notification<'_>) -> Result<Option<MessageRef>, ChannelError> {
+            self.seen.lock().unwrap().push(n.item.id());
+            Ok(None)
+        }
+        async fn update(&self, _: &MessageRef, _: Notification<'_>) -> Result<(), ChannelError> {
+            Err(ChannelError::Unsupported)
+        }
+    }
+
+    fn open_request(id: &str, channels: Vec<ChannelName>) -> (Request, Vec<countersign_core::DomainEvent>) {
+        let now = Timestamp::from_second(1_700_000_000).unwrap();
+        let pending = PendingSubject {
+            subject: SubjectRef { backend: "sudo".into(), kind: "sudo".into(), id: id.into() },
+            facts: SubjectFacts {
+                requester: Requester { id: "agent".into(), ..Requester::default() },
+                source: None,
+                initiator: None,
+                sensitive: false,
+                target: Some("web-1".into()),
+                action: None,
+                reason: None,
+                requested_ttl: None,
+                attributes: BTreeMap::new(),
+                binding: None,
+            },
+            observed_at: now,
+        };
+        let reqs = Requirements {
+            policy: PolicyName::new("p"),
+            approvers: vec![Selector::Person(ActorId::new("alice"))],
+            exclude: BTreeSet::from([Exclusion::Requester]),
+            quorum: 1,
+            min_assurance: Assurance::Linked,
+            ttl: Duration::from_secs(60),
+            pending_timeout: Duration::from_secs(300),
+            grant: GrantMode::Once,
+            require_initiator: false,
+            scope: BTreeMap::new(),
+            channels,
+        };
+        Request::open(pending, reqs, false, now)
+    }
 
     #[test]
     fn backoff_grows_and_caps() {
         let secs: Vec<i64> = (1..=10).map(|a| backoff(a).as_secs()).collect();
         assert_eq!(secs, [5, 10, 20, 40, 80, 160, 320, 600, 600, 600]);
+    }
+
+    #[tokio::test]
+    async fn policy_routes_to_selected_channels_only() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::in_memory().await.unwrap());
+        let ch_a = Arc::new(RecordingChannel { name: ChannelName::new("slack"), seen: Mutex::default() });
+        let ch_b = Arc::new(RecordingChannel { name: ChannelName::new("discord"), seen: Mutex::default() });
+        let dispatcher = Dispatcher::new(Arc::clone(&store), vec![ch_a.clone(), ch_b.clone()], "https://cs.example");
+
+        let (r_routed, ev1) = open_request("r1", vec![ChannelName::new("slack")]);
+        store.insert_request(&r_routed, &ev1).await.unwrap();
+
+        let (r_all, ev2) = open_request("r2", vec![]);
+        store.insert_request(&r_all, &ev2).await.unwrap();
+
+        let now = Timestamp::from_second(1_700_000_010).unwrap();
+        assert_eq!(dispatcher.run_once(now).await.unwrap(), 2);
+
+        assert_eq!(*ch_a.seen.lock().unwrap(), vec![r_routed.id, r_all.id]);
+        assert_eq!(*ch_b.seen.lock().unwrap(), vec![r_all.id]);
     }
 }

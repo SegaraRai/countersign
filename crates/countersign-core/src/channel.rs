@@ -107,6 +107,14 @@ impl Item<'_> {
         }
     }
 
+    /// Channels this item is routed to; empty means all configured channels.
+    pub fn channels(&self) -> &[ChannelName] {
+        match self {
+            Self::Approval(r) => &r.requirements.channels,
+            Self::Question(q) => &q.requirements.channels,
+        }
+    }
+
     /// Whether channels may show only that it exists: a sensitive approval
     /// or a confidential question.
     pub fn withheld(&self) -> bool {

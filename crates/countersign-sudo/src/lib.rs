@@ -77,7 +77,7 @@ fn default_key_file() -> PathBuf {
 }
 
 fn default_timeout() -> Duration {
-    Duration::from_secs(5 * 60)
+    Duration::from_mins(5)
 }
 
 fn default_sudo_binaries() -> Vec<PathBuf> {

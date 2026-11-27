@@ -49,6 +49,7 @@ pub fn build_authenticator(config: &Config) -> Result<Option<Arc<dyn countersign
 
 /// Refuse secret files that are accessible to "others" (`o+rwx`). Group read
 /// (`0640`) is permitted so files owned by root can be read by the daemon's group.
+#[cfg_attr(not(unix), allow(clippy::unnecessary_wraps))]
 fn check_secret_permissions(path: &std::path::Path) -> Result<(), String> {
     #[cfg(unix)]
     {
@@ -139,32 +140,128 @@ pub fn build_backends(config: &Config, store: &Arc<dyn Store>) -> Result<Vec<Arc
         .collect()
 }
 
+/// Channels built from configuration, plus the VAPID public key if Web Push is enabled.
+pub struct BuiltChannels {
+    pub channels: Vec<Arc<dyn Channel>>,
+    pub vapid_public_key: Option<String>,
+}
+
+impl std::fmt::Debug for BuiltChannels {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let names: Vec<_> = self.channels.iter().map(|c| c.name().to_string()).collect();
+        f.debug_struct("BuiltChannels")
+            .field("channels", &names)
+            .field("webpush", &self.vapid_public_key.is_some())
+            .finish()
+    }
+}
+
 /// Instantiate the configured channels. Reads secrets; does not connect.
-pub fn build_channels(config: &Config) -> Result<Vec<Arc<dyn Channel>>, BuildError> {
-    config
-        .channels
-        .iter()
-        .map(|(name, cc)| -> Result<Arc<dyn Channel>, BuildError> {
-            Ok(match cc {
-                ChannelConfig::Log {} => Arc::new(LogChannel::new(name.clone())),
-                #[cfg(feature = "channel-discord")]
-                ChannelConfig::Discord(c) => Arc::new(
-                    countersign_channel_discord::DiscordChannel::new(name.clone(), c.clone())
-                        .map_err(|source| BuildError::Channel { name: name.to_string(), source })?,
-                ),
-                #[cfg(feature = "channel-ntfy")]
-                ChannelConfig::Ntfy(c) => Arc::new(
-                    countersign_channel_ntfy::NtfyChannel::new(name.clone(), c.clone())
-                        .map_err(|source| BuildError::Channel { name: name.to_string(), source })?,
-                ),
-                #[cfg(feature = "channel-webhook")]
-                ChannelConfig::Webhook(c) => Arc::new(
-                    countersign_channel_webhook::WebhookChannel::new(name.clone(), c)
-                        .map_err(|source| BuildError::Channel { name: name.to_string(), source })?,
-                ),
-            })
-        })
-        .collect()
+pub fn build_channels(
+    config: &Config,
+    store: Option<&Arc<dyn Store>>,
+    engine: Option<&Arc<Engine>>,
+) -> Result<BuiltChannels, BuildError> {
+    let mut vapid_public_key = None;
+    let mut out = Vec::with_capacity(config.channels.len());
+    for (name, cc) in &config.channels {
+        let ch: Arc<dyn Channel> = match cc {
+            ChannelConfig::Log {} => Arc::new(LogChannel::new(name.clone())),
+            #[cfg(feature = "channel-discord")]
+            ChannelConfig::Discord(c) => Arc::new(
+                countersign_channel_discord::DiscordChannel::new(name.clone(), c.clone())
+                    .map_err(|source| BuildError::Channel { name: name.to_string(), source })?,
+            ),
+            #[cfg(feature = "channel-ntfy")]
+            ChannelConfig::Ntfy(c) => Arc::new(
+                countersign_channel_ntfy::NtfyChannel::new(name.clone(), c.clone())
+                    .map_err(|source| BuildError::Channel { name: name.to_string(), source })?,
+            ),
+            #[cfg(feature = "channel-slack")]
+            ChannelConfig::Slack(c) => Arc::new(
+                countersign_channel_slack::SlackChannel::new(name.clone(), c.clone())
+                    .map_err(|source| BuildError::Channel { name: name.to_string(), source })?,
+            ),
+            #[cfg(feature = "channel-webhook")]
+            ChannelConfig::Webhook(c) => Arc::new(
+                countersign_channel_webhook::WebhookChannel::new(name.clone(), c)
+                    .map_err(|source| BuildError::Channel { name: name.to_string(), source })?,
+            ),
+            #[cfg(feature = "channel-webpush")]
+            ChannelConfig::Webpush(c) => {
+                check_secret_permissions(&c.vapid_key_file).map_err(|msg| BuildError::Channel {
+                    name: name.to_string(),
+                    source: countersign_core::ChannelError::Other(msg.into()),
+                })?;
+                let text = std::fs::read_to_string(&c.vapid_key_file).map_err(|e| BuildError::Channel {
+                    name: name.to_string(),
+                    source: countersign_core::ChannelError::Other(
+                        format!("vapid_key_file {}: {e}", c.vapid_key_file.display()).into(),
+                    ),
+                })?;
+                let vapid = countersign_channel_webpush::VapidKey::parse(&text).ok_or_else(|| BuildError::Channel {
+                    name: name.to_string(),
+                    source: countersign_core::ChannelError::Other(
+                        format!(
+                            "{} does not hold a VAPID key (create one with `countersign vapid-key`)",
+                            c.vapid_key_file.display()
+                        )
+                        .into(),
+                    ),
+                })?;
+                vapid_public_key = Some(vapid.public_key_base64url().to_owned());
+                let store = store.cloned().ok_or_else(|| BuildError::Channel {
+                    name: name.to_string(),
+                    source: countersign_core::ChannelError::Other("webpush requires a store".into()),
+                })?;
+                let engine = engine.cloned().ok_or_else(|| BuildError::Channel {
+                    name: name.to_string(),
+                    source: countersign_core::ChannelError::Other("webpush requires an engine".into()),
+                })?;
+                let resolver: countersign_channel_webpush::RecipientResolver = Arc::new(move |item, now| {
+                    let engine = Arc::clone(&engine);
+                    let approval = match item {
+                        countersign_core::Item::Approval(r) => Some(r.clone()),
+                        countersign_core::Item::Question(_) => None,
+                    };
+                    let question = match item {
+                        countersign_core::Item::Question(q) => Some(q.clone()),
+                        countersign_core::Item::Approval(_) => None,
+                    };
+                    Box::pin(async move {
+                        let Ok((rules, standing)) = engine.standing().await else {
+                            return std::collections::BTreeSet::new();
+                        };
+                        let roster = rules.roster(&standing, now);
+                        let mut eligible = std::collections::BTreeSet::new();
+                        for actor in roster.directory.actors().filter(|a| a.is_person()) {
+                            let ok = match (&approval, &question) {
+                                (Some(r), _) => r.eligible(&roster, &actor.id).is_ok(),
+                                (_, Some(q)) => q.eligible(&roster, &actor.id).is_ok(),
+                                _ => false,
+                            };
+                            if ok {
+                                eligible.insert(actor.id.clone());
+                            }
+                        }
+                        eligible
+                    })
+                });
+                let ch = countersign_channel_webpush::WebPushChannel::new(
+                    name.clone(),
+                    c.clone(),
+                    vapid,
+                    &config.server.public_url,
+                    store,
+                    resolver,
+                )
+                .map_err(|source| BuildError::Channel { name: name.to_string(), source })?;
+                Arc::new(ch)
+            }
+        };
+        out.push(ch);
+    }
+    Ok(BuiltChannels { channels: out, vapid_public_key })
 }
 
 /// Everything the daemon runs.
@@ -191,7 +288,9 @@ impl Daemon {
         let url = format!("sqlite://{}", config.store.path.display());
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open(&url).await?);
         let backends = build_backends(config, &store)?;
-        let mut daemon = Self::with_parts(config, store, backends, build_channels(config)?)?;
+        let engine = Arc::new(Engine::new(Arc::clone(&store), backends, rules_from(config)));
+        let BuiltChannels { channels, vapid_public_key } = build_channels(config, Some(&store), Some(&engine))?;
+        let mut daemon = Self::with_engine(config, store, engine, channels, vapid_public_key)?;
         daemon.web.auth = build_authenticator(config)?;
         daemon.web.key = session_key(config)?;
         daemon.web.pages = web::Pages::start(&daemon.web).await?;
@@ -208,6 +307,16 @@ impl Daemon {
         channels: Vec<Arc<dyn Channel>>,
     ) -> Result<Self, BuildError> {
         let engine = Arc::new(Engine::new(Arc::clone(&store), backends, rules_from(config)));
+        Self::with_engine(config, store, engine, channels, None)
+    }
+
+    fn with_engine(
+        config: &Config,
+        store: Arc<dyn Store>,
+        engine: Arc<Engine>,
+        channels: Vec<Arc<dyn Channel>>,
+        vapid_public_key: Option<String>,
+    ) -> Result<Self, BuildError> {
         let interactive = channels.iter().filter(|c| c.capabilities().interactive).cloned().collect();
         let dispatcher = Arc::new(Dispatcher::new(store, channels, &config.server.public_url));
         let codes = Arc::new(link::LinkCodes::default());
@@ -224,6 +333,7 @@ impl Daemon {
                 public_origin: web::origin_of(&config.server.public_url),
             }),
             pages: None,
+            vapid_public_key,
         };
         let intake = match &config.intake {
             Some(i) => {

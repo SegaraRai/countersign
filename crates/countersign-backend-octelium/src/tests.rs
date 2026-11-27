@@ -148,7 +148,7 @@ async fn grant_approves_with_expiry_and_reads_it_back() {
             CmdOutput { success: true, ..Default::default() },
         );
     let b = backend(r);
-    let g = b.grant(&subject("s1"), Duration::from_secs(1800)).await.unwrap();
+    let g = b.grant(&subject("s1"), Duration::from_mins(30)).await.unwrap();
     assert_eq!(g.expires_at, Some("2026-11-16T10:30:00Z".parse().unwrap()));
     assert_eq!(g.subject, subject("s1"));
     assert_eq!(b.runner.calls()[1], format!("update session --approve --expire-in 1800s {D} -- s1"));

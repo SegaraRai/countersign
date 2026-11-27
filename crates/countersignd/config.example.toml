@@ -98,7 +98,7 @@ id = "web-1"
 auth = { host_key = "sha256:0000000000000000000000000000000000000000000000000000000000000001" }
 scopes = ["approval"] # the default
 allowed_ips = ["192.0.2.21"] # optional extra check, never a substitute for the key
-# backend = "sudo"               # needed only with more than one host backend
+# backend = "sudo"            # needed only with more than one host backend
 
 # A client that asks questions for a workload, e.g. an AI agent through the
 # MCP endpoint (https://<intake>/mcp, this key as a bearer token).
@@ -145,9 +145,33 @@ type = "log"
 # [channel.discord]
 # type = "discord"
 # channel_id = "123456789012345678"
-# guild_id = "234567890123456789"          # optional; decisions only from this server
+# guild_id = "234567890123456789"                    # optional; decisions only from this server
 # bot_token_file = "/etc/countersign/discord-token"  # or COUNTERSIGN_DISCORD_BOT_TOKEN
-# mention_roles = ["345678901234567890"]  # optional; pinged on new requests
+# mention_roles = ["345678901234567890"]             # optional; pinged on new requests
+
+# Slack: requests are posted with Block Kit buttons; presses and
+# `/countersign-link` arrive over Socket Mode (outbound WebSocket only).
+# Needs a Bot Token (xoxb-..., chat:write) and an App-Level Token (xapp-...,
+# connections:write), plus Interactivity and the `/countersign-link` slash
+# command enabled in the Slack app settings.
+# [channel.slack]
+# type = "slack"
+# channel_id = "C0123456789"
+# team_id = "T0123456789"                              # optional; actions only from this workspace
+# bot_token_file = "/etc/countersign/slack-bot-token"  # or COUNTERSIGN_SLACK_BOT_TOKEN
+# app_token_file = "/etc/countersign/slack-app-token"  # or COUNTERSIGN_SLACK_APP_TOKEN
+# mention_users = ["U0123456789"]                      # optional; pinged on new requests
+# mention_groups = ["S0123456789"]                     # optional; user groups pinged on new requests
+
+# Web Push: browser push notifications (RFC 8291 + VAPID) delivered only to
+# active persons eligible for each request or question. No external relay
+# server required; works with installed PWAs on iOS/Android and desktop browsers.
+# Create the key with `countersign vapid-key /etc/countersign/vapid.key`.
+# [channel.webpush]
+# type = "webpush"
+# vapid_key_file = "/etc/countersign/vapid.key"
+# subject = "mailto:ops@example.com"  # optional; defaults to server.public_url
+# details = false                     # false (default): safe title only on lock screens
 
 # ------------------------------------------------------------------ actors
 # Persons sign in and decide. "oidc:<issuer>#<sub>" identities sign in; other
@@ -204,6 +228,8 @@ min_assurance = "fresh-auth"
 # Keep requests out of chat when the requester asks ("honor"), never
 # ("ignore"), or always ("always"). The web UI and the record keep everything.
 # sensitive = "honor"
+# Route notifications only to specific channels (omit to notify all channels).
+# channels = ["slack", "webpush"]
 
 # sudo on target hosts: package management opens a 15-minute window; anything
 # else needs one approval per command. Approving a command approves root on

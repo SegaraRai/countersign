@@ -19,7 +19,7 @@ use countersign_core::{ActionIntent, ActionSink, ActorId, AnswerIntent, ChannelN
 use crate::engine::Engine;
 
 /// How long a link code stays valid.
-pub const CODE_TTL: Duration = Duration::from_secs(10 * 60);
+pub const CODE_TTL: Duration = Duration::from_mins(10);
 /// Crockford base32: no I, L, O, U, so codes survive being read aloud or retyped.
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const CODE_LEN: usize = 10;

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 
-use countersign::{CliError, Command, Context, execute, host_key, keygen, signing_key};
+use countersign::{CliError, Command, Context, execute, host_key, keygen, signing_key, vapid_key};
 use countersign_core::Store;
 use countersign_store_sqlite::SqliteStore;
 use countersignd::config::Config;
@@ -41,6 +41,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         }
         Command::SigningKey { path, public, force } => {
             println!("{}", signing_key(path, *public, *force)?);
+            return Ok(());
+        }
+        Command::VapidKey { path, public, force } => {
+            println!("{}", vapid_key(path, *public, *force)?);
             return Ok(());
         }
         _ => {}

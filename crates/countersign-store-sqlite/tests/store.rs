@@ -38,6 +38,7 @@ fn open_request(subject_id: &str, now: Timestamp) -> (Request, Vec<countersign_c
         grant: countersign_core::GrantMode::Once,
         require_initiator: false,
         scope: std::collections::BTreeMap::default(),
+        channels: Vec::new(),
     };
     Request::open(pending, reqs, false, now)
 }
@@ -400,4 +401,45 @@ async fn suspensions_snapshots_and_admin_actions() {
     }
     let actions = store.admin_actions(10).await.unwrap();
     assert_eq!(actions.iter().map(|a| a.action.as_str()).collect::<Vec<_>>(), ["reinstate", "suspend"]);
+}
+
+#[tokio::test]
+async fn push_subscriptions_crud() {
+    let store = SqliteStore::in_memory().await.unwrap();
+    let alice = ActorId::new("alice");
+    let sub1 = countersign_core::PushSubscription {
+        id: "sub-1".into(),
+        person: alice.clone(),
+        endpoint: "https://push.example/1".into(),
+        p256dh: "pub1".into(),
+        auth: "auth1".into(),
+        label: Some("Chrome".into()),
+        created_at: t(10),
+    };
+    let sub2 = countersign_core::PushSubscription {
+        id: "sub-2".into(),
+        person: bob(),
+        endpoint: "https://push.example/2".into(),
+        p256dh: "pub2".into(),
+        auth: "auth2".into(),
+        label: None,
+        created_at: t(20),
+    };
+    store.save_push_subscription(&sub1).await.unwrap();
+    store.save_push_subscription(&sub2).await.unwrap();
+
+    assert_eq!(store.list_push_subscriptions(None).await.unwrap().len(), 2);
+    assert_eq!(store.list_push_subscriptions(Some(&alice)).await.unwrap(), vec![sub1.clone()]);
+
+    // Cannot delete someone else's subscription by person + id.
+    assert!(!store.delete_push_subscription_for_person(&bob(), "sub-1").await.unwrap());
+    assert!(store.delete_push_subscription_for_person(&alice, "sub-1").await.unwrap());
+    assert_eq!(
+        store.list_push_subscriptions(Some(&alice)).await.unwrap(),
+        [] as [countersign_core::PushSubscription; 0]
+    );
+
+    // Delete by endpoint (e.g. 410 Gone).
+    assert!(store.delete_push_subscription("https://push.example/2").await.unwrap());
+    assert_eq!(store.list_push_subscriptions(None).await.unwrap(), [] as [countersign_core::PushSubscription; 0]);
 }

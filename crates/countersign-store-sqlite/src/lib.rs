@@ -600,6 +600,85 @@ impl Store for SqliteStore {
             })
             .collect()
     }
+
+    async fn save_push_subscription(&self, sub: &countersign_core::PushSubscription) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO push_subscriptions (id, actor_id, endpoint, p256dh, auth, label, created_at_ms)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (endpoint) DO UPDATE SET
+               actor_id = excluded.actor_id,
+               p256dh = excluded.p256dh,
+               auth = excluded.auth,
+               label = excluded.label,
+               created_at_ms = excluded.created_at_ms",
+        )
+        .bind(&sub.id)
+        .bind(sub.person.as_str())
+        .bind(&sub.endpoint)
+        .bind(&sub.p256dh)
+        .bind(&sub.auth)
+        .bind(sub.label.as_deref())
+        .bind(ms(sub.created_at))
+        .execute(&self.pool)
+        .await
+        .map_err(other)?;
+        Ok(())
+    }
+
+    async fn list_push_subscriptions(
+        &self,
+        person: Option<&ActorId>,
+    ) -> Result<Vec<countersign_core::PushSubscription>, StoreError> {
+        let rows = match person {
+            Some(p) => sqlx::query(
+                "SELECT id, actor_id, endpoint, p256dh, auth, label, created_at_ms
+                 FROM push_subscriptions WHERE actor_id = ? ORDER BY created_at_ms DESC",
+            )
+            .bind(p.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(other)?,
+            None => sqlx::query(
+                "SELECT id, actor_id, endpoint, p256dh, auth, label, created_at_ms
+                 FROM push_subscriptions ORDER BY created_at_ms DESC",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(other)?,
+        };
+        rows.iter()
+            .map(|r| {
+                Ok(countersign_core::PushSubscription {
+                    id: r.get("id"),
+                    person: ActorId::new(r.get::<String, _>("actor_id")),
+                    endpoint: r.get("endpoint"),
+                    p256dh: r.get("p256dh"),
+                    auth: r.get("auth"),
+                    label: r.get("label"),
+                    created_at: at(r.get("created_at_ms"))?,
+                })
+            })
+            .collect()
+    }
+
+    async fn delete_push_subscription(&self, endpoint: &str) -> Result<bool, StoreError> {
+        let done = sqlx::query("DELETE FROM push_subscriptions WHERE endpoint = ?")
+            .bind(endpoint)
+            .execute(&self.pool)
+            .await
+            .map_err(other)?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    async fn delete_push_subscription_for_person(&self, person: &ActorId, id: &str) -> Result<bool, StoreError> {
+        let done = sqlx::query("DELETE FROM push_subscriptions WHERE actor_id = ? AND id = ?")
+            .bind(person.as_str())
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(other)?;
+        Ok(done.rows_affected() > 0)
+    }
 }
 
 fn version_to_db(v: u64) -> Result<i64, StoreError> {

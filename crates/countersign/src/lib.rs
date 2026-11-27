@@ -132,6 +132,18 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Write a new VAPID P-256 key for `[channel.<name>]` (`type = "webpush"`,
+    /// mode 0600) and print its base64url public key. With `--public`, print
+    /// the public key of an existing key instead.
+    VapidKey {
+        path: PathBuf,
+        /// Only print the public key of an existing key file.
+        #[arg(long, conflicts_with = "force")]
+        public: bool,
+        /// Overwrite an existing file.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -282,6 +294,7 @@ pub async fn execute(cmd: Command, ctx: Context, out: &mut dyn Write) -> Result<
         Command::Keygen { path, format, force } => keygen(&path, format, force)?,
         Command::HostKey { path, force } => writeln!(out, "{}", host_key(&path, force)?)?,
         Command::SigningKey { path, public, force } => writeln!(out, "{}", signing_key(&path, public, force)?)?,
+        Command::VapidKey { path, public, force } => writeln!(out, "{}", vapid_key(&path, public, force)?)?,
     }
     Ok(())
 }
@@ -404,7 +417,7 @@ pub fn details(p: &Presentation, now: Timestamp, verbose: bool) -> String {
         kv(&mut s, w.label, &format!("{} ({})", short_time(w.at), present::relative(w.at, now)));
     }
     for d in &p.status.decisions {
-        let comment = d.comment.as_deref().map(|c| format!(": {c}")).unwrap_or_default();
+        let comment = d.comment.as_deref().map_or_default(|c| format!(": {c}"));
         kv(
             &mut s,
             "Decision",
@@ -481,6 +494,22 @@ pub fn signing_key(path: &Path, public: bool, force: bool) -> Result<String, Cli
         ServerKey::parse(&text).ok_or_else(|| CliError::Usage("generated key does not parse".into()))?
     };
     Ok(format!("server_keys = [\"{}\"]", key.public()))
+}
+
+/// Write a new VAPID P-256 key, or with `public` read an existing one.
+/// Returns the base64url public key.
+pub fn vapid_key(path: &Path, public: bool, force: bool) -> Result<String, CliError> {
+    use countersign_channel_webpush::VapidKey;
+    let key = if public {
+        let text = std::fs::read_to_string(path)?;
+        VapidKey::parse(&text)
+            .ok_or_else(|| CliError::Usage(format!("{} does not hold a VAPID key", path.display())))?
+    } else {
+        let key = VapidKey::generate().map_err(CliError::Usage)?;
+        write_secret(path, &key.to_token(), force)?;
+        key
+    };
+    Ok(key.public_key_base64url().to_owned())
 }
 
 fn write_secret(path: &Path, text: &str, force: bool) -> Result<(), CliError> {

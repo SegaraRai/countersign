@@ -14,14 +14,18 @@ default = [
   "auth-oidc",
   "channel-discord",
   "channel-ntfy",
+  "channel-slack",
   "channel-webhook",
+  "channel-webpush",
 ]
 backend-octelium = ["dep:countersign-backend-octelium"]
 backend-exec = ["dep:countersign-backend-exec"]
 auth-oidc = ["dep:countersign-auth-oidc"]
 channel-discord = ["dep:countersign-channel-discord"]
 channel-ntfy = ["dep:countersign-channel-ntfy"]
+channel-slack = ["dep:countersign-channel-slack"]
 channel-webhook = ["dep:countersign-channel-webhook"]
+channel-webpush = ["dep:countersign-channel-webpush"]
 
 [dependencies]
 async-trait.workspace = true
@@ -33,7 +37,9 @@ countersign-backend-exec = { workspace = true, optional = true }
 countersign-backend-octelium = { workspace = true, optional = true }
 countersign-channel-discord = { workspace = true, optional = true }
 countersign-channel-ntfy = { workspace = true, optional = true }
+countersign-channel-slack = { workspace = true, optional = true }
 countersign-channel-webhook = { workspace = true, optional = true }
+countersign-channel-webpush = { workspace = true, optional = true }
 countersign-core.workspace = true
 countersign-store-sqlite.workspace = true
 fetchlet.workspace = true

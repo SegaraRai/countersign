@@ -37,7 +37,7 @@ use axum::extract::{FromRef, Request as HttpRequest};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum_extra::extract::cookie::Key;
 use serde::Serialize;
 
@@ -70,6 +70,8 @@ pub struct AppState {
     /// The pages, once started ([`Pages::start`]). Without them only
     /// sign-in, the JSON API and `/healthz` answer.
     pub pages: Option<Pages>,
+    /// Base64url-encoded VAPID P-256 public key when Web Push is configured.
+    pub vapid_public_key: Option<String>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -100,6 +102,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/questions", get(api::questions))
         .route("/api/questions/{id}", get(api::question))
         .route("/api/questions/{id}/answer", post(api::answer))
+        .route("/api/push/config", get(api::push_config))
+        .route("/api/push/subscriptions", post(api::push_subscribe))
+        .route("/api/push/subscriptions/{id}", delete(api::push_unsubscribe))
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state);
     let app = match pages {

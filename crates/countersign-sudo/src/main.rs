@@ -101,10 +101,8 @@ fn open_caller_stderr(pid: u32) -> Option<std::fs::File> {
     // Verify the caller actually had fd 2 open for writing so reopening as
     // root never upgrades a read-only descriptor.
     let fdinfo = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/2")).ok()?;
-    let flags = fdinfo
-        .lines()
-        .find_map(|l| l.strip_prefix("flags:"))
-        .and_then(|v| i32::from_str_radix(v.trim(), 8).ok())?;
+    let flags =
+        fdinfo.lines().find_map(|l| l.strip_prefix("flags:")).and_then(|v| i32::from_str_radix(v.trim(), 8).ok())?;
     if (flags & libc::O_ACCMODE) == libc::O_RDONLY {
         return None;
     }

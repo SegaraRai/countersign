@@ -50,6 +50,7 @@ fn sudo(argv: &[&str], grant: GrantMode, scope: &[(&str, &str)]) -> Request {
         grant,
         require_initiator: false,
         scope: scope.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
+        channels: Vec::new(),
     };
     Request::open(pending, reqs, false, t(0)).0
 }
@@ -251,8 +252,8 @@ fn confidential_questions_are_withheld_from_chat() {
 fn durations_and_relative_times_in_words() {
     assert_eq!(duration_words(Duration::from_secs(1)), "1 second");
     assert_eq!(duration_words(Duration::from_secs(60)), "1 minute");
-    assert_eq!(duration_words(Duration::from_secs(5400)), "1 hour 30 minutes");
-    assert_eq!(duration_words(Duration::from_secs(2 * 86_400)), "2 days");
+    assert_eq!(duration_words(Duration::from_mins(90)), "1 hour 30 minutes");
+    assert_eq!(duration_words(Duration::from_hours(48)), "2 days");
     assert_eq!(relative(t(240), t(0)), "in 4 min");
     assert_eq!(relative(t(0), t(7200)), "2 h ago");
 }

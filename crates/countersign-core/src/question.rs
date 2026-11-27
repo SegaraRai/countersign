@@ -103,6 +103,9 @@ pub struct QuestionPolicy {
     /// How long a confidential answer stays readable by the asker.
     #[serde(default = "default_retention", with = "humantime_serde")]
     pub answer_retention: Duration,
+    /// Channels that receive notifications for this policy. Empty means all configured channels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<ChannelName>,
 }
 
 /// Which askers a question policy covers. Omitted fields match anything.
@@ -122,13 +125,13 @@ fn strongest() -> Assurance {
     Assurance::FreshAuth
 }
 fn default_answer_timeout() -> Duration {
-    Duration::from_secs(30 * 60)
+    Duration::from_mins(30)
 }
 fn default_max_pending() -> usize {
     5
 }
 fn default_retention() -> Duration {
-    Duration::from_secs(24 * 3600)
+    Duration::from_hours(24)
 }
 
 impl QuestionPolicy {
@@ -196,6 +199,9 @@ pub struct QuestionRequirements {
     pub confidential_min_assurance: Assurance,
     #[serde(with = "humantime_serde")]
     pub answer_retention: Duration,
+    /// Channels routed for this question; empty means all configured channels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<ChannelName>,
 }
 
 /// How a question ended.
@@ -320,6 +326,7 @@ impl Question {
             allow_self_answer: policy.allow_self_answer,
             confidential_min_assurance: policy.confidential_min_assurance,
             answer_retention: policy.answer_retention,
+            channels: policy.channels.clone(),
         };
         let q = Self {
             id,

@@ -1,0 +1,31 @@
+[package]
+name = "countersign-channel-webpush"
+description = "Web Push (RFC 8291 + RFC 8292 VAPID) notification channel for countersign"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aes-gcm = "0.10"
+async-trait.workspace = true
+base64.workspace = true
+countersign-core.workspace = true
+getrandom.workspace = true
+hkdf = "0.12"
+jiff.workspace = true
+p256 = { version = "0.14", default-features = false, features = ["ecdsa", "ecdh", "arithmetic"] }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+toml.workspace = true
+
+[lints]
+workspace = true

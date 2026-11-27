@@ -109,11 +109,11 @@ fn default_listen() -> SocketAddr {
 }
 
 fn default_session_ttl() -> Duration {
-    Duration::from_secs(12 * 3600)
+    Duration::from_hours(12)
 }
 
 fn default_fresh_window() -> Duration {
-    Duration::from_secs(5 * 60)
+    Duration::from_mins(5)
 }
 
 /// How persons sign in to the web UI.
@@ -196,9 +196,15 @@ pub enum ChannelConfig {
     /// Push notifications through an ntfy server, linking to the web UI.
     #[cfg(feature = "channel-ntfy")]
     Ntfy(countersign_channel_ntfy::NtfyConfig),
+    /// Posts to a Slack channel with Block Kit buttons; receives actions over Socket Mode.
+    #[cfg(feature = "channel-slack")]
+    Slack(countersign_channel_slack::SlackConfig),
     /// Signed JSON events (Standard Webhooks), sent to a URL.
     #[cfg(feature = "channel-webhook")]
     Webhook(countersign_channel_webhook::WebhookConfig),
+    /// Browser Web Push (RFC 8291 + VAPID), sent only to eligible approvers/responders.
+    #[cfg(feature = "channel-webpush")]
+    Webpush(countersign_channel_webpush::WebPushConfig),
 }
 
 /// What a client key may be used for.
@@ -421,6 +427,11 @@ impl Config {
                     errors.push(format!("policy {}: {problem}", p.name));
                 }
             }
+            for ch in &p.channels {
+                if !self.channels.contains_key(ch) {
+                    errors.push(format!("policy {}: unknown channel {ch}", p.name));
+                }
+            }
         }
         if let Err(es) = self.question_policies.validate() {
             errors.extend(es);
@@ -429,6 +440,11 @@ impl Config {
             for sel in &p.responders {
                 if let Some(problem) = dir.selector_problem(sel) {
                     errors.push(format!("question_policy {}: {problem}", p.name));
+                }
+            }
+            for ch in &p.channels {
+                if !self.channels.contains_key(ch) {
+                    errors.push(format!("question_policy {}: unknown channel {ch}", p.name));
                 }
             }
         }

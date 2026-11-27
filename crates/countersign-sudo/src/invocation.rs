@@ -95,7 +95,7 @@ pub fn read(
     env: &BTreeMap<String, String>,
     sudo_binaries: &[PathBuf],
 ) -> Result<Invocation, Error> {
-    let var = |k: &str| env.get(k).map(String::as_str).unwrap_or_default();
+    let var = |k: &str| env.get(k).map_or_default(String::as_str);
     if var("PAM_TYPE") != "auth" {
         return Err(Error::Context(format!("expected PAM_TYPE=auth, got {:?}", var("PAM_TYPE"))));
     }

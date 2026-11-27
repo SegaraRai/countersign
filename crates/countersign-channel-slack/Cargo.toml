@@ -1,0 +1,33 @@
+[package]
+name = "countersign-channel-slack"
+description = "Slack channel for countersign: posts requests with Block Kit buttons, receives actions over Socket Mode"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+countersign-core.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+jiff.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tokio-websockets = { version = "0.13", default-features = false, features = [
+  "client",
+  "fastrand",
+  "ring",
+  "rustls-webpki-roots",
+  "sha1_smol",
+] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+toml.workspace = true
+
+[lints]
+workspace = true

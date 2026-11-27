@@ -57,5 +57,5 @@ pub use question::{
     QuestionPolicySet, QuestionRequirements, Response,
 };
 pub use request::{Decision, Request, RequestState, TransitionError, Use, Verdict};
-pub use store::{AccountLink, AdminAction, OutboxItem, RequestFilter, Store, StoreError};
+pub use store::{AccountLink, AdminAction, OutboxItem, PushSubscription, RequestFilter, Store, StoreError};
 pub use subject::{Action, Detail, Initiator, PendingSubject, Requester, Source, SubjectFacts, SubjectRef};
