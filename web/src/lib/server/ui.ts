@@ -1,9 +1,35 @@
 // The UI API, reached in process. countersignd attaches who is asking to
 // every request the page makes here; nothing of that comes from this code.
 
+import { getRequestEvent } from "$app/server";
 import { error, fail, redirect, type RequestEvent } from "@sveltejs/kit";
 
 const ORIGIN = "https://countersign.internal";
+
+/**
+ * Under `vp run dev` the pages run in Vite, not in countersignd: the UI API
+ * is the demo daemon's (`web_demo --dev`), which works out who is asking
+ * from the browser's headers forwarded here. Left out of the build.
+ */
+const DEV_ORIGIN = "http://127.0.0.1:8790/_dev/ui";
+const FORWARDED = ["cookie", "origin", "sec-fetch-site"];
+
+function ui(path: string, init: RequestInit = {}): Promise<Response> {
+  if (!import.meta.env.DEV) {
+    return fetch(ORIGIN + path, init);
+  }
+  const headers = new Headers(init.headers);
+  const browser = getRequestEvent().request.headers;
+  for (const name of FORWARDED) {
+    const value = browser.get(name);
+    if (value !== null) {
+      headers.set(name, value);
+    }
+  }
+  return fetch(DEV_ORIGIN + path, { ...init, headers }).catch(() =>
+    error(503, "The demo daemon is not up yet (it builds on the first start). Reload in a moment."),
+  );
+}
 
 interface Problem {
   error: string;
@@ -26,7 +52,7 @@ export function loginUrl(url: URL): string {
 
 /** GET `path`: its JSON, or the page's error (signed out: off to sign in). */
 export async function read<T>(event: Pick<RequestEvent, "url">, path: string): Promise<T> {
-  const res = await fetch(ORIGIN + path);
+  const res = await ui(path);
   if (res.ok) {
     return (await res.json()) as T;
   }
@@ -39,7 +65,7 @@ export async function read<T>(event: Pick<RequestEvent, "url">, path: string): P
 
 /** GET `path`, or null when it is not there or not for this reader. */
 export async function maybe<T>(path: string): Promise<T | null> {
-  const res = await fetch(ORIGIN + path);
+  const res = await ui(path);
   return res.ok ? ((await res.json()) as T) : null;
 }
 
@@ -59,7 +85,7 @@ export async function act<T = { ok: true }>(
       params.append(k, v);
     }
   }
-  const res = await fetch(ORIGIN + path, { method: "POST", body: params });
+  const res = await ui(path, { method: "POST", body: params });
   if (res.ok) {
     return { form, done: (await res.json()) as T };
   }

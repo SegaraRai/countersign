@@ -11,9 +11,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use countersign_core::{ActionIntent, ActionSink, ActorId, AnswerIntent, ChannelName, Question, Request};
 use jiff::{SignedDuration, Timestamp};
 use tracing::info;
+
+use countersign_core::{ActionIntent, ActionSink, ActorId, AnswerIntent, ChannelName, Question, Request};
 
 use crate::engine::Engine;
 

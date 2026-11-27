@@ -25,15 +25,16 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use hmac::{Hmac, Mac};
+use jiff::Timestamp;
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+
 use countersign_core::present::{Audience, Presentation};
 use countersign_core::{
     Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, EventId, Item, MessageRef, Notification, Question,
     Request,
 };
-use hmac::{Hmac, Mac};
-use jiff::Timestamp;
-use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MIN_SECRET_BYTES: usize = 16;

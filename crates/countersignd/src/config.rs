@@ -11,12 +11,13 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use serde::Deserialize;
+
 use countersign_core::host_key;
 use countersign_core::{
     ActorId, BackendName, ChannelName, ClientId, Directory, GroupConfig, PersonConfig, Policy, PolicySet,
     QuestionPolicy, QuestionPolicySet, Roles, WorkloadConfig,
 };
-use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {

@@ -28,9 +28,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use countersign_core::{
-    ActionSink, Assurance, Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, MessageRef, Notification,
-};
 use serde::Deserialize;
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
 use twilight_http::Client;
@@ -40,6 +37,10 @@ use twilight_model::channel::message::{AllowedMentions, MessageFlags};
 use twilight_model::http::interaction::{InteractionResponse, InteractionResponseData, InteractionResponseType};
 use twilight_model::id::Id;
 use twilight_model::id::marker::{ChannelMarker, GuildMarker, MessageMarker, RoleMarker};
+
+use countersign_core::{
+    ActionSink, Assurance, Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, MessageRef, Notification,
+};
 
 pub use crate::interact::{Action, LINK_COMMAND, Scope, custom_id, parse_custom_id};
 pub use crate::render::{View, view};

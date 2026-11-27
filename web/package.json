@@ -9,10 +9,6 @@
     "#lib/*.svelte": "./src/lib/*.svelte",
     "#lib/*": "./src/lib/*.ts"
   },
-  "scripts": {
-    "build": "vp build",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && stillwind check"
-  },
   "dependencies": {
     "stillwind": "catalog:"
   },

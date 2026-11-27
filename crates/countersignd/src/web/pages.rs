@@ -8,7 +8,7 @@
 //! it has no network, files or environment.
 //!
 //! The build is embedded when `web/build` exists as countersignd is
-//! compiled (`pnpm build` first). Debug builds can serve another
+//! compiled (`vp run build` first). Debug builds can serve another
 //! build directory instead, named by `COUNTERSIGN_WEB_DIR`.
 
 use std::num::NonZeroUsize;

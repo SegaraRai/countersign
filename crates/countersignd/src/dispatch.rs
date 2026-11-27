@@ -8,9 +8,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use countersign_core::{Channel, ChannelError, DomainEvent, Item, Notification, OutboxItem, Store, StoreError};
 use jiff::{SignedDuration, Timestamp};
 use tracing::{debug, warn};
+
+use countersign_core::{Channel, ChannelError, DomainEvent, Item, Notification, OutboxItem, Store, StoreError};
 
 const BATCH: u32 = 32;
 const LEASE: Duration = Duration::from_secs(60);

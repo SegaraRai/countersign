@@ -10,20 +10,20 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
 use axum::http::{HeaderMap, Method, Request as HttpRequest, StatusCode, header};
+use http_body_util::BodyExt;
+use jiff::Timestamp;
+use serde_json::Value;
+use tower::ServiceExt;
+
 use countersign_core::{
     AccessBackend, ActionIntent, ActionSink, ActorId, Asker, Assurance, AuthError, Authenticator, BackendCaps,
     BackendError, BackendName, ChannelName, ClientId, Confidentiality, GrantHandle, LoginStart, PendingSubject,
     QuestionOutcome, RequestState, Requester, Store, SubjectFacts, SubjectRef, Verdict, VerifiedLogin,
 };
 use countersign_store_sqlite::SqliteStore;
-use countersignd::Daemon;
 use countersignd::config::Config;
 use countersignd::engine::Ask;
-use countersignd::web;
-use http_body_util::BodyExt;
-use jiff::Timestamp;
-use serde_json::Value;
-use tower::ServiceExt;
+use countersignd::{Daemon, web};
 
 // ------------------------------------------------------------------ fakes
 
@@ -789,7 +789,7 @@ async fn chat_approvals_are_refused_when_the_policy_needs_more_than_linked() {
 
 // ------------------------------------------------------------------ the pages
 
-/// Through the real pages, when this countersignd has them (`pnpm build`
+/// Through the real pages, when this countersignd has them (`vp run build`
 /// before building it).
 #[tokio::test(flavor = "multi_thread")]
 async fn pages_render_escaped_and_decide_through_form_actions() {
@@ -818,7 +818,7 @@ async fn pages_render_escaped_and_decide_through_form_actions() {
     assert_eq!(index.status, StatusCode::OK, "{}", index.body);
     assert!(index.body.contains(&format!("/requests/{id}")), "{}", index.body);
     let csp = index.headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
-    assert!(csp.contains("script-src 'self' 'nonce-"), "{csp}");
+    assert!(csp.contains("script-src 'self'") && csp.contains("'nonce-"), "{csp}");
 
     let page = b.get(&format!("/requests/{id}")).await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);

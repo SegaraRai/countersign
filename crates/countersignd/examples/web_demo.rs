@@ -1,13 +1,19 @@
 //! The web UI against made-up data, for working on the pages.
 //!
 //! ```text
-//! pnpm build && cargo run -p countersignd --example web_demo
+//! vp run build && cargo run -p countersignd --example web_demo
 //! ```
 //!
 //! Then open <http://localhost:8790>. Signing in goes to a pretend identity
 //! provider that lets you pick who you are. Nothing here is real: the
 //! backend only remembers what was decided, and everything is gone when the
 //! process stops.
+//!
+//! With `--dev <origin>` (what `vp run dev` starts, behind the Vite dev
+//! server at `<origin>`), the pages are not served from here. Instead the UI
+//! API answers at `/_dev/ui`, taking who is asking from the headers the dev
+//! server forwards from the browser. Only for this example: countersignd
+//! itself never lets anything but its own pages reach the UI API.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -16,9 +22,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
-use axum::extract::Query;
+use axum::extract::{Query, Request};
+use axum::middleware::Next;
 use axum::response::Html;
 use axum::routing::get;
+use jiff::Timestamp;
+
 use countersign_core::{
     AccessBackend, Action, Asker, AuthError, Authenticator, BackendCaps, BackendError, BackendName, ClientId,
     Confidentiality, Detail, GrantHandle, LoginStart, PendingSubject, Requester, SubjectFacts, SubjectRef,
@@ -28,9 +37,9 @@ use countersign_store_sqlite::SqliteStore;
 use countersignd::Daemon;
 use countersignd::config::Config;
 use countersignd::engine::Ask;
-use jiff::Timestamp;
 
 const LISTEN: &str = "127.0.0.1:8790";
+const PUBLIC_URL: &str = "http://localhost:8790";
 
 const CONFIG: &str = r#"
     [server]
@@ -272,11 +281,18 @@ fn seed() -> BTreeMap<String, SubjectFacts> {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info,countersignd=debug").init();
-    if !countersignd::web::pages_built_in() {
-        return Err("the web UI is not built in: run `pnpm build`, then build again".into());
+    let mut args = std::env::args().skip(1);
+    let dev_origin = match args.next().as_deref() {
+        None => None,
+        Some("--dev") => Some(args.next().ok_or("--dev needs the dev server's origin")?),
+        Some(other) => return Err(format!("unknown argument {other}").into()),
+    };
+    if dev_origin.is_none() && !countersignd::web::pages_built_in() {
+        return Err("the web UI is not built in: run `vp run build`, then build again".into());
     }
 
-    let mut config = Config::from_toml(CONFIG)?;
+    let public_url = dev_origin.as_deref().unwrap_or(PUBLIC_URL);
+    let mut config = Config::from_toml(&CONFIG.replace(PUBLIC_URL, public_url))?;
     let key_file = std::env::temp_dir().join("countersign-web-demo-signing.key");
     std::fs::write(&key_file, countersign_core::approval_signing::ServerKey::generate(&[7; 32]))?;
     config.intake.as_mut().ok_or("intake")?.signing_key_file = key_file;
@@ -285,7 +301,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend: Arc<dyn AccessBackend> = Arc::new(DemoBackend { pending: Mutex::new(seed()) });
     let mut daemon = Daemon::with_parts(&config, store, vec![backend], vec![])?;
     daemon.web.auth = Some(Arc::new(DemoIdp));
-    daemon.web.pages = countersignd::web::Pages::start(&daemon.web).await?;
+    // A fixed key, so restarting keeps you signed in.
+    daemon.web.key = axum_extra::extract::cookie::Key::from(&[7; 64]);
+    if dev_origin.is_none() {
+        daemon.web.pages = countersignd::web::Pages::start(&daemon.web).await?;
+    }
     daemon.engine.tick(Timestamp::now()).await;
 
     let asker = || Asker { client: ClientId::new("agent-host"), actor: None };
@@ -341,9 +361,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let app = Router::new().route("/demo-idp", get(demo_idp)).fallback_service(countersignd::web::router(daemon.web));
+    let mut app = Router::new().route("/demo-idp", get(demo_idp));
+    if dev_origin.is_some() {
+        app = app.nest("/_dev/ui", dev_ui(&daemon.web));
+    }
+    let app = app.fallback_service(countersignd::web::router(daemon.web));
     let listener = tokio::net::TcpListener::bind(LISTEN).await?;
-    tracing::info!("open http://localhost:8790");
+    tracing::info!("open {public_url}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// The UI API for the Vite dev server, which forwards the browser's
+/// `Cookie`, `Origin` and `Sec-Fetch-Site`: the trusted context countersignd
+/// gives its own pages, worked out from those.
+fn dev_ui(web: &countersignd::web::AppState) -> Router {
+    let key = web.key.clone();
+    let origin = web.settings.public_origin.clone();
+    countersignd::web::ui_router(web.clone()).layer(axum::middleware::from_fn(move |mut req: Request, next: Next| {
+        let context = countersignd::web::visit_context(req.headers(), &key, &origin);
+        req.extensions_mut().insert(context);
+        next.run(req)
+    }))
 }

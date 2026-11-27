@@ -106,22 +106,29 @@ its build is embedded into the binary at compile time, so build it first.
 Building needs Rust 1.100 or later, Node.js and pnpm. The pnpm workspace is the
 repository root.
 
+Tasks are Vite+ tasks (`vp run <task>`, defined in `vite.config.ts`).
+
 ```sh
 pnpm install
-pnpm build    # writes web/build, which countersignd embeds
+vp run build    # writes web/build, which countersignd embeds
 cargo build --release
 ```
 
 Without `web/build`, `countersignd` still builds (with a warning). Sign-in,
 the JSON API and the intake API work, and the pages answer 503.
 
-To work on the pages, `cargo run -p countersignd --example web_demo` serves
-them at <http://localhost:8790> with made-up requests and questions, and a
-pretend identity provider that lets you pick who you are. Rebuild `web/`, then
-restart the example to see changes. Debug builds load the pages from the
-directory in `COUNTERSIGN_WEB_DIR` (e.g. `web/build`) instead of the embedded
-copy, so no recompile is needed. `pnpm check` checks formatting, types, lint
-and the Stillwind classes.
+To work on the pages, `vp run dev` serves them with hot reload at
+<http://localhost:5173>, against made-up requests and questions. It builds and
+starts the demo daemon (`cargo run -p countersignd --example web_demo -- --dev
+http://localhost:5173`) and stops it again. Signing in goes to a pretend
+identity provider that lets you pick who you are. Saving a page updates it in
+place. Restarting the daemon (after Rust changes) resets the made-up data and
+keeps you signed in.
+
+`vp run check` checks formatting, lint, types and the Stillwind classes.
+
+To see the built pages as countersignd serves them, `vp run build`, then
+`cargo run -p countersignd --example web_demo` (<http://localhost:8790>).
 
 ## Running
 

@@ -5,12 +5,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use countersignd::config::Config;
-use countersignd::{Daemon, rules_from};
 use jiff::Timestamp;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
+
+use countersignd::config::Config;
+use countersignd::{Daemon, rules_from};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Human approval for just-in-time access")]

@@ -17,7 +17,6 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use countersign_core::{AuthError, Authenticator, LoginStart, VerifiedLogin};
 use openidconnect::core::{CoreAuthPrompt, CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
 use openidconnect::{
     AccessTokenHash, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EndpointMaybeSet, EndpointNotSet,
@@ -26,6 +25,8 @@ use openidconnect::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::OnceCell;
+
+use countersign_core::{AuthError, Authenticator, LoginStart, VerifiedLogin};
 
 /// Environment variable consulted when `client_secret_file` is not set.
 pub const SECRET_ENV: &str = "COUNTERSIGN_OIDC_CLIENT_SECRET";

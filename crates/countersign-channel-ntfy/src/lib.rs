@@ -23,11 +23,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
 use countersign_core::present::{Audience, Presentation, Shown};
 use countersign_core::{
     Channel, ChannelCaps, ChannelError, ChannelName, DomainEvent, Item, MessageRef, Notification, Question, Request,
 };
-use serde::{Deserialize, Serialize};
 
 /// Environment variable holding the access token when `token_file` is unset.
 pub const TOKEN_ENV: &str = "COUNTERSIGN_NTFY_TOKEN";

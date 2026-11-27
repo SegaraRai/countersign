@@ -11,11 +11,12 @@
 
 use std::fmt::Write as _;
 
-use countersign_core::present::{Audience, Presentation, Shown, Tone, When};
-use countersign_core::{ApproveMode, ChannelCaps, FieldKind, Item, Notification, Question, Request, Verdict};
 use twilight_model::channel::message::Component;
 use twilight_model::channel::message::component::{ActionRow, Button, ButtonStyle};
 use twilight_model::channel::message::embed::{Embed, EmbedField, EmbedFooter};
+
+use countersign_core::present::{Audience, Presentation, Shown, Tone, When};
+use countersign_core::{ApproveMode, ChannelCaps, FieldKind, Item, Notification, Question, Request, Verdict};
 
 use crate::interact::{answer_custom_id, custom_id, decline_custom_id};
 

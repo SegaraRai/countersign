@@ -6,6 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use jiff::Timestamp;
+use serde_json::json;
+
 use countersign_core::{
     AccessBackend, ActionIntent, AnswerIntent, Asker, Assurance, BackendCaps, BackendError, BackendName, Channel,
     ChannelCaps, ChannelError, ChannelName, ClientId, Confidentiality, Exclusion, GrantHandle, Initiator, Item,
@@ -15,10 +18,7 @@ use countersign_core::{
 use countersign_store_sqlite::SqliteStore;
 use countersignd::Daemon;
 use countersignd::config::Config;
-use countersignd::engine::Ask;
-use countersignd::engine::EngineError;
-use jiff::Timestamp;
-use serde_json::json;
+use countersignd::engine::{Ask, EngineError};
 
 fn t(secs: i64) -> Timestamp {
     Timestamp::from_second(1_800_000_000 + secs).unwrap()

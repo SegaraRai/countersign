@@ -51,13 +51,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use countersign_core::{
-    AccessBackend, BackendCaps, BackendError, BackendName, GrantHandle, PendingSubject, SubjectFacts, SubjectRef,
-};
 use jiff::Timestamp;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+use countersign_core::{
+    AccessBackend, BackendCaps, BackendError, BackendName, GrantHandle, PendingSubject, SubjectFacts, SubjectRef,
+};
 
 pub use crate::runner::{CmdOutput, ProcessRunner, RunError, Runner};
 

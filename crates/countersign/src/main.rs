@@ -3,6 +3,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::Parser;
+
 use countersign::{CliError, Command, Context, execute, host_key, keygen, signing_key};
 use countersign_core::Store;
 use countersign_store_sqlite::SqliteStore;

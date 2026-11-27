@@ -5,11 +5,12 @@ use std::time::Duration;
 use axum::Router;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
+use jiff::Timestamp;
+
 use countersign_core::{
     ActorId, Assurance, Channel, ChannelError, ChannelName, DomainEvent, Notification, PendingSubject, PolicyName,
     Request, RequestState, Requester, Requirements, Selector, SubjectFacts, SubjectRef,
 };
-use jiff::Timestamp;
 
 use super::{NtfyChannel, NtfyConfig, Publish, publish};
 

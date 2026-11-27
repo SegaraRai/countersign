@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use clap::{Subcommand, ValueEnum};
+use jiff::Timestamp;
+
 use countersign_core::present::{self, Audience, Presentation, Shown};
 use countersign_core::{
     AccessBackend, ActionIntent, ActorId, Assurance, ChannelName, Item, Question, QuestionOutcome, RequestFilter,
@@ -24,7 +26,6 @@ use countersign_core::{
 };
 use countersignd::config::Config;
 use countersignd::engine::{Engine, EngineError};
-use jiff::Timestamp;
 
 /// Name recorded as the channel of decisions made here.
 pub const VIA: &str = "cli";

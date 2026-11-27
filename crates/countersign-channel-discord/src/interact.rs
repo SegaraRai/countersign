@@ -5,7 +5,6 @@
 //! a person through an account link made with a one-time code from the web
 //! UI, so a decision or answer made here is worth [`Assurance::Linked`].
 
-use countersign_core::{ActionIntent, ActionSink, AnswerIntent, Assurance, ChannelName, RequestId, Response, Verdict};
 use serde_json::{Map, Value};
 use twilight_model::application::command::{Command, CommandOption, CommandOptionType, CommandType};
 use twilight_model::application::interaction::application_command::CommandOptionValue;
@@ -13,7 +12,10 @@ use twilight_model::application::interaction::{Interaction, InteractionContextTy
 use twilight_model::id::Id;
 use twilight_model::id::marker::{ChannelMarker, GuildMarker};
 
+use countersign_core::{ActionIntent, ActionSink, AnswerIntent, Assurance, ChannelName, RequestId, Response, Verdict};
+
 pub const LINK_COMMAND: &str = "countersign-link";
+
 const CODE_OPTION: &str = "code";
 const PREFIX: &str = "cs";
 /// Discord's limit on a component's `custom_id`.

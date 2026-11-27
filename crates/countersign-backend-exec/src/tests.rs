@@ -3,8 +3,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use countersign_core::{AccessBackend, BackendError, BackendName, GrantHandle, SubjectRef};
 use serde_json::{Value, json};
+
+use countersign_core::{AccessBackend, BackendError, BackendName, GrantHandle, SubjectRef};
 
 use super::{CmdOutput, ExecBackend, ExecConfig, RunError, Runner};
 
