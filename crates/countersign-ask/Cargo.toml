@@ -1,0 +1,25 @@
+[package]
+name = "countersign-ask"
+description = "CLI client for asking human questions through countersign (for CI gates, scripts, and agents)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "countersign-ask"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+countersign-core.workspace = true
+humantime = "2"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "time"] }
+
+[lints]
+workspace = true

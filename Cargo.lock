@@ -548,6 +548,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "countersign-ask"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "countersign-core",
+ "humantime",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "countersign-auth-oidc"
 version = "0.1.0"
 dependencies = [

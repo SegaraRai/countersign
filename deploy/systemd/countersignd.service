@@ -1,0 +1,34 @@
+[Unit]
+Description=countersign - human approval for just-in-time access
+Documentation=https://github.com/SegaraRai/countersign
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=countersign
+Group=countersign
+ConfigurationDirectory=countersign
+StateDirectory=countersign
+ExecStartPre=/usr/local/bin/countersignd --config /etc/countersign/config.toml check
+ExecStart=/usr/local/bin/countersignd --config /etc/countersign/config.toml run
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+
+# Hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/countersign
+
+[Install]
+WantedBy=multi-user.target

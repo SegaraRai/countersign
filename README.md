@@ -99,6 +99,7 @@ min_assurance = "linked" # chat buttons may approve directly
 | `countersignd`                 | daemon: config, engine (discover, decide, grant, expire, questions), outbox delivery, web UI, JSON API, intake API for clients (also an MCP server for questions) |
 | `countersign` (CLI)            | host-side administration: list/show requests and questions, deny/revoke, suspend/reinstate, manage account links, generate secrets (no approve, no answer)        |
 | `countersign-sudo`             | PAM helper for target hosts: asks countersign before `sudo` runs                                                                                                  |
+| `countersign-ask`              | standalone CLI client for CI gates, scripts, and agents to ask questions and receive structured JSON answers (supports host keys and GitHub Actions OIDC)         |
 
 ## Building
 
