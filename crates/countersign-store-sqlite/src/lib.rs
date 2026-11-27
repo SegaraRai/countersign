@@ -300,7 +300,15 @@ impl Store for SqliteStore {
             return Err(if exists { StoreError::Conflict(question.id) } else { StoreError::NotFound(question.id) });
         }
         enqueue(&mut tx, events, question.updated_at).await?;
-        tx.commit().await.map_err(other)
+        tx.commit().await.map_err(other)?;
+        if question.shows_removed() {
+            // `secure_delete` zeroes freed pages in the main database file,
+            // but in WAL mode prior page images remain in `-wal` until
+            // checkpointed and truncated. Best-effort: a concurrent reader
+            // may defer truncation to a later checkpoint.
+            let _ = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(&self.pool).await;
+        }
+        Ok(())
     }
 
     async fn get_question(&self, id: RequestId) -> Result<Option<Question>, StoreError> {

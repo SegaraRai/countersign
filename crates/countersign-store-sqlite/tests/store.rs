@@ -319,6 +319,48 @@ async fn confidential_content_is_tracked_until_removed() {
     assert!(!body.contains("4711"), "the answer is gone from the row");
 }
 
+#[tokio::test]
+async fn confidential_content_is_purged_from_wal_on_removal() {
+    let dir = std::env::temp_dir().join(format!("countersign-wal-test-{}", countersign_core::RequestId::new()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("state.db");
+    let store = SqliteStore::open(&format!("sqlite://{}", db.display())).await.unwrap();
+    let (dir_cfg, standing) = (directory(), Standing::default());
+    let mut q = question(Confidentiality { question: false, answer_may_be: true });
+    store.insert_question(&q, &[]).await.unwrap();
+
+    let secret = "SUPER-SECRET-CONFIDENTIAL-ANSWER-9999";
+    let v = q.version;
+    let content = serde_json::json!({ "pin": secret }).as_object().unwrap().clone();
+    let ev = q
+        .respond(
+            &roster(&dir_cfg, &standing),
+            &bob(),
+            Response::Accept { content, confidential: true },
+            Assurance::FreshAuth,
+            "web".into(),
+            t(5),
+        )
+        .unwrap();
+    store.update_question(&q, v, &ev).await.unwrap();
+
+    let v = q.version;
+    assert!(q.mark_read(t(6)));
+    store.update_question(&q, v, &[]).await.unwrap();
+
+    let needle = secret.as_bytes();
+    let db_bytes = std::fs::read(&db).unwrap();
+    assert!(!db_bytes.windows(needle.len()).any(|w| w == needle), "secret remained in main db file");
+    let wal = dir.join("state.db-wal");
+    if wal.exists() {
+        let wal_bytes = std::fs::read(&wal).unwrap();
+        assert!(!wal_bytes.windows(needle.len()).any(|w| w == needle), "secret remained in WAL file");
+    }
+
+    store.pool().close().await;
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 async fn sqlx_body(store: &SqliteStore, id: countersign_core::RequestId) -> String {
     use sqlx::Row;
     sqlx::query("SELECT body FROM requests WHERE id = ?")
