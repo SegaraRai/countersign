@@ -73,7 +73,7 @@ async fn run(path: PathBuf) -> Result<Outcome, Error> {
     }
     let cancel = async move {
         let waits = signals.iter_mut().map(|s| Box::pin(s.recv()));
-        let _ = futures_select_any(waits).await;
+        futures_select_any(waits).await;
     };
     Ok(client.ask(&invocation, config.timeout, cancel, &mut |m: &str| say(m)).await)
 }
@@ -97,7 +97,7 @@ fn say(message: &str) {
 /// controlling terminal (whose signals would then reach the helper).
 #[cfg(unix)]
 fn open_caller_stderr(pid: u32) -> Option<std::fs::File> {
-    use std::os::unix::fs::FileTypeExt as _;
+    use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _};
     // Verify the caller actually had fd 2 open for writing so reopening as
     // root never upgrades a read-only descriptor.
     let fdinfo = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/2")).ok()?;
@@ -107,7 +107,6 @@ fn open_caller_stderr(pid: u32) -> Option<std::fs::File> {
         return None;
     }
     let link = format!("/proc/{pid}/fd/2");
-    use std::os::unix::fs::OpenOptionsExt as _;
     // Open before inspecting with fstat so a swapped target cannot race the check.
     let file =
         std::fs::OpenOptions::new().append(true).custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK).open(&link).ok()?;
