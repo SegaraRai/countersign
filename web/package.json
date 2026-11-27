@@ -1,0 +1,34 @@
+{
+  "name": "countersign-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The countersign web UI: SvelteKit pages rendered by countersignd through fetchlet.",
+  "type": "module",
+  "imports": {
+    "#lib/*.ts": "./src/lib/*.ts",
+    "#lib/*.svelte": "./src/lib/*.svelte",
+    "#lib/*": "./src/lib/*.ts"
+  },
+  "scripts": {
+    "build": "vp build",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json && stillwind check"
+  },
+  "dependencies": {
+    "stillwind": "catalog:"
+  },
+  "devDependencies": {
+    "@iconify-json/lucide": "^1.2.159",
+    "@stillwind/cli": "catalog:",
+    "@stillwind/integration": "catalog:",
+    "@stillwind/plugin-iconify": "catalog:",
+    "@sveltejs/kit": "^3.4.1",
+    "@sveltejs/vite-plugin-svelte": "^7.3.2",
+    "@types/node": "^26.6.10",
+    "fetchlet": "^0.1.1",
+    "svelte": "^5.59.2",
+    "svelte-check": "^4.7.8",
+    "svelte2tsx": "^0.7.63",
+    "typescript": "^6.0.3",
+    "vite-plus": "catalog:"
+  }
+}

@@ -12,7 +12,7 @@ type system keeps questions out of those paths.
 
 countersign stops something at a hook, asks the right people, and hands their
 answer back. Today the only thing it asks is "may this happen?" (an
-*approval*). This document adds a second kind, a *question*: "what should
+_approval_). This document adds a second kind, a _question_: "what should
 happen?", answered with structured data.
 
 - Approvals keep their current model and guarantees unchanged.
@@ -25,14 +25,14 @@ need everyone's answer (see "Later").
 
 ## Why two kinds, not one
 
-| | Approval | Question |
-|---|---|---|
-| Answer | approve / deny | data matching a schema, or decline |
-| Several responders | quorum (n of the eligible approvers) | first answer wins |
-| After the answer | a grant that lasts for a TTL or window, can be revoked | nothing; the answer is a fact |
-| No answer in time | expired, and that means **no** (fail closed) | expired, recorded as **unanswered**; the asker decides what that means |
-| Self-answer | forbidden by default | allowed if policy says so |
-| Effect | the backend grants access | none inside countersign |
+|                    | Approval                                               | Question                                                               |
+| ------------------ | ------------------------------------------------------ | ---------------------------------------------------------------------- |
+| Answer             | approve / deny                                         | data matching a schema, or decline                                     |
+| Several responders | quorum (n of the eligible approvers)                   | first answer wins                                                      |
+| After the answer   | a grant that lasts for a TTL or window, can be revoked | nothing; the answer is a fact                                          |
+| No answer in time  | expired, and that means **no** (fail closed)           | expired, recorded as **unanswered**; the asker decides what that means |
+| Self-answer        | forbidden by default                                   | allowed if policy says so                                              |
+| Effect             | the backend grants access                              | none inside countersign                                                |
 
 Folding these into one schema would make every approval field optional and
 every question field meaningless for approvals. Most security bugs in a merged
@@ -61,6 +61,7 @@ Only widely adopted specifications are used as references.
   without translation. It adds what a remote, multi-person, asynchronous
   setting needs: who may answer, a deadline, and the `expired` and
   `withdrawn` outcomes.
+
 - **JSON Schema** (draft 2020-12) defines the keywords above; countersign
   validates against the subset only and rejects any other keyword.
 - Approvals keep the existing countersign model (quorum, assurance,
@@ -142,14 +143,14 @@ config validation rejects mixing them:
 ```toml
 [[question_policy]]
 name = "agent-questions"
-match = { asker = "agent-*" }        # which askers may use it
+match = { asker = "agent-*" } # which askers may use it
 responders = ["group:operators"]
 min_assurance = "linked"
 answer_timeout = "30m"
-max_pending = 5                      # per asker
-confidential = "allow"               # "deny" (default) | "allow" | "require"
+max_pending = 5 # per asker
+confidential = "allow" # "deny" (default) | "allow" | "require"
 confidential_min_assurance = "fresh-auth"
-answer_retention = "7d"              # how long a confidential answer stays readable by the asker
+answer_retention = "7d" # how long a confidential answer stays readable by the asker
 ```
 
 `[[policy]]` (approvals) is unchanged. A question matching no
@@ -188,8 +189,11 @@ The same calls are offered as an MCP server over Streamable HTTP at
 its MCP client configured with the URL and the client's key:
 
 ```json
-{ "type": "http", "url": "https://countersign.example.com:8443/mcp",
-  "headers": { "Authorization": "Bearer ${COUNTERSIGN_KEY}" } }
+{
+  "type": "http",
+  "url": "https://countersign.example.com:8443/mcp",
+  "headers": { "Authorization": "Bearer ${COUNTERSIGN_KEY}" }
+}
 ```
 
 - Tools: `ask_question` (message, requestedSchema, optional context,
@@ -225,11 +229,11 @@ not be kept or spread.
 
 ### Who sets it
 
-| When | Who | Flag | Meaning |
-|---|---|---|---|
-| Asking | asker | `question` | the message, schema (titles, options) and context are confidential |
-| Asking | asker | `answerMayBe` | the answer may be confidential; pre-fills the responder's choice |
-| Answering | responder | `confidential` | this answer is confidential |
+| When      | Who       | Flag           | Meaning                                                            |
+| --------- | --------- | -------------- | ------------------------------------------------------------------ |
+| Asking    | asker     | `question`     | the message, schema (titles, options) and context are confidential |
+| Asking    | asker     | `answerMayBe`  | the answer may be confidential; pre-fills the responder's choice   |
+| Answering | responder | `confidential` | this answer is confidential                                        |
 
 - The responder's checkbox starts from `answerMayBe`. The responder can change
   it either way: they know what they typed.
@@ -246,12 +250,12 @@ The audit record always says that something happened: who asked, under which
 policy, when, who answered, with what assurance, and the outcome. Only the
 content is withheld.
 
-| Part | Normal | Confidential question | Confidential answer only |
-|---|---|---|---|
-| Asker, policy, times, responder, assurance, outcome | kept | kept | kept |
-| Message, schema, context | kept | **not kept**; replaced by a placeholder | kept |
-| Answer content | kept | **not kept** | **not kept** |
-| Field names of the answer | kept | not kept | kept (they come from the schema, which is not confidential) |
+| Part                                                | Normal | Confidential question                   | Confidential answer only                                    |
+| --------------------------------------------------- | ------ | --------------------------------------- | ----------------------------------------------------------- |
+| Asker, policy, times, responder, assurance, outcome | kept   | kept                                    | kept                                                        |
+| Message, schema, context                            | kept   | **not kept**; replaced by a placeholder | kept                                                        |
+| Answer content                                      | kept   | **not kept**                            | **not kept**                                                |
+| Field names of the answer                           | kept   | not kept                                | kept (they come from the schema, which is not confidential) |
 
 Confidential content is held only as long as the exchange needs it:
 
@@ -340,6 +344,7 @@ The message and schema text come from the asker and are untrusted.
 
   This stops a question from passing itself off as an approval ("Approve
   sudo on web-1?").
+
 - Discord can answer in place only for schemas that fit its components
   (a single enum or boolean). Anything else links to the web form, the same
   way long commands do today.

@@ -1,0 +1,22 @@
+packages:
+  - web
+
+allowBuilds:
+  core-js-pure: false
+  esbuild: true
+
+catalog:
+  "@stillwind/cli": ^0.12.0
+  "@stillwind/integration": ^0.12.0
+  "@stillwind/plugin-iconify": ^0.12.0
+  stillwind: ^0.12.0
+  vite: npm:@voidzero-dev/vite-plus-core@8.3.8001
+  vite-plus: 1.8.0
+
+minimumReleaseAgeExclude:
+  - "@fetchlet/node@0.1.1"
+  - "@fetchlet/web@0.1.1"
+  - fetchlet@0.1.1
+
+overrides:
+  vite@*: "catalog:"

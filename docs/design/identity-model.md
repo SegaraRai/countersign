@@ -45,12 +45,12 @@ Non-goals: managing people in the IdP, SCIM, delegation of approval rights.
  └─────────────────────────┘
 ```
 
-| Role in the request | What it is | Example: sudo | Example: CI deploy | Example: Octelium |
-|---|---|---|---|---|
-| **Source** | the authenticated party that delivered the request; its credential is checked | host `web-1` (host key) | GitHub Actions (OIDC token) | the Octelium backend (countersign polls it) |
-| **Requester** | whose action needs approval; vouched for by the source | OS user `agent` on web-1 | workload "repo X, workflow deploy, environment prod" | Octelium user `agent-ops` |
-| **Initiator** | the person who caused it, if known | — (or the agent's owner, via relations) | GitHub user who pushed / ran the workflow | — |
-| **Target and action** | what would happen | `apt upgrade` as root on web-1 | deploy commit abc to prod | connect to service ssh-web-1 |
+| Role in the request   | What it is                                                                    | Example: sudo                           | Example: CI deploy                                   | Example: Octelium                           |
+| --------------------- | ----------------------------------------------------------------------------- | --------------------------------------- | ---------------------------------------------------- | ------------------------------------------- |
+| **Source**            | the authenticated party that delivered the request; its credential is checked | host `web-1` (host key)                 | GitHub Actions (OIDC token)                          | the Octelium backend (countersign polls it) |
+| **Requester**         | whose action needs approval; vouched for by the source                        | OS user `agent` on web-1                | workload "repo X, workflow deploy, environment prod" | Octelium user `agent-ops`                   |
+| **Initiator**         | the person who caused it, if known                                            | — (or the agent's owner, via relations) | GitHub user who pushed / ran the workflow            | —                                           |
+| **Target and action** | what would happen                                                             | `apt upgrade` as root on web-1          | deploy commit abc to prod                            | connect to service ssh-web-1                |
 
 So the answer to "is there only a Client?" is no: the **source** (a client or
 a backend) authenticates the message, and the **requester** is who the
@@ -110,14 +110,14 @@ behind an Octelium session. It is matched against `Recognition` identities
 
 ### When a request is decided
 
-| Involved | What it is |
-|---|---|
-| **Decider** | an Active **person**; never a workload |
-| **Identity used** | the account they act through: `SignIn` (web UI, OIDC session) or `Chat` (Discord) |
-| **Assurance** | what that identity and session prove now: `linked` (chat), `session`, `fresh-auth` (recent passkey) |
-| **Channel** | where the decision was made (web, Discord) |
-| **Eligibility** | the policy's selectors frozen with the request, current group membership and status, exclusions |
-| **Relations to the request** | same person as the requester? owner of the requester? the initiator? |
+| Involved                     | What it is                                                                                          |
+| ---------------------------- | --------------------------------------------------------------------------------------------------- |
+| **Decider**                  | an Active **person**; never a workload                                                              |
+| **Identity used**            | the account they act through: `SignIn` (web UI, OIDC session) or `Chat` (Discord)                   |
+| **Assurance**                | what that identity and session prove now: `linked` (chat), `session`, `fresh-auth` (recent passkey) |
+| **Channel**                  | where the decision was made (web, Discord)                                                          |
+| **Eligibility**              | the policy's selectors frozen with the request, current group membership and status, exclusions     |
+| **Relations to the request** | same person as the requester? owner of the requester? the initiator?                                |
 
 The decider's identity comes only from countersign's own sign-in or a chat
 link the person made; nothing in the request can influence who the decider
@@ -144,14 +144,14 @@ is.
 
 ### Actor: Person or Workload
 
-| | Person | Workload |
-|---|---|---|
-| What | a human | anything automated: AI agent, CI pipeline, script |
-| Signs in to the web UI | yes | never |
-| Can decide (approve, answer) | yes, if eligible | never |
-| Can be a requester | yes | yes |
-| Can be an initiator | yes | no |
-| Owners | — | one or more persons, required |
+|                              | Person           | Workload                                          |
+| ---------------------------- | ---------------- | ------------------------------------------------- |
+| What                         | a human          | anything automated: AI agent, CI pipeline, script |
+| Signs in to the web UI       | yes              | never                                             |
+| Can decide (approve, answer) | yes, if eligible | never                                             |
+| Can be a requester           | yes              | yes                                               |
+| Can be an initiator          | yes              | no                                                |
+| Owners                       | —                | one or more persons, required                     |
 
 ```rust
 struct ActorId(String);   // never reused
@@ -216,11 +216,11 @@ struct Group {
 
 What a person may do in countersign, not which requests they may decide.
 
-| Role | Capabilities |
-|---|---|
-| `member` | sign in; see requests they are eligible for; decide them; link chat accounts |
-| `auditor` | read every request and audit record (confidential content excepted) |
-| `admin` | suspend and reinstate actors; revoke grants in bulk; unlink chat accounts; invoke break-glass policies |
+| Role      | Capabilities                                                                                           |
+| --------- | ------------------------------------------------------------------------------------------------------ |
+| `member`  | sign in; see requests they are eligible for; decide them; link chat accounts                           |
+| `auditor` | read every request and audit record (confidential content excepted)                                    |
+| `admin`   | suspend and reinstate actors; revoke grants in bulk; unlink chat accounts; invoke break-glass policies |
 
 - Granted to persons or groups; additive; workloads have none.
 - `admin` does not imply eligibility.
@@ -228,12 +228,12 @@ What a person may do in countersign, not which requests they may decide.
 
 ## Relationships
 
-| Relation | Meaning |
-|---|---|
+| Relation            | Meaning                                           |
+| ------------------- | ------------------------------------------------- |
 | `same_person(p, r)` | p is the requester, or shares an identity with it |
-| `owner(p, r)` | p owns the requesting workload |
-| `initiator(p, r)` | p is the request's initiator |
-| `member(a, g)` | a is in group g now |
+| `owner(p, r)`       | p owns the requesting workload                    |
+| `initiator(p, r)`   | p is the request's initiator                      |
+| `member(a, g)`      | a is in group g now                               |
 
 ## Eligibility
 
@@ -242,7 +242,7 @@ What a person may do in countersign, not which requests they may decide.
 name = "prod-deploy"
 match = { source = "github-actions", requester = "deploy-prod" }
 approvers = ["group:ops"]
-exclude = ["requester", "owners", "initiator"]   # default: ["requester"]
+exclude = ["requester", "owners", "initiator"] # default: ["requester"]
 require_initiator = true
 quorum = 1
 min_assurance = "fresh-auth"
@@ -263,28 +263,28 @@ eligible approvers".
 
 ## Lifecycle
 
-| Event | Effect |
-|---|---|
-| Person suspended / removed | web sessions ended; chat links stop working; their decisions on pending requests stop counting |
-| Person removed from a group | the live check stops new decisions; nothing else changes |
-| Grant approved by someone later suspended | stays active; admins get "revoke grants approved by X", offered on the suspension screen |
-| Workload suspended | new requests refused; open requests withdrawn |
-| Last Active owner of a workload gone | the workload is suspended |
-| Client key revoked / removed | its requests are refused; open ones withdrawn |
-| Identity unlinked | future actions through it fail; past records keep the identity string |
+| Event                                     | Effect                                                                                         |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Person suspended / removed                | web sessions ended; chat links stop working; their decisions on pending requests stop counting |
+| Person removed from a group               | the live check stops new decisions; nothing else changes                                       |
+| Grant approved by someone later suspended | stays active; admins get "revoke grants approved by X", offered on the suspension screen       |
+| Workload suspended                        | new requests refused; open requests withdrawn                                                  |
+| Last Active owner of a workload gone      | the workload is suspended                                                                      |
+| Client key revoked / removed              | its requests are refused; open ones withdrawn                                                  |
+| Identity unlinked                         | future actions through it fail; past records keep the identity string                          |
 
 Suspensions live in the database and override `Active` in config, so admins
 act without a deploy. Removal is a config change.
 
 ## Storage
 
-| Data | Source of truth |
-|---|---|
-| Persons, workloads and owners, clients, groups and IdP mappings, roles, `SignIn`/`Recognition` identities | config |
-| Chat links | database (link flow) |
-| IdP group snapshots | database (sign-ins) |
-| Suspensions | database (admin actions) |
-| Requests and audit | database; actor ids plus a snapshot of display names, source, requester identity, initiator |
+| Data                                                                                                      | Source of truth                                                                             |
+| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Persons, workloads and owners, clients, groups and IdP mappings, roles, `SignIn`/`Recognition` identities | config                                                                                      |
+| Chat links                                                                                                | database (link flow)                                                                        |
+| IdP group snapshots                                                                                       | database (sign-ins)                                                                         |
+| Suspensions                                                                                               | database (admin actions)                                                                    |
+| Requests and audit                                                                                        | database; actor ids plus a snapshot of display names, source, requester identity, initiator |
 
 ## Configuration sketch
 

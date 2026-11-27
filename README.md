@@ -71,7 +71,7 @@ match = { backend = "oct-main", requester_group = "agents" }
 approvers = ["group:approvers"]
 exclude = ["requester", "owners"]
 max_ttl = "30m"
-min_assurance = "fresh-auth"   # the default
+min_assurance = "fresh-auth" # the default
 
 [[policy]]
 name = "staging-sudo"
@@ -79,24 +79,49 @@ match = { backend = "sudo", source = "staging-*" }
 approvers = ["person:alice", "person:bob"]
 quorum = 2
 max_ttl = "2h"
-min_assurance = "linked"       # chat buttons may approve directly
+min_assurance = "linked" # chat buttons may approve directly
 ```
 
 ## Crates
 
-| crate | status |
-|---|---|
-| `countersign-core` | types, state machine, policy, traits |
-| `countersign-store-sqlite` | SQLite store with transactional outbox |
-| `countersign-auth-oidc` | OpenID Connect login (code flow + PKCE) for the web UI |
-| `countersign-backend-octelium` | optional: approves/rejects pending Octelium sessions via `octeliumctl` |
-| `countersign-backend-exec` | delegates to any program speaking a small JSON protocol over stdin/stdout |
-| `countersign-channel-discord` | posts requests with Approve/Deny buttons and simple questions with answer buttons; receives presses over the Gateway (no inbound endpoint) |
-| `countersign-channel-ntfy` | push notifications via an ntfy server, linking to the web UI (notify-only) |
-| `countersign-channel-webhook` | signed JSON events ([Standard Webhooks](https://www.standardwebhooks.com/)) to any URL (notify-only) |
-| `countersignd` | daemon: config, engine (discover, decide, grant, expire, questions), outbox delivery, web UI, JSON API, intake API for clients (also an MCP server for questions) |
-| `countersign` (CLI) | host-side administration: list/show requests and questions, deny/revoke, suspend/reinstate, manage account links, generate secrets (no approve, no answer) |
-| `countersign-sudo` | PAM helper for target hosts: asks countersign before `sudo` runs |
+| crate                          | status                                                                                                                                                            |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `countersign-core`             | types, state machine, policy, traits                                                                                                                              |
+| `countersign-store-sqlite`     | SQLite store with transactional outbox                                                                                                                            |
+| `countersign-auth-oidc`        | OpenID Connect login (code flow + PKCE) for the web UI                                                                                                            |
+| `countersign-backend-octelium` | optional: approves/rejects pending Octelium sessions via `octeliumctl`                                                                                            |
+| `countersign-backend-exec`     | delegates to any program speaking a small JSON protocol over stdin/stdout                                                                                         |
+| `countersign-channel-discord`  | posts requests with Approve/Deny buttons and simple questions with answer buttons; receives presses over the Gateway (no inbound endpoint)                        |
+| `countersign-channel-ntfy`     | push notifications via an ntfy server, linking to the web UI (notify-only)                                                                                        |
+| `countersign-channel-webhook`  | signed JSON events ([Standard Webhooks](https://www.standardwebhooks.com/)) to any URL (notify-only)                                                              |
+| `countersignd`                 | daemon: config, engine (discover, decide, grant, expire, questions), outbox delivery, web UI, JSON API, intake API for clients (also an MCP server for questions) |
+| `countersign` (CLI)            | host-side administration: list/show requests and questions, deny/revoke, suspend/reinstate, manage account links, generate secrets (no approve, no answer)        |
+| `countersign-sudo`             | PAM helper for target hosts: asks countersign before `sudo` runs                                                                                                  |
+
+## Building
+
+The web UI is a SvelteKit application in `web/` (styled with Stillwind). It
+runs inside `countersignd` through [fetchlet](https://fetchlet.roundtrip.dev/):
+its build is embedded into the binary at compile time, so build it first.
+Building needs Rust 1.100 or later, Node.js and pnpm. The pnpm workspace is the
+repository root.
+
+```sh
+pnpm install
+pnpm build    # writes web/build, which countersignd embeds
+cargo build --release
+```
+
+Without `web/build`, `countersignd` still builds (with a warning). Sign-in,
+the JSON API and the intake API work, and the pages answer 503.
+
+To work on the pages, `cargo run -p countersignd --example web_demo` serves
+them at <http://localhost:8790> with made-up requests and questions, and a
+pretend identity provider that lets you pick who you are. Rebuild `web/`, then
+restart the example to see changes. Debug builds load the pages from the
+directory in `COUNTERSIGN_WEB_DIR` (e.g. `web/build`) instead of the embedded
+copy, so no recompile is needed. `pnpm check` checks formatting, types, lint
+and the Stillwind classes.
 
 ## Running
 

@@ -1,4 +1,6 @@
-//! Web UI and API flows with a fake identity provider and backend.
+//! Web flows with a fake identity provider and backend: sign-in and the
+//! JSON API over HTTP, the UI API as the pages call it, and (when the web
+//! UI is built in) the pages themselves.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
@@ -7,7 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::Router;
 use axum::body::Body;
-use axum::http::{Request as HttpRequest, StatusCode, header};
+use axum::http::{HeaderMap, Method, Request as HttpRequest, StatusCode, header};
 use countersign_core::{
     AccessBackend, ActionIntent, ActionSink, ActorId, Asker, Assurance, AuthError, Authenticator, BackendCaps,
     BackendError, BackendName, ChannelName, ClientId, Confidentiality, GrantHandle, LoginStart, PendingSubject,
@@ -17,8 +19,10 @@ use countersign_store_sqlite::SqliteStore;
 use countersignd::Daemon;
 use countersignd::config::Config;
 use countersignd::engine::Ask;
+use countersignd::web;
 use http_body_util::BodyExt;
 use jiff::Timestamp;
+use serde_json::Value;
 use tower::ServiceExt;
 
 // ------------------------------------------------------------------ fakes
@@ -171,24 +175,57 @@ const CONFIG: &str = r#"
     max_ttl = "30m"
 "#;
 
+const ORIGIN: &str = "https://cs.example.test";
+
 // ------------------------------------------------------------------ client
 
+/// One browser: its cookies, against the whole web router, and against the
+/// UI API as the pages call it for this browser's requests.
 struct Browser {
     app: Router,
+    ui: Router,
+    key: axum_extra::extract::cookie::Key,
     cookies: BTreeMap<String, String>,
 }
 
 struct Page {
     status: StatusCode,
     location: Option<String>,
+    headers: HeaderMap,
     body: String,
 }
 
+impl Page {
+    fn json(&self) -> Value {
+        serde_json::from_str(&self.body).unwrap_or_else(|e| panic!("{e}: {}", self.body))
+    }
+}
+
+async fn page(res: axum::response::Response) -> Page {
+    let status = res.status();
+    let headers = res.headers().clone();
+    let location = headers.get(header::LOCATION).map(|l| l.to_str().unwrap().to_owned());
+    let body = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    Page { status, location, headers, body }
+}
+
 impl Browser {
-    async fn send(&mut self, req: HttpRequest<Body>) -> Page {
-        let mut req = req;
-        if !self.cookies.is_empty() {
-            let c = self.cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ");
+    fn new(s: &Setup) -> Self {
+        Self {
+            app: web::router(s.daemon.web.clone()),
+            ui: web::ui_router(s.daemon.web.clone()),
+            key: s.daemon.web.key.clone(),
+            cookies: BTreeMap::new(),
+        }
+    }
+
+    fn cookie_header(&self) -> Option<String> {
+        (!self.cookies.is_empty())
+            .then(|| self.cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; "))
+    }
+
+    async fn send(&mut self, mut req: HttpRequest<Body>) -> Page {
+        if let Some(c) = self.cookie_header() {
             req.headers_mut().insert(header::COOKIE, c.parse().unwrap());
         }
         let res = self.app.clone().oneshot(req).await.unwrap();
@@ -201,10 +238,7 @@ impl Browser {
                 self.cookies.insert(k.into(), v.into());
             }
         }
-        let status = res.status();
-        let location = res.headers().get(header::LOCATION).map(|l| l.to_str().unwrap().to_owned());
-        let body = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
-        Page { status, location, body }
+        page(res).await
     }
 
     async fn get(&mut self, uri: &str) -> Page {
@@ -215,6 +249,7 @@ impl Browser {
         self.send(
             HttpRequest::post(uri)
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::ORIGIN, ORIGIN)
                 .body(Body::from(form.to_owned()))
                 .unwrap(),
         )
@@ -232,6 +267,36 @@ impl Browser {
         .await
     }
 
+    /// Call the UI API as the pages do while serving this browser a page
+    /// request: with the trusted context Rust derives from that request.
+    /// `origin` is the `Origin` the browser sent with it.
+    async fn ui(&self, method: Method, path: &str, form: Option<&str>, origin: Option<&str>) -> Page {
+        let mut page_headers = HeaderMap::new();
+        if let Some(c) = self.cookie_header() {
+            page_headers.insert(header::COOKIE, c.parse().unwrap());
+        }
+        if let Some(o) = origin {
+            page_headers.insert(header::ORIGIN, o.parse().unwrap());
+        }
+        let context = web::visit_context(&page_headers, &self.key, ORIGIN);
+        let mut req = HttpRequest::builder().method(method).uri(path);
+        if form.is_some() {
+            req = req.header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        }
+        let mut req = req.body(Body::from(form.unwrap_or_default().to_owned())).unwrap();
+        req.extensions_mut().insert(context);
+        page(self.ui.clone().oneshot(req).await.unwrap()).await
+    }
+
+    async fn ui_get(&self, path: &str) -> Page {
+        self.ui(Method::GET, path, None, None).await
+    }
+
+    /// A page form posted from this site.
+    async fn ui_post(&self, path: &str, form: &str) -> Page {
+        self.ui(Method::POST, path, Some(form), Some(ORIGIN)).await
+    }
+
     /// Run the whole login dance; `auth_age` is how long ago the identity
     /// provider says the user authenticated (`None`: no `auth_time` claim).
     async fn login(&mut self, identity: &str, auth_age: Option<i64>, next: &str) -> Page {
@@ -245,13 +310,11 @@ impl Browser {
     async fn csrf(&mut self) -> String {
         let me = self.get("/api/me").await;
         assert_eq!(me.status, StatusCode::OK, "{}", me.body);
-        let v: serde_json::Value = serde_json::from_str(&me.body).unwrap();
-        v["csrf"].as_str().unwrap().to_owned()
+        me.json()["csrf"].as_str().unwrap().to_owned()
     }
 }
 
 struct Setup {
-    browser: Browser,
     store: Arc<dyn Store>,
     backend: Arc<OneSession>,
     daemon: Daemon,
@@ -282,209 +345,20 @@ async fn setup(min_assurance: &str) -> Setup {
             .unwrap();
     daemon.web.auth = Some(Arc::new(FakeIdp));
     daemon.engine.tick(Timestamp::now()).await;
-    let browser = Browser { app: countersignd::web::router(daemon.web.clone()), cookies: BTreeMap::new() };
-    Setup { browser, store, backend, daemon }
+    Setup { store, backend, daemon }
 }
 
 impl Setup {
+    fn browser(&self) -> Browser {
+        Browser::new(self)
+    }
+
     async fn request_id(&self) -> String {
         let all = self.store.list_requests(&countersign_core::RequestFilter::default()).await.unwrap();
         assert_eq!(all.len(), 1);
         all[0].id.to_string()
     }
-}
 
-// ------------------------------------------------------------------ tests
-
-#[tokio::test]
-async fn anonymous_users_are_sent_to_login() {
-    let mut s = setup("fresh-auth").await;
-    let id = s.request_id().await;
-    let p = s.browser.get("/").await;
-    assert_eq!(p.status, StatusCode::SEE_OTHER);
-    assert_eq!(p.location.as_deref(), Some("/login?next=/"));
-    let p = s.browser.get(&format!("/requests/{id}")).await;
-    assert_eq!(p.location.unwrap(), format!("/login?next=/requests/{id}"));
-    assert_eq!(s.browser.get("/api/requests").await.status, StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn login_lands_on_next_and_lists_requests_escaped() {
-    let mut s = setup("fresh-auth").await;
-    let id = s.request_id().await;
-    let p = s.browser.login("oidc:idp%23bob", Some(10), &format!("/requests/{id}")).await;
-    assert_eq!(p.status, StatusCode::SEE_OTHER, "{}", p.body);
-    assert_eq!(p.location.unwrap(), format!("/requests/{id}"));
-
-    let page = s.browser.get(&format!("/requests/{id}")).await;
-    assert_eq!(page.status, StatusCode::OK);
-    assert!(page.body.contains("Bob"));
-    assert!(page.body.contains("&#60;script&#62;alert(1)&#60;/script&#62;"), "target is escaped: {}", page.body);
-    assert!(!page.body.contains("<script>alert"));
-    assert!(page.body.contains("unverified"));
-
-    let index = s.browser.get("/").await;
-    assert!(index.body.contains(&id));
-}
-
-#[tokio::test]
-async fn open_redirects_are_refused() {
-    let mut s = setup("fresh-auth").await;
-    let p = s.browser.login("oidc:idp%23bob", Some(10), "//evil.example/x").await;
-    assert_eq!(p.location.as_deref(), Some("/"));
-}
-
-#[tokio::test]
-async fn non_approvers_and_forged_callbacks_get_no_session() {
-    let mut s = setup("fresh-auth").await;
-    let p = s.browser.login("oidc:idp%23stranger", Some(10), "/").await;
-    assert_eq!(p.status, StatusCode::FORBIDDEN);
-    assert!(p.body.contains("oidc:idp#stranger"), "shows the identity to add");
-    assert!(!s.browser.cookies.contains_key("cs_session"));
-
-    let _ = s.browser.get("/login?next=/").await;
-    let p = s.browser.get("/auth/callback?state=forged&code=oidc:idp%23bob%7C1").await;
-    assert_eq!(p.status, StatusCode::UNAUTHORIZED);
-    assert!(!s.browser.cookies.contains_key("cs_session"));
-
-    // Without the login cookie the callback is useless.
-    let p = s.browser.get("/auth/callback?state=s-123&code=oidc:idp%23bob%7C1").await;
-    assert_eq!(p.status, StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn approving_needs_fresh_auth_and_csrf() {
-    let mut s = setup("fresh-auth").await;
-    let id = s.request_id().await;
-    s.browser.login("oidc:idp%23bob", Some(3600), "/").await; // stale sign-in
-    let csrf = s.browser.csrf().await;
-
-    // Wrong CSRF token.
-    let p = s.browser.post_form(&format!("/requests/{id}/decision"), "verdict=approve&csrf=nope").await;
-    assert_eq!(p.status, StatusCode::FORBIDDEN);
-
-    // Stale session: sent to a fresh login, nothing decided.
-    let page = s.browser.get(&format!("/requests/{id}")).await;
-    assert!(page.body.contains("Sign in again to approve"));
-    let p = s.browser.post_form(&format!("/requests/{id}/decision"), &format!("verdict=approve&csrf={csrf}")).await;
-    assert_eq!(p.status, StatusCode::SEE_OTHER);
-    assert_eq!(p.location.unwrap(), format!("/login?next=/requests/{id}&fresh=1"));
-    assert!(s.store.list_requests(&countersign_core::RequestFilter::default()).await.unwrap()[0].state.is_pending());
-
-    // After re-authenticating, approval goes through.
-    s.browser.login("oidc:idp%23bob", Some(5), &format!("/requests/{id}")).await;
-    let csrf = s.browser.csrf().await;
-    let p = s
-        .browser
-        .post_form(&format!("/requests/{id}/decision"), &format!("verdict=approve&comment=lgtm&csrf={csrf}"))
-        .await;
-    assert_eq!(p.status, StatusCode::SEE_OTHER, "{}", p.body);
-    let r = &s.store.list_requests(&countersign_core::RequestFilter::default()).await.unwrap()[0];
-    assert!(matches!(r.state, RequestState::Active { .. }));
-    assert_eq!(r.decisions[0].comment.as_deref(), Some("lgtm"));
-    assert_eq!(*s.backend.state.lock().unwrap(), "active");
-
-    // Revoke from the page.
-    let p = s.browser.post_form(&format!("/requests/{id}/revoke"), &format!("csrf={csrf}")).await;
-    assert_eq!(p.status, StatusCode::SEE_OTHER);
-    assert_eq!(*s.backend.state.lock().unwrap(), "revoked");
-}
-
-#[tokio::test]
-async fn deny_works_without_fresh_auth_and_self_approval_is_refused() {
-    let mut s = setup("fresh-auth").await;
-    let id = s.request_id().await;
-
-    s.browser.login("oidc:idp%23agent-owner", Some(1), "/").await;
-    let csrf = s.browser.csrf().await;
-    let page = s.browser.get(&format!("/requests/{id}")).await;
-    assert!(page.body.contains("cannot decide"), "own request shows why");
-    let p = s.browser.post_form(&format!("/requests/{id}/decision"), &format!("verdict=approve&csrf={csrf}")).await;
-    assert_eq!(p.status, StatusCode::FORBIDDEN);
-
-    let mut other = Browser { app: s.browser.app.clone(), cookies: BTreeMap::new() };
-    other.login("oidc:idp%23bob", None, "/").await; // no auth_time claim at all
-    let csrf = other.csrf().await;
-    let p = other.post_form(&format!("/requests/{id}/decision"), &format!("verdict=deny&csrf={csrf}")).await;
-    assert_eq!(p.status, StatusCode::SEE_OTHER);
-    assert_eq!(
-        s.store.list_requests(&countersign_core::RequestFilter::default()).await.unwrap()[0].state,
-        RequestState::Denied
-    );
-    assert_eq!(*s.backend.state.lock().unwrap(), "rejected");
-}
-
-#[tokio::test]
-async fn json_api_flow() {
-    let mut s = setup("web").await;
-    let id = s.request_id().await;
-    s.browser.login("oidc:idp%23bob", None, "/").await;
-
-    let list = s.browser.get("/api/requests?open=1").await;
-    let v: serde_json::Value = serde_json::from_str(&list.body).unwrap();
-    assert_eq!(v.as_array().unwrap().len(), 1);
-
-    let p = s.browser.post_json(&format!("/api/requests/{id}/decision"), "wrong", r#"{"verdict":"approve"}"#).await;
-    assert_eq!(p.status, StatusCode::FORBIDDEN);
-
-    let csrf = s.browser.csrf().await;
-    let p = s.browser.post_json(&format!("/api/requests/{id}/decision"), &csrf, r#"{"verdict":"approve"}"#).await;
-    assert_eq!(p.status, StatusCode::OK, "{}", p.body);
-    let v: serde_json::Value = serde_json::from_str(&p.body).unwrap();
-    assert_eq!(v["state"]["state"], "active");
-}
-
-#[tokio::test]
-async fn json_api_reports_fresh_auth_requirement() {
-    let mut s = setup("fresh-auth").await;
-    let id = s.request_id().await;
-    s.browser.login("oidc:idp%23bob", Some(3600), "/").await;
-    let csrf = s.browser.csrf().await;
-    let p = s.browser.post_json(&format!("/api/requests/{id}/decision"), &csrf, r#"{"verdict":"approve"}"#).await;
-    assert_eq!(p.status, StatusCode::UNAUTHORIZED);
-    let v: serde_json::Value = serde_json::from_str(&p.body).unwrap();
-    assert_eq!(v["error"], "fresh_auth_required");
-    assert_eq!(v["login"], format!("/login?next=/requests/{id}&fresh=1"));
-}
-
-#[tokio::test]
-async fn suspending_a_person_ends_their_session_at_once() {
-    let mut s = setup("fresh-auth").await;
-    s.browser.login("oidc:idp%23bob", Some(1), "/").await;
-    assert_eq!(s.browser.get("/").await.status, StatusCode::OK);
-    assert_eq!(s.browser.get("/admin").await.status, StatusCode::FORBIDDEN, "members do not oversee");
-    let mut auditor = Browser { app: s.browser.app.clone(), cookies: BTreeMap::new() };
-    auditor.login("oidc:idp%23viewer", Some(1), "/admin").await;
-    assert_eq!(auditor.get("/admin").await.status, StatusCode::OK, "auditors see the directory");
-    let csrf = auditor.csrf().await;
-    let p = auditor.post_form("/admin/action", &format!("csrf={csrf}&action=suspend&actor=owner")).await;
-    assert_eq!(p.status, StatusCode::FORBIDDEN, "only admins act");
-
-    let mut admin = Browser { app: s.browser.app.clone(), cookies: BTreeMap::new() };
-    admin.login("oidc:idp%23carol", Some(1), "/admin").await;
-    let csrf = admin.csrf().await;
-    let p = admin.post_form("/admin/action", &format!("csrf={csrf}&action=suspend&actor=bob&reason=lost+phone")).await;
-    assert_eq!(p.status, StatusCode::SEE_OTHER, "{}", p.body);
-    assert_eq!(s.browser.get("/").await.status, StatusCode::SEE_OTHER, "bob is signed out");
-    let page = admin.get("/admin").await;
-    assert!(page.body.contains("lost phone") && page.body.contains("suspended by carol"), "{}", page.body);
-
-    // Lifting it needs a fresh sign-in.
-    let mut stale = Browser { app: s.browser.app.clone(), cookies: BTreeMap::new() };
-    stale.login("oidc:idp%23carol", Some(3600), "/admin").await;
-    let csrf = stale.csrf().await;
-    let p = stale.post_form("/admin/action", &format!("csrf={csrf}&action=reinstate&actor=bob")).await;
-    assert_eq!(p.location.as_deref(), Some("/login?next=/admin&fresh=1"));
-    let p = admin.post_form("/admin/action", &format!("csrf={csrf}&action=reinstate&actor=bob")).await;
-    assert_eq!(p.status, StatusCode::FORBIDDEN, "another session's token");
-    let csrf = admin.csrf().await;
-    let p = admin.post_form("/admin/action", &format!("csrf={csrf}&action=reinstate&actor=bob")).await;
-    assert_eq!(p.status, StatusCode::SEE_OTHER);
-    s.browser.login("oidc:idp%23bob", Some(1), "/").await;
-    assert_eq!(s.browser.get("/").await.status, StatusCode::OK);
-}
-
-impl Setup {
     async fn ask(&self, message: &str, confidential: bool) -> String {
         let ask = Ask {
             asker: Asker { client: ClientId::new("agent-host"), actor: None },
@@ -502,120 +376,376 @@ impl Setup {
         };
         self.daemon.engine.ask(ask, Timestamp::now()).await.unwrap().id.to_string()
     }
+
+    async fn state(&self) -> RequestState {
+        self.store.list_requests(&countersign_core::RequestFilter::default()).await.unwrap()[0].state.clone()
+    }
+}
+
+// ------------------------------------------------------------------ sign-in
+
+#[tokio::test]
+async fn nobody_is_signed_in_without_a_session() {
+    let s = setup("fresh-auth").await;
+    let mut b = s.browser();
+    assert_eq!(b.get("/api/requests").await.status, StatusCode::UNAUTHORIZED);
+    let me = b.ui_get("/me").await;
+    assert_eq!((me.status, me.json()["error"].as_str()), (StatusCode::UNAUTHORIZED, Some("unauthenticated")));
+    assert_eq!(b.ui_get("/requests").await.status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
-async fn questions_are_answered_from_the_web_form() {
-    let mut s = setup("web").await;
-    let id = s.ask("Deploy <b>now</b>?", false).await;
-    s.browser.login("oidc:idp%23bob", None, "/").await;
-    let index = s.browser.get("/").await;
-    assert!(index.body.contains(&id) && index.body.contains("question"), "{}", index.body);
-    let page = s.browser.get(&format!("/requests/{id}")).await;
-    assert_eq!(page.status, StatusCode::OK);
-    assert!(page.body.contains("Deploy &#60;b&#62;now&#60;/b&#62;?"), "escaped: {}", page.body);
-    assert!(page.body.contains("Environment") && page.body.contains("f.env"), "{}", page.body);
-    assert!(page.body.contains("&#60;OPS-1&#62;"));
-
-    let csrf = s.browser.csrf().await;
-    let p = s.browser.post_form(&format!("/requests/{id}/answer"), &format!("csrf={csrf}&action=answer&f.env=")).await;
-    assert_eq!(p.status, StatusCode::BAD_REQUEST, "env is required");
-    let p = s
-        .browser
-        .post_form(&format!("/requests/{id}/answer"), &format!("csrf={csrf}&action=answer&f.env=prod&f.note=go"))
-        .await;
+async fn login_lands_on_next_and_shows_the_request() {
+    let s = setup("fresh-auth").await;
+    let id = s.request_id().await;
+    let mut b = s.browser();
+    let p = b.login("oidc:idp%23bob", Some(10), &format!("/requests/{id}")).await;
     assert_eq!(p.status, StatusCode::SEE_OTHER, "{}", p.body);
-    let q = s.store.get_question(id.parse().unwrap()).await.unwrap().unwrap();
-    let Some(QuestionOutcome::Accepted { content: Some(c), by, confidential, .. }) = q.outcome else { panic!("{q:?}") };
-    assert_eq!(
-        (c["env"].as_str(), c["note"].as_str(), by.as_str(), confidential),
-        (Some("prod"), Some("go"), "bob", false)
-    );
+    assert_eq!(p.location.unwrap(), format!("/requests/{id}"));
+
+    let me = b.ui_get("/me").await.json();
+    assert_eq!((me["name"].as_str(), me["member"].as_bool()), (Some("Bob"), Some(true)));
+    let item = b.ui_get(&format!("/requests/{id}")).await;
+    assert_eq!(item.status, StatusCode::OK);
+    let item = item.json();
+    assert_eq!(item["kind"], "approval");
+    assert_eq!(item["can_decide"], true);
+    assert!(item["p"]["claims"].to_string().contains("deploy"), "{item}");
+    assert_eq!(item["claims_note"], "from the requester, unverified");
+
+    let index = b.ui_get("/requests").await.json();
+    assert_eq!(index["waiting"][0]["id"], id);
+    assert_eq!(index["waiting"][0]["tone"], "waiting");
 }
 
 #[tokio::test]
-async fn confidential_questions_are_only_for_their_responders() {
-    let mut s = setup("web").await;
-    let id = s.ask("Which vault key?", true).await;
+async fn open_redirects_are_refused() {
+    let s = setup("fresh-auth").await;
+    let p = s.browser().login("oidc:idp%23bob", Some(10), "//evil.example/x").await;
+    assert_eq!(p.location.as_deref(), Some("/"));
+}
 
-    // An auditor sees that it exists, not what it says.
-    let mut viewer = Browser { app: s.browser.app.clone(), cookies: BTreeMap::new() };
-    viewer.login("oidc:idp%23viewer", Some(1), "/").await;
-    let page = viewer.get(&format!("/requests/{id}")).await;
-    assert_eq!(page.status, StatusCode::OK);
-    assert!(!page.body.contains("vault") && !page.body.contains("OPS-1"), "{}", page.body);
-    let api = viewer.get(&format!("/api/questions/{id}")).await;
-    assert!(!api.body.contains("vault"), "{}", api.body);
+#[tokio::test]
+async fn non_approvers_and_forged_callbacks_get_no_session() {
+    let s = setup("fresh-auth").await;
+    let mut b = s.browser();
+    let p = b.login("oidc:idp%23stranger", Some(10), "/").await;
+    assert_eq!(p.status, StatusCode::FORBIDDEN);
+    assert!(p.body.contains("oidc:idp#stranger"), "shows the identity to add: {}", p.body);
+    assert!(!b.cookies.contains_key("cs_session"));
 
-    // The responder needs a fresh sign-in to read it.
-    s.browser.login("oidc:idp%23bob", Some(3600), "/").await;
-    let page = s.browser.get(&format!("/requests/{id}")).await;
-    assert!(!page.body.contains("vault") && page.body.contains("fresh sign-in"), "{}", page.body);
-    s.browser.login("oidc:idp%23bob", Some(1), "/").await;
-    let page = s.browser.get(&format!("/requests/{id}")).await;
-    assert!(page.body.contains("Which vault key?"), "{}", page.body);
+    let _ = b.get("/login?next=/").await;
+    let p = b.get("/auth/callback?state=forged&code=oidc:idp%23bob%7C1").await;
+    assert_eq!(p.status, StatusCode::UNAUTHORIZED);
+    assert!(!b.cookies.contains_key("cs_session"));
 
-    let csrf = s.browser.csrf().await;
-    let p =
-        s.browser.post_form(&format!("/requests/{id}/answer"), &format!("csrf={csrf}&action=answer&f.env=prod")).await;
-    assert_eq!(p.status, StatusCode::SEE_OTHER, "{}", p.body);
-    let q = s.store.get_question(id.parse().unwrap()).await.unwrap().unwrap();
-    assert!(q.message.is_empty() && q.content_removed, "the text goes once the question is closed");
-    assert!(matches!(q.outcome, Some(QuestionOutcome::Accepted { confidential: true, .. })));
+    // Without the login cookie the callback is useless.
+    let p = b.get("/auth/callback?state=s-123&code=oidc:idp%23bob%7C1").await;
+    assert_eq!(p.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn signing_out_needs_the_session_token() {
+    let s = setup("web").await;
+    let mut b = s.browser();
+    b.login("oidc:idp%23bob", None, "/").await;
+    let csrf = b.csrf().await;
+    assert_eq!(b.post_form("/logout", "csrf=nope").await.status, StatusCode::FORBIDDEN);
+    assert!(b.cookies.contains_key("cs_session"));
+    let p = b.post_form("/logout", &format!("csrf={csrf}")).await;
+    assert_eq!(p.status, StatusCode::OK);
+    assert!(p.body.contains("Signed out"), "{}", p.body);
+    assert!(!b.cookies.contains_key("cs_session"));
+    assert_eq!(b.ui_get("/me").await.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn cookies_are_hardened_and_headers_set() {
+    let s = setup("fresh-auth").await;
+    let b = s.browser();
+    let res = b.app.clone().oneshot(HttpRequest::get("/login?next=/").body(Body::empty()).unwrap()).await.unwrap();
+    let sc = res.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap().to_owned();
+    for attr in ["HttpOnly", "Secure", "SameSite=Lax", "Path=/"] {
+        assert!(sc.contains(attr), "{attr} missing in {sc}");
+    }
+    assert!(!sc.contains("s-123"), "login state is encrypted");
+    let h = res.headers();
+    assert!(h[header::CONTENT_SECURITY_POLICY].to_str().unwrap().contains("frame-ancestors 'none'"));
+    // Not no-referrer: browsers would send `Origin: null` with form posts.
+    assert_eq!(h[header::REFERRER_POLICY], "same-origin");
+    assert_eq!(h[header::CACHE_CONTROL], "no-store");
+    let mut b = s.browser();
+    assert_eq!(b.get("/healthz").await.body, "ok");
+}
+
+// ------------------------------------------------------------------ deciding
+
+#[tokio::test]
+async fn approving_needs_fresh_auth_and_a_form_from_this_site() {
+    let s = setup("fresh-auth").await;
+    let id = s.request_id().await;
+    let mut b = s.browser();
+    b.login("oidc:idp%23bob", Some(3600), "/").await; // stale sign-in
+    let decision = format!("/requests/{id}/decision");
+
+    // A form from another site, or with no origin at all, changes nothing.
+    for origin in [Some("https://evil.example"), None] {
+        let p = b.ui(Method::POST, &decision, Some("verdict=approve"), origin).await;
+        assert_eq!((p.status, p.json()["error"].as_str()), (StatusCode::FORBIDDEN, Some("cross_site")));
+    }
+
+    // Stale session: sent to a fresh login, nothing decided.
+    assert_eq!(b.ui_get(&format!("/requests/{id}")).await.json()["approve_needs_reauth"], true);
+    let p = b.ui_post(&decision, "verdict=approve").await;
+    assert_eq!(p.status, StatusCode::UNAUTHORIZED);
+    let p = p.json();
+    assert_eq!(p["error"], "fresh_auth_required");
+    assert_eq!(p["login"], format!("/login?next=/requests/{id}&fresh=1"));
+    assert!(s.state().await.is_pending());
+
+    // After re-authenticating, approval goes through.
+    b.login("oidc:idp%23bob", Some(5), &format!("/requests/{id}")).await;
+    let item = b.ui_get(&format!("/requests/{id}")).await.json();
+    assert_eq!(item["approve_needs_reauth"], false);
+    assert!(item["fresh_until"].is_string());
+    let p = b.ui_post(&decision, "verdict=approve&comment=lgtm").await;
+    assert_eq!(p.status, StatusCode::OK, "{}", p.body);
+    let r = &s.store.list_requests(&countersign_core::RequestFilter::default()).await.unwrap()[0];
+    assert!(matches!(r.state, RequestState::Active { .. }));
+    assert_eq!(r.decisions[0].comment.as_deref(), Some("lgtm"));
+    assert_eq!(*s.backend.state.lock().unwrap(), "active");
+
+    // Revoke from the page.
+    assert_eq!(b.ui_get(&format!("/requests/{id}")).await.json()["can_revoke"], true);
+    let p = b.ui_post(&format!("/requests/{id}/revoke"), "").await;
+    assert_eq!(p.status, StatusCode::OK, "{}", p.body);
+    assert_eq!(*s.backend.state.lock().unwrap(), "revoked");
+}
+
+#[tokio::test]
+async fn deny_works_without_fresh_auth_and_self_approval_is_refused() {
+    let s = setup("fresh-auth").await;
+    let id = s.request_id().await;
+
+    let mut owner = s.browser();
+    owner.login("oidc:idp%23agent-owner", Some(1), "/").await;
+    let item = owner.ui_get(&format!("/requests/{id}")).await.json();
+    assert_eq!(item["can_decide"], false);
+    assert!(item["cannot_decide"].as_str().unwrap().contains("cannot decide"), "own request shows why");
+    let p = owner.ui_post(&format!("/requests/{id}/decision"), "verdict=approve").await;
+    assert_eq!(p.status, StatusCode::FORBIDDEN);
+
+    let mut bob = s.browser();
+    bob.login("oidc:idp%23bob", None, "/").await; // no auth_time claim at all
+    let p = bob.ui_post(&format!("/requests/{id}/decision"), "verdict=deny").await;
+    assert_eq!(p.status, StatusCode::OK, "{}", p.body);
+    assert_eq!(s.state().await, RequestState::Denied);
+    assert_eq!(*s.backend.state.lock().unwrap(), "rejected");
 }
 
 #[tokio::test]
 async fn sensitive_approvals_still_show_everything_on_the_web() {
-    let mut s = setup("web").await;
+    let s = setup("web").await;
     let id = s.request_id().await;
     let mut r = s.store.get_request(id.parse().unwrap()).await.unwrap().unwrap();
     let v = r.version;
     r.sensitive = true;
     r.version += 1;
     s.store.update_request(&r, v, &[]).await.unwrap();
-    s.browser.login("oidc:idp%23bob", None, "/").await;
-    let page = s.browser.get(&format!("/requests/{id}")).await;
-    assert!(page.body.contains("Sensitive") && page.body.contains("deploy"), "{}", page.body);
+    let mut b = s.browser();
+    b.login("oidc:idp%23bob", None, "/").await;
+    let item = b.ui_get(&format!("/requests/{id}")).await.json();
+    assert_eq!(item["sensitive"], true);
+    assert!(item["p"]["claims"].to_string().contains("deploy"), "{item}");
+    let index = b.ui_get("/requests").await.json();
+    assert!(index["waiting"][0].get("summary").is_none(), "lists leave a sensitive command out");
+}
+
+// ------------------------------------------------------------------ JSON API
+
+#[tokio::test]
+async fn json_api_flow() {
+    let s = setup("web").await;
+    let id = s.request_id().await;
+    let mut b = s.browser();
+    b.login("oidc:idp%23bob", None, "/").await;
+
+    let list = b.get("/api/requests?open=1").await;
+    assert_eq!(list.json().as_array().unwrap().len(), 1);
+
+    let p = b.post_json(&format!("/api/requests/{id}/decision"), "wrong", r#"{"verdict":"approve"}"#).await;
+    assert_eq!(p.status, StatusCode::FORBIDDEN);
+
+    let csrf = b.csrf().await;
+    let p = b.post_json(&format!("/api/requests/{id}/decision"), &csrf, r#"{"verdict":"approve"}"#).await;
+    assert_eq!(p.status, StatusCode::OK, "{}", p.body);
+    assert_eq!(p.json()["state"]["state"], "active");
 }
 
 #[tokio::test]
-async fn cookies_are_hardened_and_headers_set() {
-    let mut s = setup("fresh-auth").await;
-    let res =
-        s.browser.app.clone().oneshot(HttpRequest::get("/login?next=/").body(Body::empty()).unwrap()).await.unwrap();
-    let sc = res.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap().to_owned();
-    for attr in ["HttpOnly", "Secure", "SameSite=Lax", "Path=/"] {
-        assert!(sc.contains(attr), "{attr} missing in {sc}");
-    }
-    assert!(!sc.contains("s-123"), "login state is encrypted");
-    let csp = res.headers().get(header::CONTENT_SECURITY_POLICY).unwrap().to_str().unwrap();
-    assert!(csp.contains("frame-ancestors 'none'"));
-    let p = s.browser.get("/healthz").await;
-    assert_eq!(p.body, "ok");
+async fn json_api_reports_fresh_auth_requirement() {
+    let s = setup("fresh-auth").await;
+    let id = s.request_id().await;
+    let mut b = s.browser();
+    b.login("oidc:idp%23bob", Some(3600), "/").await;
+    let csrf = b.csrf().await;
+    let p = b.post_json(&format!("/api/requests/{id}/decision"), &csrf, r#"{"verdict":"approve"}"#).await;
+    assert_eq!(p.status, StatusCode::UNAUTHORIZED);
+    let v = p.json();
+    assert_eq!(v["error"], "fresh_auth_required");
+    assert_eq!(v["login"], format!("/login?next=/requests/{id}&fresh=1"));
 }
 
-fn link_code(body: &str) -> String {
-    let start = body.find("user-select: all\">").expect("code shown") + "user-select: all\">".len();
-    body[start..].split('<').next().unwrap().to_owned()
+// ------------------------------------------------------------------ admin
+
+#[tokio::test]
+async fn suspending_a_person_ends_their_session_at_once() {
+    let s = setup("fresh-auth").await;
+    let mut bob = s.browser();
+    bob.login("oidc:idp%23bob", Some(1), "/").await;
+    assert_eq!(bob.ui_get("/requests").await.status, StatusCode::OK);
+    assert_eq!(bob.ui_get("/me").await.json()["oversees"], false);
+    assert_eq!(bob.ui_get("/admin").await.status, StatusCode::FORBIDDEN, "members do not oversee");
+
+    let mut auditor = s.browser();
+    auditor.login("oidc:idp%23viewer", Some(1), "/admin").await;
+    let page = auditor.ui_get("/admin").await;
+    assert_eq!(page.status, StatusCode::OK, "auditors see the directory");
+    assert_eq!(page.json()["admin"], false);
+    let p = auditor.ui_post("/admin/action", "action=suspend&actor=owner").await;
+    assert_eq!(p.status, StatusCode::FORBIDDEN, "only admins act");
+
+    let mut admin = s.browser();
+    admin.login("oidc:idp%23carol", Some(1), "/admin").await;
+    let p =
+        admin.ui(Method::POST, "/admin/action", Some("action=suspend&actor=bob"), Some("https://evil.example")).await;
+    assert_eq!(p.status, StatusCode::FORBIDDEN, "not from another site");
+    let p = admin.ui_post("/admin/action", "action=suspend&actor=bob&reason=lost+phone").await;
+    assert_eq!(p.status, StatusCode::OK, "{}", p.body);
+    assert_eq!(bob.ui_get("/requests").await.status, StatusCode::UNAUTHORIZED, "bob is signed out");
+    let page = admin.ui_get("/admin").await.json();
+    let bob_row = page["actors"].as_array().unwrap().iter().find(|a| a["id"] == "bob").unwrap().clone();
+    assert_eq!(bob_row["suspension"]["by"], "carol");
+    assert_eq!(bob_row["suspension"]["reason"], "lost phone");
+
+    // Lifting it needs a fresh sign-in.
+    let mut stale = s.browser();
+    stale.login("oidc:idp%23carol", Some(3600), "/admin").await;
+    let p = stale.ui_post("/admin/action", "action=reinstate&actor=bob").await;
+    assert_eq!(p.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(p.json()["login"], "/login?next=/admin&fresh=1");
+    let p = admin.ui_post("/admin/action", "action=reinstate&actor=bob").await;
+    assert_eq!(p.status, StatusCode::OK, "{}", p.body);
+    bob.login("oidc:idp%23bob", Some(1), "/").await;
+    assert_eq!(bob.ui_get("/requests").await.status, StatusCode::OK);
 }
+
+// ------------------------------------------------------------------ questions
+
+#[tokio::test]
+async fn questions_are_answered_from_the_web_form() {
+    let s = setup("web").await;
+    let id = s.ask("Deploy <b>now</b>?", false).await;
+    let mut b = s.browser();
+    b.login("oidc:idp%23bob", None, "/").await;
+    let index = b.ui_get("/requests").await.json();
+    assert_eq!(
+        (index["waiting"][0]["id"].as_str(), index["waiting"][0]["kind"].as_str()),
+        (Some(id.as_str()), Some("question"))
+    );
+
+    let item = b.ui_get(&format!("/requests/{id}")).await.json();
+    assert_eq!(item["kind"], "question");
+    assert_eq!(item["can_answer"], true);
+    assert_eq!(item["q"]["message"], "Deploy <b>now</b>?", "raw: the page escapes it");
+    assert_eq!(item["q"]["context"][0], serde_json::json!(["ticket", "<OPS-1>"]));
+    let env = &item["q"]["fields"][0];
+    assert_eq!(
+        (env["input"].as_str(), env["label"].as_str(), env["kind"].as_str()),
+        (Some("f.env"), Some("Environment"), Some("choice"))
+    );
+
+    let answer = format!("/requests/{id}/answer");
+    let p = b.ui_post(&answer, "action=answer&f.env=").await;
+    assert_eq!(p.status, StatusCode::BAD_REQUEST, "env is required: {}", p.body);
+    let p = b.ui_post(&answer, "action=answer&f.env=prod&f.note=go").await;
+    assert_eq!(p.status, StatusCode::OK, "{}", p.body);
+    let question = s.store.get_question(id.parse().unwrap()).await.unwrap().unwrap();
+    let Some(QuestionOutcome::Accepted { content: Some(content), by, confidential, .. }) = question.outcome else {
+        panic!("{question:?}")
+    };
+    assert_eq!(
+        (content["env"].as_str(), content["note"].as_str(), by.as_str(), confidential),
+        (Some("prod"), Some("go"), "bob", false)
+    );
+    let item = b.ui_get(&format!("/requests/{id}")).await.json();
+    assert_eq!(item["q"]["outcome"]["kind"], "answered");
+    assert_eq!(item["q"]["answer"][0], serde_json::json!(["Environment", "prod"]));
+}
+
+#[tokio::test]
+async fn questions_can_be_declined_with_a_note() {
+    let s = setup("web").await;
+    let id = s.ask("Deploy?", false).await;
+    let mut b = s.browser();
+    b.login("oidc:idp%23bob", None, "/").await;
+    let p = b.ui_post(&format!("/requests/{id}/answer"), "action=decline&note=not+today").await;
+    assert_eq!(p.status, StatusCode::OK, "{}", p.body);
+    let item = b.ui_get(&format!("/requests/{id}")).await.json();
+    assert_eq!(
+        (item["q"]["outcome"]["kind"].as_str(), item["q"]["note"].as_str()),
+        (Some("declined"), Some("not today"))
+    );
+}
+
+#[tokio::test]
+async fn confidential_questions_are_only_for_their_responders() {
+    let s = setup("web").await;
+    let id = s.ask("Which vault key?", true).await;
+
+    // An auditor sees that it exists, not what it says.
+    let mut viewer = s.browser();
+    viewer.login("oidc:idp%23viewer", Some(1), "/").await;
+    let page = viewer.ui_get(&format!("/requests/{id}")).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(!page.body.contains("vault") && !page.body.contains("OPS-1"), "{}", page.body);
+    let api = viewer.get(&format!("/api/questions/{id}")).await;
+    assert!(!api.body.contains("vault"), "{}", api.body);
+
+    // The responder needs a fresh sign-in to read it.
+    let mut bob = s.browser();
+    bob.login("oidc:idp%23bob", Some(3600), "/").await;
+    let page = bob.ui_get(&format!("/requests/{id}")).await;
+    assert!(!page.body.contains("vault"), "{}", page.body);
+    assert_eq!(page.json()["read_needs_reauth"], true);
+    bob.login("oidc:idp%23bob", Some(1), "/").await;
+    let page = bob.ui_get(&format!("/requests/{id}")).await.json();
+    assert_eq!(page["q"]["message"], "Which vault key?");
+
+    let p = bob.ui_post(&format!("/requests/{id}/answer"), "action=answer&f.env=prod").await;
+    assert_eq!(p.status, StatusCode::OK, "{}", p.body);
+    let q = s.store.get_question(id.parse().unwrap()).await.unwrap().unwrap();
+    assert!(q.message.is_empty() && q.content_removed, "the text goes once the question is closed");
+    assert!(matches!(q.outcome, Some(QuestionOutcome::Accepted { confidential: true, .. })));
+}
+
+// ------------------------------------------------------------------ chat links
 
 #[tokio::test]
 async fn chat_accounts_link_with_one_time_codes_and_decide_at_linked_assurance() {
-    let mut s = setup("linked").await;
+    let s = setup("linked").await;
     let id: countersign_core::RequestId = s.request_id().await.parse().unwrap();
     let sink: Arc<dyn ActionSink> = s.daemon.sink.clone();
     let discord = ChannelName::new("discord");
 
-    let p = s.browser.get("/link").await;
-    assert_eq!(p.location.as_deref(), Some("/login?next=/link"));
-
-    s.browser.login("oidc:idp%23bob", None, "/link").await;
-    let csrf = s.browser.csrf().await;
-    assert!(s.browser.get("/link").await.body.contains("Get a code"));
-    assert_eq!(s.browser.post_form("/link", "csrf=nope").await.status, StatusCode::FORBIDDEN);
-    let p = s.browser.post_form("/link", &format!("csrf={csrf}")).await;
-    assert_eq!(p.status, StatusCode::OK);
-    let code = link_code(&p.body);
+    let mut b = s.browser();
+    assert_eq!(b.ui_post("/link", "").await.status, StatusCode::UNAUTHORIZED);
+    b.login("oidc:idp%23bob", None, "/link").await;
+    let p = b.ui(Method::POST, "/link", Some(""), Some("https://evil.example")).await;
+    assert_eq!(p.status, StatusCode::FORBIDDEN);
+    let p = b.ui_post("/link", "").await;
+    assert_eq!(p.status, StatusCode::OK, "{}", p.body);
+    let code = p.json()["code"].as_str().unwrap().to_owned();
     assert_eq!(code.len(), 11, "{code}");
 
     assert_eq!(sink.resolve_account(&discord, "42").await, Ok(None));
@@ -655,4 +785,68 @@ async fn chat_approvals_are_refused_when_the_policy_needs_more_than_linked() {
     assert!(err.contains("assurance"), "{err}");
     intent.verdict = Verdict::Deny;
     assert_eq!(sink.submit(intent).await.unwrap().state, RequestState::Denied, "denials are always accepted");
+}
+
+// ------------------------------------------------------------------ the pages
+
+/// Through the real pages, when this countersignd has them (`pnpm build`
+/// before building it).
+#[tokio::test(flavor = "multi_thread")]
+async fn pages_render_escaped_and_decide_through_form_actions() {
+    if !web::pages_built_in() {
+        eprintln!("skipped: the web UI is not built in");
+        return;
+    }
+    let mut s = setup("web").await;
+    s.daemon.web.pages = web::Pages::start(&s.daemon.web).await.unwrap();
+    let id = s.request_id().await;
+    let mut b = s.browser();
+
+    // Signed out: off to sign in.
+    let p = b.get("/").await;
+    assert_eq!(p.status, StatusCode::SEE_OTHER, "{}", p.body);
+    assert_eq!(p.location.as_deref(), Some("/login?next=%2F"));
+
+    // A sign-in problem is a page too.
+    let p = b.login("oidc:idp%23stranger", Some(10), "/").await;
+    assert_eq!(p.status, StatusCode::FORBIDDEN);
+    assert!(p.headers[header::CONTENT_TYPE].to_str().unwrap().starts_with("text/html"), "{:?}", p.headers);
+    assert!(p.body.contains("No access") && p.body.contains("oidc:idp#stranger"), "{}", p.body);
+
+    b.login("oidc:idp%23bob", None, "/").await;
+    let index = b.get("/").await;
+    assert_eq!(index.status, StatusCode::OK, "{}", index.body);
+    assert!(index.body.contains(&format!("/requests/{id}")), "{}", index.body);
+    let csp = index.headers[header::CONTENT_SECURITY_POLICY].to_str().unwrap();
+    assert!(csp.contains("script-src 'self' 'nonce-"), "{csp}");
+
+    let page = b.get(&format!("/requests/{id}")).await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(page.body.contains("&lt;script>alert(1)&lt;/script>"), "target is escaped: {}", page.body);
+    assert!(!page.body.contains("<script>alert"));
+    assert!(page.body.contains("unverified"));
+
+    // A form posted from another site is refused before anything happens.
+    let p = b
+        .send(
+            HttpRequest::post(format!("/requests/{id}?/decide"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::ORIGIN, "https://evil.example")
+                .body(Body::from("verdict=approve"))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(p.status, StatusCode::FORBIDDEN, "{}", p.body);
+    assert!(s.state().await.is_pending());
+
+    // From this site (without JavaScript), the action decides.
+    let p = b.post_form(&format!("/requests/{id}?/decide"), "verdict=approve&comment=from+the+page").await;
+    assert_eq!(p.status, StatusCode::OK, "{}", p.body);
+    assert!(matches!(s.state().await, RequestState::Active { .. }), "{:?}", s.state().await);
+
+    // Static assets are served with their own caching.
+    let asset = index.body.split("/_app/immutable/").nth(1).and_then(|r| r.split('"').next()).unwrap();
+    let a = b.get(&format!("/_app/immutable/{asset}")).await;
+    assert_eq!(a.status, StatusCode::OK);
+    assert!(a.headers[header::CACHE_CONTROL].to_str().unwrap().contains("immutable"), "{:?}", a.headers);
 }

@@ -6,7 +6,7 @@ examples in `crates/countersign-sudo/contrib/`). Not yet tried on a real host.
 
 ## Goal
 
-An automated account (the *agent user*) logs in to target hosts without
+An automated account (the _agent user_) logs in to target hosts without
 approval, as today. When it runs `sudo`, a human approves that command (or a
 short window of similar commands) through countersign before it runs.
 
@@ -160,9 +160,9 @@ What it does not change:
 Policy field:
 
 ```toml
-sensitive = "honor"   # "honor" (default): follow the caller's flag
-                      # "ignore": always show in chat
-                      # "always": never show this policy's commands in chat
+sensitive = "honor" # "honor" (default): follow the caller's flag
+# "ignore": always show in chat
+# "always": never show this policy's commands in chat
 ```
 
 The flag does not protect secrets. A command line is visible to every user
@@ -220,7 +220,7 @@ the key itself (see `identity-model.md` for clients and scopes):
 [[client]]
 id = "web-1"
 auth = { host_key = "sha256:…" } # printed by `countersign host-key <file>`
-allowed_ips = ["192.0.2.21"]     # optional extra check on the client address
+allowed_ips = ["192.0.2.21"] # optional extra check on the client address
 # backend = "sudo"               # only with more than one host backend
 ```
 
@@ -250,7 +250,7 @@ cshk_<43 chars: base64url of 32 random bytes><6 chars: base64url checksum>
   hashes it themselves is not stopped. The format blocks accidents (short
   keys, reused passwords, keys from other systems), not deliberate misuse by
   whoever edits the config. The authenticated host name becomes a fact of the request (it
-is not taken from the body).
+  is not taken from the body).
 
 Decided: per-host keys. Network-level identity (for example a mesh VPN's
 peer lookup) was considered and rejected: it would tie countersign to one
@@ -283,6 +283,7 @@ signature against keys it pinned at setup.
 
   For a submission covered by an open window, the signature is for that
   submission (its digest and nonce) with the window's request id.
+
 - The helper computes the digest from what it sent, uses the hash of its
   own key as `client`, and runs the command only if one of its
   `server_keys` verifies the signature. A missing or wrong signature reads
@@ -384,7 +385,7 @@ New policy field:
 [[policy]]
 name = "sudo-packages"
 match = { backend = "host", attributes = { command = "apt *" } }
-grant = "window"          # "once" (default) | "window"
+grant = "window" # "once" (default) | "window"
 max_ttl = "15m"
 approvers = ["group:approvers"]
 min_assurance = "linked"
@@ -394,7 +395,7 @@ pending_timeout = "5m"
 name = "sudo-other"
 match = { backend = "host" }
 grant = "once"
-max_ttl = "1m"            # time for the helper to collect the answer
+max_ttl = "1m" # time for the helper to collect the answer
 approvers = ["group:approvers"]
 min_assurance = "linked"
 pending_timeout = "5m"

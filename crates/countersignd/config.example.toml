@@ -96,8 +96,8 @@ max_pending_per_client = 10
 [[client]]
 id = "web-1"
 auth = { host_key = "sha256:0000000000000000000000000000000000000000000000000000000000000001" }
-scopes = ["approval"]            # the default
-allowed_ips = ["192.0.2.21"]     # optional extra check, never a substitute for the key
+scopes = ["approval"] # the default
+allowed_ips = ["192.0.2.21"] # optional extra check, never a substitute for the key
 # backend = "sudo"               # needed only with more than one host backend
 
 # A client that asks questions for a workload, e.g. an AI agent through the
@@ -156,10 +156,7 @@ type = "log"
 [[person]]
 id = "alice"
 display_name = "Alice"
-identities = [
-  "oidc:https://id.example.com#00000000-0000-0000-0000-000000000000",
-  "github:1234567",
-]
+identities = ["oidc:https://id.example.com#00000000-0000-0000-0000-000000000000", "github:1234567"]
 
 [[person]]
 id = "bob"
@@ -225,12 +222,12 @@ min_assurance = "linked"
 name = "sudo"
 match = { backend = "sudo", requester_group = "agents" }
 grant = "once"
-max_ttl = "1m"          # time for the host to pick up the answer
+max_ttl = "1m" # time for the host to pick up the answer
 pending_timeout = "5m"
 approvers = ["group:approvers"]
 exclude = ["requester", "owners"]
 min_assurance = "linked"
-sensitive = "honor"     # `countersign-sudo run --sensitive -- ...`
+sensitive = "honor" # `countersign-sudo run --sensitive -- ...`
 
 # Questions from clients with the "question" scope. An answer is information
 # for the asker, never access: it grants nothing.
@@ -246,4 +243,4 @@ max_pending = 5
 # and answers stay out of chat and logs and are removed once no longer needed.
 confidential = "allow"
 confidential_min_assurance = "fresh-auth"
-answer_retention = "24h"        # how long the asker can fetch a confidential answer
+answer_retention = "24h" # how long the asker can fetch a confidential answer

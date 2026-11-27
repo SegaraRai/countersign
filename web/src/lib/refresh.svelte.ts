@@ -1,0 +1,22 @@
+import { invalidateAll } from "$app/navigation";
+import { onMount } from "svelte";
+
+/**
+ * Reload the page's data every `seconds` while the tab is visible, and when
+ * it becomes visible again, so waiting requests show up without a reload.
+ */
+export function refreshEvery(seconds: number) {
+  onMount(() => {
+    const tick = () => {
+      if (document.visibilityState === "visible") {
+        void invalidateAll();
+      }
+    };
+    const timer = setInterval(tick, seconds * 1000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  });
+}

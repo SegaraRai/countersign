@@ -1,0 +1,24 @@
+{
+  "name": "countersign",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Workspace for countersign's JavaScript parts: the web UI in web/.",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r build",
+    "check": "vp check && pnpm -r check"
+  },
+  "devDependencies": {
+    "@stillwind/cli": "catalog:",
+    "stillwind": "catalog:",
+    "vite-plus": "catalog:"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.16.1",
+      "onFail": "download"
+    }
+  },
+  "packageManager": "pnpm@12.16.1"
+}

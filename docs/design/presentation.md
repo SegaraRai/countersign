@@ -162,16 +162,16 @@ countersign derives itself.
 
 States, in words, the same everywhere (the machine value stays in JSON):
 
-| state | label | detail line |
-|---|---|---|
-| pending | Waiting for approval | Decide by 14:30 (in 4 min) |
-| approved / active | Approved | Active until 14:45 (window) / Ready to run once |
-| ended | Approved, used | Ran at 14:29 / Window closed at 14:45 |
-| denied | Denied | by alice via Discord |
-| expired | No decision | Nobody decided in time |
-| withdrawn | Withdrawn | The requester gave up |
-| revoked | Revoked | by alice at 14:40 |
-| failed | Failed | countersign could not apply the decision: … |
+| state             | label                | detail line                                     |
+| ----------------- | -------------------- | ----------------------------------------------- |
+| pending           | Waiting for approval | Decide by 14:30 (in 4 min)                      |
+| approved / active | Approved             | Active until 14:45 (window) / Ready to run once |
+| ended             | Approved, used       | Ran at 14:29 / Window closed at 14:45           |
+| denied            | Denied               | by alice via Discord                            |
+| expired           | No decision          | Nobody decided in time                          |
+| withdrawn         | Withdrawn            | The requester gave up                           |
+| revoked           | Revoked              | by alice at 14:40                               |
+| failed            | Failed               | countersign could not apply the decision: …     |
 
 Questions: Waiting for an answer / Answered / Declined / No answer /
 Withdrawn.
@@ -179,7 +179,7 @@ Withdrawn.
 Labels: "Requested by" (actor, else the requester as the source names it),
 "Host" for host requests and "Target" otherwise, "Run as", "Directory",
 "Reason (from the requester, unverified)", "Policy", "Needs". The terms
-*requester*, *target* and *subject* stay in JSON and the audit section.
+_requester_, _target_ and _subject_ stay in JSON and the audit section.
 
 Times: absolute and relative (`14:30 (in 4 min)`); the web UI in the
 viewer's time zone, the CLI in UTC with `Z`, Discord with its own `<t:…>`

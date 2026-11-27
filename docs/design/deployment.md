@@ -135,7 +135,7 @@ Today every backend runs inside the daemon and reaches its system directly
 
 That boundary is kept narrow on purpose, so that later a backend can be a
 **connector**: an agent running next to an inner system (an Octelium cluster,
-a program that needs local credentials), connecting *out* to countersign and
+a program that needs local credentials), connecting _out_ to countersign and
 carrying these same calls over that connection. countersign then needs no
 route into the inner network. Requirements for that to stay possible:
 
@@ -155,11 +155,11 @@ The `Channel` trait has `notify`, `update` and an optional long-running
 `run` for receiving actions. Channels differ along two axes, and adapters
 are expected for each combination:
 
-| | how people act | how actions arrive |
-|---|---|---|
-| link-only (ntfy today, email) | open the web UI | — |
-| buttons (Discord, Slack) | press a button in chat | persistent connection, or HTTP callbacks |
-| webhook (Standard Webhooks) | a program decides what to do | — |
+|                               | how people act               | how actions arrive                       |
+| ----------------------------- | ---------------------------- | ---------------------------------------- |
+| link-only (ntfy today, email) | open the web UI              | —                                        |
+| buttons (Discord, Slack)      | press a button in chat       | persistent connection, or HTTP callbacks |
+| webhook (Standard Webhooks)   | a program decides what to do | —                                        |
 
 How actions arrive:
 

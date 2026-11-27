@@ -8,7 +8,14 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-default = ["backend-octelium", "backend-exec", "auth-oidc", "channel-discord", "channel-ntfy", "channel-webhook"]
+default = [
+  "backend-octelium",
+  "backend-exec",
+  "auth-oidc",
+  "channel-discord",
+  "channel-ntfy",
+  "channel-webhook",
+]
 backend-octelium = ["dep:countersign-backend-octelium"]
 backend-exec = ["dep:countersign-backend-exec"]
 auth-oidc = ["dep:countersign-auth-oidc"]
@@ -17,7 +24,6 @@ channel-ntfy = ["dep:countersign-channel-ntfy"]
 channel-webhook = ["dep:countersign-channel-webhook"]
 
 [dependencies]
-askama.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 axum-extra.workspace = true
@@ -30,6 +36,8 @@ countersign-channel-ntfy = { workspace = true, optional = true }
 countersign-channel-webhook = { workspace = true, optional = true }
 countersign-core.workspace = true
 countersign-store-sqlite.workspace = true
+fetchlet.workspace = true
+fetchlet-http.workspace = true
 humantime-serde.workspace = true
 jiff.workspace = true
 serde.workspace = true

@@ -1,0 +1,76 @@
+@import "stillwind";
+@plugin "@stillwind/plugin-iconify";
+
+@theme {
+  /* Surfaces and text */
+  --color-background: light-dark(#f6f6f4, #0c0d10);
+  --color-surface: light-dark(#ffffff, #15171b);
+  --color-surface-subtle: light-dark(#f9f9f7, #111316);
+  --color-surface-hover: light-dark(#f1f1ee, #1c1f24);
+  --color-code: light-dark(#f4f4f1, #0f1114);
+
+  --color-foreground: light-dark(#16171a, #ececee);
+  --color-foreground-secondary: light-dark(#3a3d44, #c4c6cc);
+  --color-muted: light-dark(#6b6e76, #8d9099);
+
+  --color-border: light-dark(#e3e3de, #262930);
+  --color-border-strong: light-dark(#cdcdc6, #353943);
+
+  /* Interactive */
+  --color-action: light-dark(#1f4fd1, #6b95ff);
+  --color-action-hover: light-dark(#173fb0, #8eaeff);
+  --color-action-foreground: light-dark(#ffffff, #0c0d10);
+  --color-action-soft: light-dark(#eef2fd, #17213b);
+
+  /* Tones of a request's state */
+  --color-waiting: light-dark(#a15c00, #f0b44c);
+  --color-waiting-soft: light-dark(#fdf5e6, #2d2210);
+  --color-asking: light-dark(#6a3fc2, #b195f5);
+  --color-asking-soft: light-dark(#f4effd, #241b39);
+  --color-good: light-dark(#17803d, #5fd38a);
+  --color-good-soft: light-dark(#ebf7ef, #10281a);
+  --color-done: light-dark(#3f6f52, #8fbfa1);
+  --color-done-soft: light-dark(#eef4f0, #16221b);
+  --color-bad: light-dark(#c0271b, #f6786d);
+  --color-bad-soft: light-dark(#fdeeec, #33150f);
+  --color-quiet: light-dark(#6b6e76, #8d9099);
+  --color-quiet-soft: light-dark(#f1f1ee, #1c1f24);
+
+  /* Decisions */
+  --color-approve: light-dark(#17803d, #3fbf6f);
+  --color-approve-hover: light-dark(#126832, #5fd38a);
+  --color-approve-foreground: light-dark(#ffffff, #07140c);
+  --color-deny: light-dark(#c0271b, #f0645a);
+  --color-deny-hover: light-dark(#a01f15, #f6867d);
+  --color-deny-foreground: light-dark(#ffffff, #1c0806);
+
+  --font-mono:
+    ui-monospace, "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  --radius-control: 0.5rem;
+  --radius-panel: 0.75rem;
+
+  --icon-size-xs: 0.75rem;
+  --icon-size-sm: 0.875rem;
+  --icon-size-md: 1rem;
+  --icon-size-lg: 1.25rem;
+  --icon-size-xl: 1.5rem;
+}
+
+:root {
+  color-scheme: light dark;
+}
+
+@layer base {
+  body {
+    @apply font-sans text-foreground text-sm antialiased bg-background;
+  }
+
+  summary::-webkit-details-marker {
+    display: none;
+  }
+
+  summary::marker {
+    content: "";
+  }
+}

@@ -31,6 +31,8 @@ pub enum BuildError {
     SigningKey(String),
     #[error("channel {name}: {source}")]
     Channel { name: String, source: countersign_core::ChannelError },
+    #[error(transparent)]
+    Pages(#[from] web::PagesError),
 }
 
 /// Instantiate the configured authenticator, if any.
@@ -174,6 +176,10 @@ impl Daemon {
         let mut daemon = Self::with_parts(config, store, backends, build_channels(config)?)?;
         daemon.web.auth = build_authenticator(config)?;
         daemon.web.key = session_key(config)?;
+        daemon.web.pages = web::Pages::start(&daemon.web).await?;
+        if daemon.web.pages.is_none() {
+            tracing::warn!("this countersignd was built without the web UI: only sign-in and the JSON API answer");
+        }
         Ok(daemon)
     }
 
@@ -197,7 +203,9 @@ impl Daemon {
                 secure_cookies: config.server.public_url.starts_with("https://"),
                 session_ttl: config.server.session_ttl,
                 fresh_auth_window: config.server.fresh_auth_window,
+                public_origin: web::origin_of(&config.server.public_url),
             }),
+            pages: None,
         };
         let intake = match &config.intake {
             Some(i) => {

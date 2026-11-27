@@ -15,8 +15,14 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync", "time"] }
 tracing.workspace = true
-twilight-gateway = { version = "0.18", default-features = false, features = ["rustls-webpki-roots", "zstd"] }
-twilight-http = { version = "0.18", default-features = false, features = ["rustls-webpki-roots", "decompression"] }
+twilight-gateway = { version = "0.18", default-features = false, features = [
+  "rustls-webpki-roots",
+  "zstd",
+] }
+twilight-http = { version = "0.18", default-features = false, features = [
+  "rustls-webpki-roots",
+  "decompression",
+] }
 twilight-model = "0.18"
 
 [dev-dependencies]
