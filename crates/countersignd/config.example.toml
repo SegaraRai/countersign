@@ -1,204 +1,85 @@
-# countersignd configuration. Validate with: countersignd --config <file> check
-# Secrets never go in this file; components read them from *_file paths or
-# environment variables. SIGHUP reloads [[person]], [[workload]], [[group]],
-# [roles], [[client]], [[policy]], [[question_policy]], store.retention, and
-# TLS certificates; other sections need a restart.
+# =============================================================================
+# countersignd configuration
+# =============================================================================
+# Validate before starting or reloading:
+#   countersignd --config /etc/countersign/config.toml check
+#
+# Rules of thumb:
+# - Never put secrets in this file: point to *_file paths (0600/0640) or use
+#   COUNTERSIGN_* environment variables.
+# - Hot reload (SIGHUP / `systemctl reload countersignd`) reloads:
+#     [[person]], [[workload]], [[group]], [roles], [[client]], [[policy]],
+#     [[question_policy]], store.retention, and TLS certificates.
+#   Other sections require a restart.
 
-# Extra files with [[person]] / [[workload]] / [[group]] / [[client]] /
-# [[policy]] / [[question_policy]] tables, relative to this file.
+# Optional: split actors, clients, and policies into separate files (relative
+# to this file). Symlinks (e.g. Kubernetes ConfigMaps, NixOS) are supported.
 # include = ["policies.d/*.toml"]
 
+
+# =============================================================================
+# 1. Core server, OIDC sign-in, database & engine
+# =============================================================================
+
 [server]
-# Base URL of the web UI, used in links sent to channels and for the login
-# callback (<public_url>/auth/callback).
-# Must be https:// (http:// only for localhost while trying things out).
+# Public HTTPS base URL of the web UI. Used in notification links and as the
+# OIDC callback base (<public_url>/auth/callback).
+# Must be https:// (http:// is accepted only for localhost during local dev).
 public_url = "https://countersign.example.com"
-# Without `tls`, the web UI serves plain HTTP for a reverse proxy or tunnel
-# that terminates TLS: keep it on a loopback or private address.
+
+# Address the web UI listens on.
+# - Behind a reverse proxy or tunnel (Caddy, nginx, Cloudflare Tunnel): keep on
+#   127.0.0.1 or a private IP and omit `tls`.
+# - Serving HTTPS directly: bind any interface and set `tls` below.
 listen = "127.0.0.1:8080"
-# Or terminate TLS here (reloaded on SIGHUP):
 # tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/countersign/tls/key.pem" }
-# 32+ random bytes, e.g. `countersign keygen /etc/countersign/session.key`.
-# Without it, web sessions end whenever the daemon restarts.
+
+# Secret key for encrypting session cookies (32+ bytes).
+# Generate with: countersign keygen /etc/countersign/session.key
+# If omitted, a random key is generated at startup and sessions end on restart.
 session_key_file = "/etc/countersign/session.key"
 session_ttl = "12h"
-# A decision is `fresh-auth` while the IdP sign-in is at most this old.
+
+# A decision counts as `fresh-auth` while the OIDC sign-in is at most this old.
 fresh_auth_window = "5m"
-# How long groups from the IdP's `groups` claim count after a sign-in
-# (only through [[group]] from_idp mappings). Defaults to session_ttl.
+
+# How long IdP group claims from sign-in remain valid (used by [[group]] from_idp).
+# Defaults to session_ttl.
 # idp_groups_max_age = "12h"
-# Optional dedicated HTTP listener serving Prometheus `/metrics` (keep on loopback).
+
+# Optional dedicated HTTP listener for Prometheus `/metrics` (keep on loopback).
 # metrics_listen = "127.0.0.1:9090"
 
 [auth.oidc]
+# Any OpenID Connect provider supporting authorization code flow + PKCE.
 issuer = "https://id.example.com"
 client_id = "00000000-0000-0000-0000-000000000000"
-# Or set COUNTERSIGN_OIDC_CLIENT_SECRET.
+# Or set COUNTERSIGN_OIDC_CLIENT_SECRET (omit both for public PKCE-only clients).
 client_secret_file = "/etc/countersign/oidc-client-secret"
-# Default scopes are ["profile", "email"]; add "groups" when using [[group]] from_idp.
+# Extra scopes besides `openid` (default: ["profile", "email"]).
+# Add "groups" if you map IdP groups via [[group]] from_idp.
 # scopes = ["profile", "email", "groups"]
 
 [store]
 path = "/var/lib/countersign/countersign.db"
-# Remove finished requests, questions and delivered outbox entries older than
-# this (minimum 1h). Omit to keep history indefinitely.
+# Automatically purge finished requests, questions, and delivered outbox entries
+# older than this (minimum 1h). Omit to keep history indefinitely.
 # retention = "90d"
 
 [engine]
 poll_interval = "15s"
-# What to do with pending subjects no policy matches: "ignore" or "deny".
+# What to do with pending backend subjects matching no policy: "ignore" or "deny".
 unmatched = "ignore"
 
-[backend.oct-main]
-type = "octelium"
-domain = "octelium.example.com"
-# octeliumctl = "/usr/local/bin/octeliumctl"
-# homedir = "/var/lib/countersign/octelium"
-# command_timeout = "30s"
-# Log in again with this token when the Octelium session ends (clientDuration).
-# auth_token_file = "/etc/countersign/octelium-token"
-# Requesters are named octelium:oct-main#<user>; list that identity on a
-# [[workload]] or [[person]] to recognize them.
 
-# Exec: any program speaking countersign's JSON protocol (see the
-# countersign-backend-exec crate docs). Runs without a shell and with a
-# cleared environment; only `env` (and a default PATH) is passed.
-# Requesters are named exec:<backend>#<id>; a helper may also report an
-# initiator (e.g. github:<user id> for a CI run).
-# [backend.helper]
-# type = "exec"
-# command = ["/usr/local/lib/countersign/helper"]
-# env = { HELPER_MODE = "prod" }
-# timeout = "30s"
-# revoke = true          # the helper implements `revoke`
-# native_expiry = false  # countersign calls `revoke` when the TTL ends
+# =============================================================================
+# 2. People, workloads, groups & roles
+# =============================================================================
+# - Persons sign in and decide (`oidc:<issuer>#<sub>` signs in; other identities
+#   like `github:<id>` recognize them as a requester or initiator).
+# - Workloads (AI agents, CI jobs, host accounts) request and ask; they never
+#   sign in or decide. Their owners can be excluded from approving them.
 
-# Host: target hosts submit `sudo` invocations through the intake API and
-# wait for the outcome (see docs/design/sudo-approval.md). The hosts are
-# [[client]] entries with the "approval" scope. Needs [intake].
-[backend.sudo]
-type = "host"
-
-# Intake API for clients: hosts asking for sudo approval, programs asking
-# questions. Clients authenticate with their key alone, and the API is always
-# HTTPS: either countersign terminates TLS itself ...
-[intake]
-listen = "0.0.0.0:8443"
-tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/countersign/tls/key.pem" }
-# ... or a reverse proxy or tunnel does, forwarding plain HTTP to a loopback
-# or private address:
-# listen = "127.0.0.1:8081"
-# behind_proxy = true
-# client_ip_header = "x-forwarded-for"  # only needed for allowed_ips; last entry counts
-# Approvals are signed with this key, and clients pin its public key, so a
-# forged "approved" fails even where TLS is terminated by someone else.
-# `countersign signing-key /etc/countersign/signing.key` creates it and
-# prints the public key; countersignd also logs it at startup.
-signing_key_file = "/etc/countersign/signing.key"
-max_pending_per_client = 10
-
-# A program that talks to the intake API with its own key.
-# `countersign host-key /etc/countersign/host.key` on the client prints the
-# auth line; the key file stays there.
-[[client]]
-id = "web-1"
-auth = { host_key = "sha256:0000000000000000000000000000000000000000000000000000000000000001" }
-scopes = ["approval"] # the default
-allowed_ips = ["192.0.2.21"] # optional extra check, never a substitute for the key
-# backend = "sudo"            # needed only with more than one host backend
-
-# A client that asks questions for a workload, e.g. an AI agent through the
-# MCP endpoint (https://<intake>/mcp, this key as a bearer token).
-[[client]]
-id = "agent-bridge"
-auth = { host_key = "sha256:0000000000000000000000000000000000000000000000000000000000000002" }
-scopes = ["question"]
-actor = "deploy-agent"
-
-# A CI client authenticating with OIDC JWTs (no static secrets).
-# [[client]]
-# id = "github-actions"
-# auth = { oidc = {
-#   issuer = "https://token.actions.githubusercontent.com",
-#   audience = "countersign",
-#   claims = { repository = "example/*", environment = "prod" },
-#   initiator_claim = "actor_id",
-#   initiator_scheme = "github",
-#   # jwks_uri = "https://token.actions.githubusercontent.com/.well-known/jwks", # optional; skips discovery
-# } }
-# scopes = ["question"]
-# actor = "deploy-agent"
-
-[channel.log]
-type = "log"
-
-# ntfy: push notifications with a button that opens the request in the web UI.
-# With details = true, requester, target and reason are sent to the ntfy
-# server; use a server you trust or set details = false. Question text and
-# sensitive approvals are never sent.
-# [channel.phone]
-# type = "ntfy"
-# server = "https://ntfy.example.com"
-# topic = "countersign-ops"
-# token_file = "/etc/countersign/ntfy-token"  # optional; or COUNTERSIGN_NTFY_TOKEN
-# details = true
-# priority = 4                                # for new requests (1-5)
-
-# Webhook: signed JSON events (Standard Webhooks headers webhook-id,
-# webhook-timestamp, webhook-signature) for new requests, questions and
-# outcomes. webhook-id is stable across retries; deduplicate on it.
-# Sensitive approvals, confidential questions and confidential answers are
-# withheld from the payload.
-# [channel.automation]
-# type = "webhook"
-# url = "https://hooks.example.com/countersign"
-# secret_file = "/etc/countersign/webhook-secret"    # "whsec_<base64>" or raw bytes (>= 16)
-# bearer_token_file = "/etc/countersign/hook-token"  # optional
-# unsigned = false                                   # set true only if omitting secret_file
-
-# Discord: requests are posted with Approve/Deny buttons; presses arrive over
-# the bot's Gateway connection (outbound only). The bot needs View Channel,
-# Send Messages and Embed Links in the channel; no privileged intents.
-# Persons link their Discord account from the web UI ("Link chat account")
-# and `/countersign-link`. Buttons approve directly only when the policy's
-# min_assurance is "linked"; otherwise the approve button opens the web UI.
-# Questions with a single required yes/no or choice (up to 4 options) get
-# answer buttons; others, and confidential ones, are answered in the web UI.
-# [channel.discord]
-# type = "discord"
-# channel_id = "123456789012345678"
-# guild_id = "234567890123456789"                    # optional; decisions only from this server
-# bot_token_file = "/etc/countersign/discord-token"  # or COUNTERSIGN_DISCORD_BOT_TOKEN
-# mention_roles = ["345678901234567890"]             # optional; pinged on new requests
-
-# Slack: requests are posted with Block Kit buttons; presses and
-# `/countersign-link` arrive over Socket Mode (outbound WebSocket only).
-# Needs a Bot Token (xoxb-..., chat:write) and an App-Level Token (xapp-...,
-# connections:write), plus Interactivity and the `/countersign-link` slash
-# command enabled in the Slack app settings.
-# [channel.slack]
-# type = "slack"
-# channel_id = "C0123456789"
-# team_id = "T0123456789"                              # optional; actions only from this workspace
-# bot_token_file = "/etc/countersign/slack-bot-token"  # or COUNTERSIGN_SLACK_BOT_TOKEN
-# app_token_file = "/etc/countersign/slack-app-token"  # or COUNTERSIGN_SLACK_APP_TOKEN
-# mention_users = ["U0123456789"]                      # optional; pinged on new requests
-# mention_groups = ["S0123456789"]                     # optional; user groups pinged on new requests
-
-# Web Push: browser push notifications (RFC 8291 + VAPID) delivered only to
-# active persons eligible for each request or question. No external relay
-# server required; works with installed PWAs on iOS/Android and desktop browsers.
-# Create the key with `countersign vapid-key /etc/countersign/vapid.key`.
-# [channel.webpush]
-# type = "webpush"
-# vapid_key_file = "/etc/countersign/vapid.key"
-# subject = "mailto:ops@example.com"  # optional; defaults to server.public_url
-# details = false                     # false (default): safe title only on lock screens
-
-# ------------------------------------------------------------------ actors
-# Persons sign in and decide. "oidc:<issuer>#<sub>" identities sign in; other
-# identities (github:<id>, unix:<client>#<user>, ...) only recognize the
-# person as a requester or initiator.
 [[person]]
 id = "alice"
 display_name = "Alice"
@@ -206,11 +87,9 @@ identities = ["oidc:https://id.example.com#00000000-0000-0000-0000-000000000000"
 
 [[person]]
 id = "bob"
+display_name = "Bob"
 identities = ["oidc:https://id.example.com#11111111-1111-1111-1111-111111111111"]
 
-# Workloads request and ask; they never sign in or decide. Their owners
-# answer for them (and are excluded from approving them by default policies
-# that list "owners").
 [[workload]]
 id = "deploy-agent"
 owners = ["alice"]
@@ -219,49 +98,182 @@ identities = ["unix:web-1#agent", "octelium:oct-main#deploy-agent"]
 [[group]]
 name = "approvers"
 members = ["alice", "bob"]
-# Also count members of an IdP group, as reported at sign-in:
+# Optional: also include members of an IdP group reported at sign-in:
 # from_idp = [{ provider = "oidc:https://id.example.com", group = "countersign-approvers" }]
 
 [[group]]
 name = "agents"
 members = ["deploy-agent"]
 
-# What persons may do in countersign (not which requests they decide):
-# member: sign in, see and decide what they are eligible for, link chat
-# accounts; auditor: read everything (confidential content excepted);
-# admin: suspend/reinstate, revoke in bulk, unlink chat accounts.
+# Roles control what persons may do in countersign (not which requests they decide):
+# - member:  sign in, view & decide requests they are eligible for, link chat accounts
+# - auditor: read all requests & audit records (confidential content excepted)
+# - admin:   suspend/reinstate actors, bulk revoke, unlink chat accounts, break-glass
 [roles]
 member = ["group:approvers"]
 admin = ["person:alice"]
 # auditor = ["group:security"]
 
-# ------------------------------------------------------------------ policies
-# Available `match` fields: backend, source, kind, requester, requester_identity,
+
+# =============================================================================
+# 3. Notification channels (enable any combination you use)
+# =============================================================================
+
+# Daemon log (useful for testing or journald audit trails).
+[channel.log]
+type = "log"
+
+# --- Browser Web Push (RFC 8291 + VAPID) -------------------------------------
+# Delivered only to active persons eligible for each item. Works with desktop
+# browsers and installed PWAs (iOS/Android) with no external relay required.
+# Generate key: countersign vapid-key /etc/countersign/vapid.key
+#
+# [channel.webpush]
+# type = "webpush"
+# vapid_key_file = "/etc/countersign/vapid.key"
+# subject = "mailto:ops@example.com"  # optional; defaults to server.public_url
+# details = false                     # false (default): safe title only on lock screens
+
+# --- Slack (Socket Mode — outbound WebSocket, no public webhook needed) ------
+# App needs Bot Token (xoxb-..., chat:write), App-Level Token (xapp-...,
+# connections:write), Interactivity, and the `/countersign-link` slash command.
+#
+# [channel.slack]
+# type = "slack"
+# channel_id = "C0123456789"
+# team_id = "T0123456789"                              # optional; restrict to one workspace
+# bot_token_file = "/etc/countersign/slack-bot-token"  # or COUNTERSIGN_SLACK_BOT_TOKEN
+# app_token_file = "/etc/countersign/slack-app-token"  # or COUNTERSIGN_SLACK_APP_TOKEN
+# mention_users = ["U0123456789"]                      # optional; pinged on new requests
+# mention_groups = ["S0123456789"]                     # optional; user groups pinged
+
+# --- Discord (Gateway — outbound only, no public webhook needed) -------------
+# Bot needs View Channel, Send Messages, and Embed Links; no privileged intents.
+# Users link via web UI ("Link chat account") + `/countersign-link`.
+#
+# [channel.discord]
+# type = "discord"
+# channel_id = "123456789012345678"
+# guild_id = "234567890123456789"                    # optional; restrict to one server
+# bot_token_file = "/etc/countersign/discord-token"  # or COUNTERSIGN_DISCORD_BOT_TOKEN
+# mention_roles = ["345678901234567890"]             # optional; pinged on new requests
+
+# --- ntfy (notify-only, opens web UI on tap) ---------------------------------
+# [channel.phone]
+# type = "ntfy"
+# server = "https://ntfy.example.com"
+# topic = "countersign-ops"
+# token_file = "/etc/countersign/ntfy-token"  # optional; or COUNTERSIGN_NTFY_TOKEN
+# details = true                              # set false if you do not trust the ntfy server
+# priority = 4                                # 1-5 for new requests
+
+# --- Webhook (Standard Webhooks signed JSON events, notify-only) -------------
+# Generate secret: countersign keygen /etc/countersign/webhook-secret --format whsec
+#
+# [channel.automation]
+# type = "webhook"
+# url = "https://hooks.example.com/countersign"
+# secret_file = "/etc/countersign/webhook-secret"
+# bearer_token_file = "/etc/countersign/hook-token"  # optional
+# unsigned = false                                   # set true only if omitting secret_file
+
+
+# =============================================================================
+# 4. Intake API & clients (for countersign-sudo, countersign-ask, MCP)
+# =============================================================================
+# Always served over HTTPS: either terminate TLS directly here, or set
+# `behind_proxy = true` on a loopback/private address (route both `/intake/*`
+# and `/mcp` to this listener).
+
+[intake]
+listen = "0.0.0.0:8443"
+tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/countersign/tls/key.pem" }
+# Alternative behind a reverse proxy or tunnel:
+# listen = "127.0.0.1:8081"
+# behind_proxy = true
+# client_ip_header = "x-forwarded-for"  # only needed if any [[client]] uses allowed_ips
+
+# Ed25519 key used to sign approvals (pinned on target hosts so proxies cannot forge root).
+# Generate with: countersign signing-key /etc/countersign/signing.key
+signing_key_file = "/etc/countersign/signing.key"
+max_pending_per_client = 10
+
+# Example A: Linux host running `countersign-sudo`
+# Create key on the host: `countersign-sudo enroll` or `countersign host-key /etc/countersign/host.key`
+[[client]]
+id = "web-1"
+auth = { host_key = "sha256:0000000000000000000000000000000000000000000000000000000000000001" }
+scopes = ["approval"] # default
+allowed_ips = ["192.0.2.21"] # optional defence-in-depth check
+# backend = "sudo"               # needed only when multiple host backends exist
+
+# Example B: AI agent / MCP client asking structured questions
+[[client]]
+id = "agent-bridge"
+auth = { host_key = "sha256:0000000000000000000000000000000000000000000000000000000000000002" }
+scopes = ["question"]
+actor = "deploy-agent"
+
+# Example C: GitHub Actions workflow using passwordless OIDC JWTs
+# [[client]]
+# id = "github-actions"
+# auth = { oidc = {
+#   issuer = "https://token.actions.githubusercontent.com",
+#   audience = "countersign",
+#   claims = { repository = "example/*", environment = "prod" },
+#   initiator_claim = "actor_id",
+#   initiator_scheme = "github",
+#   # jwks_uri = "https://token.actions.githubusercontent.com/.well-known/jwks", # optional
+# } }
+# scopes = ["question"]
+# actor = "deploy-agent"
+
+
+# =============================================================================
+# 5. Access backends & policies
+# =============================================================================
+
+# Host backend for `countersign-sudo` submissions through [intake].
+[backend.sudo]
+type = "host"
+
+# Optional: Octelium pending-session approval backend.
+[backend.oct-main]
+type = "octelium"
+domain = "octelium.example.com"
+# octeliumctl = "/usr/local/bin/octeliumctl"
+# homedir = "/var/lib/countersign/octelium"
+# command_timeout = "30s"
+# auth_token_file = "/etc/countersign/octelium-token"
+
+# Optional: generic external helper speaking countersign's stdin/stdout JSON protocol.
+# [backend.helper]
+# type = "exec"
+# command = ["/usr/local/lib/countersign/helper"]
+# env = { HELPER_MODE = "prod" }
+# timeout = "30s"
+# revoke = true
+# native_expiry = false
+
+# --- Approval policies (first-match, deny by default) ------------------------
+# Match fields: backend, source, kind, requester, requester_identity,
 # requester_group, backend_group, target, attributes = { key = "glob*" }.
+
 [[policy]]
 name = "elevated-agents"
 match = { backend = "oct-main", requester_group = "agents" }
 approvers = ["group:approvers"]
-# Number of distinct eligible persons required to approve (default: 1).
-# quorum = 2
-# Who may not decide although selected: "requester" (default), "owners" of
-# the requesting workload, "initiator" of the request.
-exclude = ["requester", "owners", "initiator"]
-# Refuse requests that do not carry a recognized initiator (default: false).
-# require_initiator = false
+# quorum = 2                                          # default: 1 distinct person
+exclude = ["requester", "owners", "initiator"] # default: ["requester"]
+# require_initiator = false                           # refuse if no initiator reported
 max_ttl = "30m"
 default_ttl = "15m"
 pending_timeout = "10m"
-min_assurance = "fresh-auth"
-# Keep requests out of chat when the requester asks ("honor"), never
-# ("ignore"), or always ("always"). The web UI and the record keep everything.
-# sensitive = "honor"
-# Route notifications only to specific channels (omit to notify all channels).
-# channels = ["slack", "webpush"]
+min_assurance = "fresh-auth" # "linked" < "web" < "fresh-auth"
+# sensitive = "honor"                                 # "honor" | "ignore" | "always"
+# channels = ["slack", "webpush"]                     # omit to notify all channels
 
-# sudo on target hosts: package management opens a 15-minute window; anything
-# else needs one approval per command. Approving a command approves root on
-# that host while it runs.
+# Package management opens a 15-minute window; other sudo commands are one-shot.
 [[policy]]
 name = "sudo-packages"
 match = { backend = "sudo", requester_group = "agents", attributes = { command = "apt *" } }
@@ -276,16 +288,17 @@ min_assurance = "linked"
 name = "sudo"
 match = { backend = "sudo", requester_group = "agents" }
 grant = "once"
-max_ttl = "1m" # time for the host to pick up the answer
+max_ttl = "1m"
 pending_timeout = "5m"
 approvers = ["group:approvers"]
 exclude = ["requester", "owners"]
 min_assurance = "linked"
-sensitive = "honor" # `countersign-sudo run --sensitive -- ...`
+sensitive = "honor"
 
-# Questions from clients with the "question" scope. An answer is information
-# for the asker, never access: it grants nothing.
-# Available `match` fields: asker (client id glob), asker_actor (actor id glob).
+# --- Question policies (first-match, deny by default) ------------------------
+# Match fields: asker (client id glob), asker_actor (actor id glob).
+# Answers are information for the asker and never grant access.
+
 [[question_policy]]
 name = "agent-questions"
 match = { asker = "agent-bridge" }
@@ -293,11 +306,8 @@ responders = ["group:approvers"]
 min_assurance = "linked"
 answer_timeout = "30m"
 max_pending = 5
-# allow_self_answer = false     # let the person a client asks for answer its questions
-# Route notifications only to specific channels (omit to notify all channels).
+# allow_self_answer = false
 # channels = ["slack", "webpush"]
-# Confidential questions: "deny" (default), "allow", or "require". Their text
-# and answers stay out of chat and logs and are removed once no longer needed.
-confidential = "allow"
+confidential = "allow" # "deny" (default) | "allow" | "require"
 confidential_min_assurance = "fresh-auth"
-answer_retention = "24h" # how long the asker can fetch a confidential answer
+answer_retention = "24h"

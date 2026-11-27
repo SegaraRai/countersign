@@ -1,197 +1,287 @@
 # countersign
 
-Human approval for just-in-time access. countersign watches an access system
-for requests that need a second pair of eyes (for example an AI agent asking for
-an elevated session), tells the right people, and applies their decision — with
-the assurance level you require. Programs can also ask the right people a
-structured question and get their answer back, over HTTP or as an MCP server for
-AI agents; an answer never grants access.
+**Human-in-the-loop approval and structured questions for AI agents, CI/CD, and `sudo`.**
 
-> Status: early development. Nothing here is stable yet.
+When an AI agent runs `sudo` on a server, a CI pipeline is about to deploy to
+production, or an automated tool needs a human decision, countersign pauses it,
+notifies the right people (Slack, Discord, browser Web Push, ntfy, or webhook),
+enforces your approval policy, and returns a cryptographically signed decision.
 
-At its core, countersign does three things: approves `sudo` on your hosts
-(`countersign-sudo`), lets programs ask for approval or ask people a question
-through its intake API, and applies decisions to access systems you plug in
-as backends (Octelium is one of them).
+> **Status:** Early development. Configuration and APIs may change before `1.0`.
 
-You run it yourself. It needs an OpenID Connect provider (any), one HTTPS
-address that people and clients can reach (directly, or through a reverse
-proxy or tunnel), and somewhere to send notifications. It assumes no
-particular network, identity provider or access system; see
-[`docs/design/deployment.md`](docs/design/deployment.md).
+## What you can do with it
 
-## Design
+- **Approve `sudo` on Linux hosts (`countersign-sudo`)** — Require human
+  approval before an AI agent or service account can run `sudo`, with per-command
+  or time-window grants. Approvals are Ed25519-signed so nothing on the network
+  can forge root access.
+- **Gate CI pipelines (`countersign-ask`)** — Ask operators a structured Yes/No,
+  choice, or form question from GitHub Actions (using passwordless OIDC JWTs) or
+  any script, and get validated JSON back on `stdout`.
+- **Let AI agents ask humans over MCP (`POST /mcp`)** — Point any MCP client at
+  countersign's built-in Streamable HTTP endpoint so agents can ask structured
+  questions without extra glue code. Answers never grant access.
+- **Plug in external access systems** — Approve pending Octelium sessions
+  (`countersign-backend-octelium`) or integrate any custom system via a simple
+  stdin/stdout JSON helper (`countersign-backend-exec`).
 
+## How it works
+
+```text
+  Requester / Asker                 countersignd (self-hosted)                Approvers / Responders
+  ─────────────────                 ──────────────────────────                ──────────────────────
+  • Linux host (countersign-sudo)   • Evaluates policies & exclusions         • Web UI (OIDC + fresh-auth)
+  • CI job (countersign-ask)   ───▶ • Signs approvals (Ed25519)          ───▶ • Slack / Discord buttons
+  • AI agent (MCP / HTTP)           • Enforces quorum & assurance levels      • Browser Web Push (PWA)
+  • Octelium / exec backend         • Stores audit log in SQLite              • ntfy / Standard Webhooks
 ```
-                 ┌──────────── countersign-core ─────────────┐
-AccessBackend ◀─▶│ request state machine · policy · events   │◀── PolicySet
-(host/sudo, exec,│ questions · outbox                        │
- Octelium)       │                                            │
-                 └───────▲──────────────────────▲────────────┘
-                         │                      │
-             Channel (notify + decide)    Authenticator (web approvers)
-     (Discord, Slack, Web Push, ntfy, webhook)   (OIDC)
-                         │
-                       Store (SQLite)
+
+### Core security guarantees
+
+- **Fail-closed & re-verified:** If countersign is unreachable or nobody decides
+  in time, access is denied. Backends re-verify facts before granting.
+- **No self-approval:** Policies separate **persons** (who sign in and decide)
+  from **workloads** (agents, CI, host users) and can exclude the requester, the
+  workload's owners, and the person who initiated the run.
+- **Assurance levels (`linked` < `web` < `fresh-auth`):** High-risk policies
+  require `fresh-auth` (a recent OIDC re-authentication in the web UI). If a
+  chat channel cannot meet the requirement, its Approve button automatically
+  turns into a link to the web UI. Denials work from any eligible approver.
+- **Confidentiality:** Sensitive approvals and confidential questions never leak
+  their details into chat or logs; confidential question text and answers are
+  overwritten in SQLite (`secure_delete = ON`) as soon as they are no longer needed.
+- **Self-hosted & infrastructure-agnostic:** All you need is any OpenID Connect
+  provider, one HTTPS address (direct TLS or behind a reverse proxy/tunnel), and
+  a notification channel.
+
+---
+
+## Quick start
+
+### 1. Generate server keys
+
+Secrets never live in `config.toml`; generate them into `/etc/countersign` (root
+/ `countersign` readable only):
+
+```sh
+countersign keygen /etc/countersign/session.key       # web session cookie encryption
+countersign signing-key /etc/countersign/signing.key  # Ed25519 approval signing key (cssk_…)
+# Optional: if using browser Web Push notifications
+countersign vapid-key /etc/countersign/vapid.key      # VAPID P-256 key (csvk_…)
 ```
 
-- **Backends** hold the actual access. countersign re-reads facts from the
-  backend before acting and never trusts what the requester claims.
-- **Actors**: persons sign in and decide; workloads (agents, CI, hosts' users)
-  request and ask. Identities such as `oidc:<issuer>#<sub>`, `github:<id>` or
-  `unix:<client>#<user>` tie accounts to them; countersign names the requester
-  from the authenticated source, never from the request. Roles (`member`,
-  `auditor`, `admin`) say what a person may do in countersign; policies say
-  which requests they may decide. Suspending an actor takes effect at once.
-- **Channels** announce requests and questions. Interactive channels can carry
-  decisions and simple answers back; every inbound action is authenticated by
-  the platform and tied to a person through an account link made with a
-  one-time code from the web UI.
-- **Confidentiality**: a sensitive approval or a confidential question shows up
-  in chat only as "something from X under policy Y" with a link; confidential
-  question text and answers are removed from the database once no longer
-  needed.
-- **Assurance**: each channel declares the strongest assurance it can vouch for
-  (`linked` < `web` < `fresh-auth`). Policies set the minimum for approval. If a
-  channel cannot meet it, its approve button becomes a link to the web UI, where
-  the approver re-authenticates. Denials are accepted from any eligible approver.
-- Policies are first-match, deny by default, with quorum of distinct persons,
-  TTL ceilings, pending timeouts, and exclusions (the requester, the owners of
-  a requesting workload, the person who started it).
+### 2. Create `/etc/countersign/config.toml`
+
+Start from [`crates/countersignd/config.example.toml`](crates/countersignd/config.example.toml).
+A minimal setup with OIDC sign-in, two approvers, `sudo` approval, and a log
+channel looks like this:
 
 ```toml
+[server]
+public_url = "https://countersign.example.com"
+listen = "127.0.0.1:8080"
+session_key_file = "/etc/countersign/session.key"
+
+[auth.oidc]
+issuer = "https://id.example.com"
+client_id = "your-oidc-client-id"
+client_secret_file = "/etc/countersign/oidc-client-secret"
+
+[store]
+path = "/var/lib/countersign/countersign.db"
+
+[intake]
+listen = "0.0.0.0:8443"
+tls = { cert_file = "/etc/countersign/tls/fullchain.pem", key_file = "/etc/countersign/tls/key.pem" }
+signing_key_file = "/etc/countersign/signing.key"
+
+[backend.sudo]
+type = "host"
+
+[channel.log]
+type = "log"
+
+[[person]]
+id = "alice"
+display_name = "Alice"
+identities = ["oidc:https://id.example.com#<alice-sub>"]
+
+[[person]]
+id = "bob"
+display_name = "Bob"
+identities = ["oidc:https://id.example.com#<bob-sub>"]
+
 [[workload]]
 id = "deploy-agent"
 owners = ["alice"]
-identities = ["octelium:oct-main#deploy-agent"]
+identities = ["unix:web-1#agent"]
 
-[[policy]]
-name = "elevated-agents"
-match = { backend = "oct-main", requester_group = "agents" }
-approvers = ["group:approvers"]
-exclude = ["requester", "owners"]
-max_ttl = "30m"
-min_assurance = "fresh-auth" # the default
+[[group]]
+name = "approvers"
+members = ["alice", "bob"]
+
+[roles]
+member = ["group:approvers"]
+admin = ["person:alice"]
 
 [[policy]]
 name = "staging-sudo"
-match = { backend = "sudo", source = "staging-*" }
-approvers = ["person:alice", "person:bob"]
-quorum = 2
-max_ttl = "2h"
-min_assurance = "linked" # chat buttons may approve directly
+match = { backend = "sudo", source = "web-*" }
+approvers = ["group:approvers"]
+exclude = ["requester", "owners"]
+grant = "once"
+max_ttl = "1m"
+pending_timeout = "5m"
+min_assurance = "fresh-auth"
 ```
 
-## Crates
-
-| crate                          | status                                                                                                                                                            |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `countersign-core`             | types, state machine, policy, traits                                                                                                                              |
-| `countersign-store-sqlite`     | SQLite store with transactional outbox                                                                                                                            |
-| `countersign-auth-oidc`        | OpenID Connect login (code flow + PKCE) for the web UI                                                                                                            |
-| `countersign-backend-octelium` | optional: approves/rejects pending Octelium sessions via `octeliumctl`                                                                                            |
-| `countersign-backend-exec`     | delegates to any program speaking a small JSON protocol over stdin/stdout                                                                                         |
-| `countersign-channel-discord`  | posts requests with Approve/Deny buttons and simple questions with answer buttons; receives presses over the Gateway (no inbound endpoint)                        |
-| `countersign-channel-slack`    | posts requests and simple questions with Block Kit buttons; receives presses and `/countersign-link` over Socket Mode (no inbound endpoint)                       |
-| `countersign-channel-webpush`  | browser Web Push (RFC 8291 + VAPID) delivered only to eligible active approvers/responders, linking to the web UI (works with installed PWAs)                     |
-| `countersign-channel-ntfy`     | push notifications via an ntfy server, linking to the web UI (notify-only)                                                                                        |
-| `countersign-channel-webhook`  | signed JSON events ([Standard Webhooks](https://www.standardwebhooks.com/)) to any URL (notify-only)                                                              |
-| `countersignd`                 | daemon: config, engine (discover, decide, grant, expire, questions), outbox delivery, web UI, JSON API, intake API for clients (also an MCP server for questions) |
-| `countersign` (CLI)            | host-side administration: list/show requests and questions, deny/revoke, suspend/reinstate, manage account links, generate secrets (no approve, no answer)        |
-| `countersign-sudo`             | PAM helper for target hosts: asks countersign before `sudo` runs                                                                                                  |
-| `countersign-ask`              | standalone CLI client for CI gates, scripts, and agents to ask questions and receive structured JSON answers (supports host keys and GitHub Actions OIDC)         |
-
-## Building
-
-The web UI is a SvelteKit application in `web/` (styled with Stillwind). It
-runs inside `countersignd` through [fetchlet](https://fetchlet.roundtrip.dev/):
-its build is embedded into the binary at compile time, so build it first.
-Building needs Rust 1.100 or later, Node.js and pnpm. The pnpm workspace is the
-repository root.
-
-Tasks are Vite+ tasks (`vp run <task>`, defined in `vite.config.ts`).
-
-```sh
-pnpm install
-vp run build    # writes web/build, which countersignd embeds
-cargo build --release
-```
-
-Without `web/build`, `countersignd` still builds (with a warning). Sign-in,
-the JSON API and the intake API work, and the pages answer 503.
-
-To work on the pages, `vp run dev` serves them with hot reload at
-<http://localhost:5173>, against made-up requests and questions. It builds and
-starts the demo daemon (`cargo run -p countersignd --example web_demo -- --dev
-http://localhost:5173`) and stops it again. Signing in goes to a pretend
-identity provider that lets you pick who you are. Saving a page updates it in
-place. Restarting the daemon (after Rust changes) resets the made-up data and
-keeps you signed in.
-
-`vp run check` checks formatting, lint, types and the Stillwind classes.
-
-To see the built pages as countersignd serves them, `vp run build`, then
-`cargo run -p countersignd --example web_demo` (<http://localhost:8790>).
-
-## Running
+### 3. Validate and run
 
 ```sh
 countersignd --config /etc/countersign/config.toml check
 countersignd --config /etc/countersign/config.toml run
 ```
 
-On the same host, `countersign` reads the daemon's configuration and database:
+For production systemd, Docker, reverse proxy (`/intake/` + `/mcp`), and
+Prometheus `/metrics` setup, see [`docs/guides/deployment.md`](docs/guides/deployment.md).
+
+---
+
+## Common workflows
+
+### Approve `sudo` on a Linux host
+
+Enroll the target host (pins countersign's signing key, generates a host key,
+and prints the `[[client]]` block to paste into `config.toml`):
 
 ```sh
-countersign requests                  # open approvals and questions (--all, --json)
-countersign show <id>                 # --verbose adds the audit details, --json the raw record
-countersign deny <id> --as alice      # recorded as alice, via "cli"
-countersign revoke <id> --as alice
-countersign suspend bob --as alice --reason "lost laptop"   # admins only
-countersign reinstate bob --as alice
-countersign revoke-approved-by bob --as alice
-countersign links                     # chat accounts linked to persons
-countersign unlink discord 123456789012345678 --as alice
-countersign keygen /etc/countersign/session.key            # 256-bit hex
-countersign keygen /etc/countersign/webhook-secret --format whsec
-countersign signing-key /etc/countersign/signing.key       # approval signing key (cssk_…)
-countersign vapid-key /etc/countersign/vapid.key           # Web Push VAPID key (csvk_…)
-countersign host-key /etc/countersign/host.key             # on a client; prints its [[client]] auth line
+sudo countersign-sudo enroll \
+  --server https://countersign.example.com:8443 \
+  --server-key ed25519:<public-key-from-countersignd>
 ```
 
-To ask a human a structured question from CI or a script:
+Then configure PAM and `sudoers` following
+[`docs/guides/sudo-host-setup.md`](docs/guides/sudo-host-setup.md). Callers can
+attach a reason or mark a command sensitive:
 
 ```sh
-countersign-ask --server https://countersign.example.com:8443 \
+countersign-sudo run --reason "restart nginx after cert renewal" -- systemctl reload nginx
+```
+
+### Gate a CI pipeline with `countersign-ask`
+
+In GitHub Actions (`id-token: write`), authenticate without static secrets:
+
+```sh
+countersign-ask \
+  --server https://countersign.example.com:8443 \
   --github-oidc \
-  --message "Deploy v1.2.3 to production?" \
+  --message "Deploy v1.4.0 to production?" \
   --yes-no
 ```
 
-Approving and answering are intentionally not possible from the CLI; they go
-through the web UI or a chat channel, where the policy's assurance level is
-enforced. The CLI never prints confidential question text or answers.
+See [`docs/guides/ci-questions.md`](docs/guides/ci-questions.md) for exit codes
+and `[[client]]` OIDC configuration.
 
-The state database holds requests, questions, chat links, suspensions and the
-admin log. Back it up like any other SQLite file (for example with
-`sqlite3 countersign.db ".backup …"`); confidential content is overwritten in
-place (`secure_delete`) once it is no longer needed, but copies in older
-backups remain until those backups expire.
+### Connect an AI agent over MCP
 
-Both the web UI and the intake API serve HTTPS: either countersign terminates
-TLS (`tls = { cert_file, key_file }`), or a reverse proxy or tunnel does and
-the listener stays on a loopback or private address. Clients authenticate with
-their key alone; `allowed_ips` is an optional extra. Approvals are signed by
-countersign, and `countersign-sudo` checks the signature against a pinned
-public key, so nothing in between can approve a `sudo`.
+Add countersign's `/mcp` endpoint to your MCP client with a `question`-scoped
+client key:
+
+```json
+{
+  "type": "http",
+  "url": "https://countersign.example.com:8443/mcp",
+  "headers": { "Authorization": "Bearer ${COUNTERSIGN_KEY}" }
+}
+```
+
+The agent gets `ask_question`, `get_answer`, and `withdraw_question`.
+
+---
+
+## Day-2 operations (`countersign` CLI)
+
+On the daemon host, `countersign` reads the same config and SQLite database.
+Approving and answering are intentionally disallowed from the CLI so policy
+assurance levels are always enforced.
+
+```sh
+# Inspect
+countersign requests                                         # open approvals & questions (--all, --json)
+countersign show <id>                                        # --verbose for audit details, --json for raw
+countersign links                                            # linked chat accounts
+
+# Intervene & emergency response
+countersign deny <id> --as alice
+countersign revoke <id> --as alice
+countersign suspend bob --as alice --reason "lost laptop"    # admins only; ends sessions at once
+countersign reinstate bob --as alice
+countersign revoke-approved-by bob --as alice
+countersign unlink discord 123456789012345678 --as alice
+
+# Key generation (no config file needed)
+countersign keygen /etc/countersign/session.key
+countersign keygen /etc/countersign/webhook-secret --format whsec
+countersign signing-key /etc/countersign/signing.key
+countersign vapid-key /etc/countersign/vapid.key
+countersign host-key /etc/countersign/host.key
+```
+
+- **Hot reload (`SIGHUP`):** Reloads `[[person]]`, `[[workload]]`, `[[group]]`,
+  `[roles]`, `[[client]]`, `[[policy]]`, `[[question_policy]]`, `store.retention`,
+  and TLS certificates without restarting (`systemctl reload countersignd`).
+- **Backups:** Back up SQLite online with
+  `sqlite3 /var/lib/countersign/countersign.db ".backup /backups/countersign.db"`.
+
+---
+
+## Building from source & local development
+
+The web UI is a SvelteKit app in `web/` (styled with Stillwind), embedded into
+`countersignd` at compile time via [fetchlet](https://fetchlet.roundtrip.dev/).
+Building requires **Rust 1.100+**, **Node.js**, and **pnpm**.
+
+```sh
+pnpm install
+vp run build            # builds web/build (embedded into countersignd)
+cargo build --release
+```
+
+Without `web/build`, `countersignd` still compiles (with a warning): sign-in,
+the JSON API, and the intake API work, while web pages return `503`.
+
+- **UI development with hot reload:** `vp run dev` starts the demo daemon and
+  serves the UI at <http://localhost:5173> with a mock IdP and sample data.
+- **Frontend checks:** `vp run check` runs SvelteKit sync, type checks, and Stillwind checks.
+- **Preview embedded UI:** `vp run build && cargo run -p countersignd --example web_demo` (<http://localhost:8790>).
+
+## Crates
+
+| Crate                          | Purpose                                                                                                            |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| `countersign-core`             | Domain core: identity, approvals, questions, form schema, policies, presentation, and traits (`wasm32`-compatible) |
+| `countersign-store-sqlite`     | SQLite store with transactional outbox and `secure_delete`                                                         |
+| `countersign-auth-oidc`        | OpenID Connect sign-in (authorization code + PKCE)                                                                 |
+| `countersign-backend-octelium` | Optional Octelium pending-session backend (`octeliumctl`)                                                          |
+| `countersign-backend-exec`     | Generic stdin/stdout JSON helper backend                                                                           |
+| `countersign-channel-slack`    | Slack Block Kit buttons & `/countersign-link` over Socket Mode                                                     |
+| `countersign-channel-discord`  | Discord embeds, buttons & `/countersign-link` over the Gateway                                                     |
+| `countersign-channel-webpush`  | Browser Web Push (RFC 8291 + VAPID) for eligible approvers / PWAs                                                  |
+| `countersign-channel-ntfy`     | Push notifications via ntfy (notify-only, links to web UI)                                                         |
+| `countersign-channel-webhook`  | Signed JSON events ([Standard Webhooks](https://www.standardwebhooks.com/))                                        |
+| `countersignd`                 | Main daemon: engine, outbox dispatcher, web UI, JSON API, intake & MCP API, Prometheus metrics                     |
+| `countersign`                  | Host-side admin & keygen CLI                                                                                       |
+| `countersign-sudo`             | Linux PAM helper (`pam_exec`) and `run` / `enroll` CLI for `sudo` approval                                         |
+| `countersign-ask`              | Standalone CLI for CI gates, scripts, and agents to ask structured questions                                       |
 
 ## Documentation
 
-- **Configuration & deployment**
-  - [`crates/countersignd/config.example.toml`](crates/countersignd/config.example.toml) — annotated server configuration reference
-  - [`docs/guides/deployment.md`](docs/guides/deployment.md) — systemd, Docker, reverse proxy (`/intake/` + `/mcp`), SIGHUP reload, and Prometheus metrics
-  - [`docs/guides/sudo-host-setup.md`](docs/guides/sudo-host-setup.md) — installing and verifying `countersign-sudo` on Linux hosts (with [`contrib/`](crates/countersign-sudo/contrib/) examples)
-  - [`docs/guides/ci-questions.md`](docs/guides/ci-questions.md) — using `countersign-ask` and CI OIDC JWTs in pipelines
+- **Operator guides & examples**
+  - [`crates/countersignd/config.example.toml`](crates/countersignd/config.example.toml) — complete, annotated server configuration
+  - [`docs/guides/deployment.md`](docs/guides/deployment.md) — systemd, Docker, reverse proxy (`/intake/` + `/mcp`), SIGHUP reload, metrics, backups
+  - [`docs/guides/sudo-host-setup.md`](docs/guides/sudo-host-setup.md) — installing and verifying `countersign-sudo` on Linux hosts (with [`contrib/`](crates/countersign-sudo/contrib/))
+  - [`docs/guides/ci-questions.md`](docs/guides/ci-questions.md) — `countersign-ask` and GitHub Actions OIDC setup
   - [`deploy/systemd/countersignd.service`](deploy/systemd/countersignd.service) & [`Dockerfile`](Dockerfile)
 - **Design documents**
   - [`docs/design/deployment.md`](docs/design/deployment.md) — platform boundaries, TLS modes, and connectors
