@@ -14,11 +14,11 @@
 <div
   role={tone === "error" ? "alert" : "status"}
   data-tone={tone}
-  {...style("flex px-3.5 py-2.5 items-start gap-2.5 text-sm rounded-control", {
-    "data-[tone=error]:": "text-bad bg-bad-soft",
-    "data-[tone=success]:": "text-good bg-good-soft",
-    "data-[tone=info]:": "text-foreground-secondary bg-surface-subtle border border-border",
-    "data-[tone=warning]:": "text-waiting bg-waiting-soft",
+  {...style("flex px-3.5 py-2.5 items-start gap-2.5 text-sm rounded-control border", {
+    "data-[tone=error]:": "text-bad bg-bad-soft border-bad/25",
+    "data-[tone=success]:": "text-good bg-good-soft border-good/25",
+    "data-[tone=info]:": "text-foreground-secondary bg-surface-subtle border-border",
+    "data-[tone=warning]:": "text-waiting bg-waiting-soft border-waiting/25",
   })}
 >
   <span

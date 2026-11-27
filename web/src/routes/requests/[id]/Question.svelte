@@ -43,7 +43,7 @@
   });
 
   const dt = style("text-muted text-xs font-medium");
-  const dd = style("mb-3 text-foreground text-sm wrap-break-word last:mb-0");
+  const dd = style("mt-0.5 text-foreground text-sm wrap-break-word");
 </script>
 
 <div {...style("grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start")}>
@@ -61,15 +61,19 @@
 
       <div {...style("flex flex-col gap-5")}>
         {#if item.can_answer}
-          <Grant grant={item.grant} label={null} />
+          <Grant grant={item.grant} label={null} tone="info" />
         {/if}
 
         <p {...style("text-muted text-sm leading-relaxed")}>
-          Asked by client <code {...style("font-mono text-foreground-secondary text-xs")}
-            >{q.asker}</code
+          Asked by client <code
+            {...style(
+              "px-1.5 py-0.5 font-mono text-foreground-secondary text-xs bg-surface-subtle rounded border border-border/60",
+            )}>{q.asker}</code
           >{#if q.asker_actor}
-            for <code {...style("font-mono text-foreground-secondary text-xs")}
-              >{q.asker_actor}</code
+            for <code
+              {...style(
+                "px-1.5 py-0.5 font-mono text-foreground-secondary text-xs bg-surface-subtle rounded border border-border/60",
+              )}>{q.asker_actor}</code
             >{/if}. The text below comes from the asker and is unverified.
         </p>
 
@@ -83,7 +87,7 @@
         {#if q.message !== null}
           <div
             {...style(
-              "px-4 py-3 text-[0.9375rem]/relaxed text-foreground wrap-break-word whitespace-pre-wrap bg-asking-soft rounded-control",
+              "px-4 py-3.5 text-[0.9375rem]/relaxed text-foreground wrap-break-word whitespace-pre-wrap bg-surface-subtle rounded-r-control border-y border-y-border border-r border-r-border border-l-2 border-l-asking",
             )}
           >
             {q.message}
@@ -119,14 +123,26 @@
         {#if q.context.length > 0}
           <div>
             <h2 {...style(heading)}>Context</h2>
-            <dl {...style("grid gap-x-6 gap-y-2.5 sm:grid-cols-[minmax(7rem,max-content)_1fr]")}>
+            <dl
+              {...style(
+                "bg-surface-subtle/50 rounded-control border border-border/70 divide-y divide-border/60",
+              )}
+            >
               {#each q.context as [k, v], i (i)}
-                <dt {...style("text-muted text-xs font-medium sm:pt-0.5")}>{k}</dt>
-                <dd
-                  {...style("min-w-0 text-foreground text-sm wrap-break-word whitespace-pre-wrap")}
+                <div
+                  {...style(
+                    "grid px-3.5 py-2 gap-x-4 gap-y-0.5 sm:grid-cols-[minmax(8rem,10.5rem)_1fr] sm:items-baseline",
+                  )}
                 >
-                  {v}
-                </dd>
+                  <dt {...style("text-muted text-xs font-medium")}>{k}</dt>
+                  <dd
+                    {...style(
+                      "min-w-0 text-foreground text-sm wrap-break-word whitespace-pre-wrap",
+                    )}
+                  >
+                    {v}
+                  </dd>
+                </div>
               {/each}
             </dl>
           </div>
@@ -137,12 +153,24 @@
     {#if q.answer.length > 0 || q.answer_hidden}
       <Card title={q.answer_confidential ? "Answer (confidential)" : "Answer"}>
         {#if q.answer.length > 0}
-          <dl {...style("grid gap-x-6 gap-y-2.5 sm:grid-cols-[minmax(7rem,max-content)_1fr]")}>
+          <dl
+            {...style(
+              "bg-surface-subtle/50 rounded-control border border-border/70 divide-y divide-border/60",
+            )}
+          >
             {#each q.answer as [k, v], i (i)}
-              <dt {...style("text-muted text-xs font-medium sm:pt-0.5")}>{k}</dt>
-              <dd {...style("min-w-0 text-foreground text-sm wrap-break-word whitespace-pre-wrap")}>
-                {v}
-              </dd>
+              <div
+                {...style(
+                  "grid px-3.5 py-2 gap-x-4 gap-y-0.5 sm:grid-cols-[minmax(8rem,10.5rem)_1fr] sm:items-baseline",
+                )}
+              >
+                <dt {...style("text-muted text-xs font-medium")}>{k}</dt>
+                <dd
+                  {...style("min-w-0 text-foreground text-sm wrap-break-word whitespace-pre-wrap")}
+                >
+                  {v}
+                </dd>
+              </div>
             {/each}
           </dl>
         {:else}
@@ -293,12 +321,21 @@
           </div>
         </form>
 
-        <details {...style("mt-6 pt-5 border-border border-t")} open={failure?.form === "decline"}>
+        <details
+          {...style("group mt-6 pt-5 border-border border-t")}
+          open={failure?.form === "decline"}
+        >
           <summary
             {...style(
               "flex items-center gap-1.5 text-muted text-xs font-medium cursor-pointer select-none hover:text-foreground",
             )}
           >
+            <span
+              aria-hidden="true"
+              {...style(
+                "icon-sm icon-lucide--chevron-right transition-transform group-open:rotate-90",
+              )}
+            ></span>
             <span aria-hidden="true" {...style("icon-sm icon-lucide--circle-slash")}></span>
             Decline to answer
           </summary>
@@ -335,41 +372,60 @@
   </div>
 
   <aside {...style("p-5 bg-surface rounded-panel border border-border lg:sticky lg:top-20")}>
-    <dl>
+    <h2 {...style(heading)}>Details</h2>
+    <dl {...style("divide-y divide-border/60")}>
       {#if outcome}
-        <dt {...style(dt)}>Outcome</dt>
-        <dd {...style(dd)}>
-          {outcome.text}
-          <span {...style("block text-muted text-xs")}><Time at={outcome.at} /></span>
-        </dd>
+        <div {...style("py-2.5 first:pt-0 last:pb-0")}>
+          <dt {...style(dt)}>Outcome</dt>
+          <dd {...style(dd)}>
+            {outcome.text}
+            <span {...style("block text-muted text-xs")}><Time at={outcome.at} /></span>
+          </dd>
+        </div>
       {/if}
       {#if q.note}
-        <dt {...style(dt)}>Note</dt>
-        <dd {...style(dd)}>{q.note}</dd>
+        <div {...style("py-2.5 first:pt-0 last:pb-0")}>
+          <dt {...style(dt)}>Note</dt>
+          <dd {...style(dd)}>{q.note}</dd>
+        </div>
       {/if}
       {#if q.pending_until}
-        <dt {...style(dt)}>Answer by</dt>
-        <dd {...style(dd)}>
-          <Time at={q.pending_until} />
-          <span {...style("block text-muted text-xs")}
-            ><Time at={q.pending_until} mode="relative" /></span
-          >
-        </dd>
+        <div {...style("py-2.5 first:pt-0 last:pb-0")}>
+          <dt {...style(dt)}>Answer by</dt>
+          <dd {...style(dd)}>
+            <Time at={q.pending_until} />
+            <span {...style("block text-muted text-xs")}
+              ><Time at={q.pending_until} mode="relative" /></span
+            >
+          </dd>
+        </div>
       {/if}
-      <dt {...style(dt)}>Asked</dt>
-      <dd {...style(dd)}><Time at={q.created_at} /></dd>
-      <dt {...style(dt)}>Policy</dt>
-      <dd {...style(dd)}><code {...style("font-mono text-xs")}>{q.policy}</code></dd>
-      <dt {...style(dt)}>Responders</dt>
-      <dd {...style(dd)}>
-        <span {...style("flex flex-wrap gap-1")}>
-          {#each q.responders as r (r)}
-            <code {...style("px-1.5 py-0.5 font-mono text-xs bg-surface-hover rounded")}>{r}</code>
-          {/each}
-        </span>
-      </dd>
-      <dt {...style(dt)}>Answering needs</dt>
-      <dd {...style(dd)}><code {...style("font-mono text-xs")}>{q.min_assurance}</code></dd>
+      <div {...style("py-2.5 first:pt-0 last:pb-0")}>
+        <dt {...style(dt)}>Asked</dt>
+        <dd {...style(dd)}><Time at={q.created_at} /></dd>
+      </div>
+      <div {...style("py-2.5 first:pt-0 last:pb-0")}>
+        <dt {...style(dt)}>Policy</dt>
+        <dd {...style(dd)}><code {...style("font-mono text-xs")}>{q.policy}</code></dd>
+      </div>
+      <div {...style("py-2.5 first:pt-0 last:pb-0")}>
+        <dt {...style(dt)}>Responders</dt>
+        <dd {...style(dd)}>
+          <span {...style("flex mt-1 flex-wrap gap-1")}>
+            {#each q.responders as r (r)}
+              <code
+                {...style(
+                  "px-1.5 py-0.5 font-mono text-xs bg-surface-subtle rounded border border-border/70",
+                )}>{r}</code
+              >
+            {/each}
+          </span>
+        </dd>
+      </div>
+      <div {...style("py-2.5 first:pt-0 last:pb-0")}>
+        <dt {...style(dt)}>Answering needs</dt>
+        <dd {...style(dd)}><code {...style("font-mono text-xs")}>{q.min_assurance}</code></dd>
+      </div>
     </dl>
   </aside>
 </div>

@@ -27,7 +27,7 @@
   }
 
   const step = style(
-    "flex size-6 shrink-0 items-center justify-center text-action text-xs font-semibold bg-action-soft rounded-full",
+    "flex size-6 shrink-0 items-center justify-center text-action text-xs font-semibold bg-action-soft rounded-full border border-action/25",
   );
 </script>
 
@@ -41,24 +41,28 @@
 />
 
 <div {...style("grid gap-6 md:grid-cols-2")}>
-  <ol {...style("flex p-5 flex-col gap-4 bg-surface rounded-panel border border-border")}>
+  <ol {...style("flex p-6 flex-col gap-5 bg-surface rounded-panel border border-border")}>
     <li {...style("flex gap-3")}>
       <span {...style(step)}>1</span>
-      <p {...style("text-sm leading-relaxed")}>Get a one-time code here.</p>
+      <p {...style("text-foreground-secondary text-sm leading-relaxed")}>
+        Get a one-time code here.
+      </p>
     </li>
     <li {...style("flex gap-3")}>
       <span {...style(step)}>2</span>
-      <p {...style("text-sm leading-relaxed")}>
+      <p {...style("text-foreground-secondary text-sm leading-relaxed")}>
         Send it to countersign from the chat app. On Discord, run
-        <code {...style("px-1 py-0.5 font-mono text-xs bg-surface-hover rounded")}
-          >/countersign-link</code
+        <code
+          {...style(
+            "px-1.5 py-0.5 font-mono text-foreground text-xs bg-code rounded border border-border/70",
+          )}>/countersign-link</code
         >
         and paste the code.
       </p>
     </li>
     <li {...style("flex gap-3")}>
       <span {...style(step)}>3</span>
-      <p {...style("text-sm leading-relaxed")}>
+      <p {...style("text-foreground-secondary text-sm leading-relaxed")}>
         Chat buttons now act as you. Linking an account that is already linked moves it to you.
       </p>
     </li>
@@ -66,14 +70,16 @@
 
   <section
     {...style(
-      "flex p-5 flex-col items-center justify-center gap-4 text-center bg-surface rounded-panel border border-border",
+      "flex p-6 flex-col items-center justify-center gap-4 text-center bg-surface rounded-panel border border-border",
     )}
   >
     {#if failure}
       <Banner>{failure}</Banner>
     {/if}
     {#if code}
-      <p {...style("text-muted text-xs font-medium tracking-wider uppercase")}>Your code</p>
+      <p {...style("text-[0.6875rem] text-muted font-semibold tracking-[0.08em] uppercase")}>
+        Your code
+      </p>
       <div {...style("flex items-center gap-2")}>
         <code
           data-code
@@ -92,7 +98,7 @@
           ></span>
         </Button>
       </div>
-      <p {...style("text-muted text-xs leading-relaxed")}>
+      <p {...style("max-w-xs text-muted text-xs leading-relaxed")}>
         Valid once, until <Time at={code.expires} /> (<Time at={code.expires} mode="relative" />).
         Getting a new code cancels this one.
       </p>
@@ -100,11 +106,17 @@
       <span
         aria-hidden="true"
         {...style(
-          "flex size-11 items-center justify-center text-action bg-action-soft rounded-full",
+          "flex size-11 items-center justify-center text-action bg-action-soft rounded-full border border-action/25",
         )}
       >
         <span {...style("icon-lg icon-lucide--link")}></span>
       </span>
+      <div>
+        <h2 {...style("text-foreground text-sm font-semibold")}>One-time link code</h2>
+        <p {...style("mt-1 max-w-xs text-muted text-xs leading-relaxed")}>
+          Generate a short-lived code to connect your chat account to countersign.
+        </p>
+      </div>
     {/if}
     <form method="POST" use:enhance={issuing.enhance}>
       <Button variant={code ? "secondary" : "primary"} disabled={issuing.busy}>

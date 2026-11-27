@@ -13,11 +13,11 @@
   } = $props();
 </script>
 
-<div {...style("flex mb-6 flex-wrap items-end justify-between gap-3")}>
+<div {...style("flex mb-7 flex-wrap items-end justify-between gap-3")}>
   <div {...style("min-w-0")}>
-    <h1 {...style("text-foreground text-xl font-semibold tracking-tight")}>{title}</h1>
+    <h1 {...style("text-2xl text-foreground font-semibold tracking-tight")}>{title}</h1>
     {#if description}
-      <p {...style("mt-1 max-w-2xl text-muted text-sm leading-relaxed")}>{description}</p>
+      <p {...style("mt-1.5 max-w-2xl text-muted text-sm leading-relaxed")}>{description}</p>
     {/if}
   </div>
   {#if actions}

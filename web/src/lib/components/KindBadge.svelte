@@ -7,10 +7,10 @@
 <span
   data-kind={kind}
   {...style(
-    "inline-flex h-5 px-1.5 items-center gap-1 text-[0.6875rem] font-semibold tracking-wide uppercase rounded",
+    "inline-flex h-5 px-1.5 items-center gap-1 text-[0.6875rem] font-medium tracking-wide uppercase rounded border",
     {
-      "data-[kind=approval]:": "text-foreground-secondary bg-surface-hover",
-      "data-[kind=question]:": "text-asking bg-asking-soft",
+      "data-[kind=approval]:": "text-foreground-secondary bg-surface-subtle border-border",
+      "data-[kind=question]:": "text-asking bg-asking-soft border-asking/20",
     },
   )}
 >

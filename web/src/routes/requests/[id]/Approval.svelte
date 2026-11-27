@@ -10,7 +10,7 @@
   import Grant from "#lib/components/Grant.svelte";
   import ItemHeader from "#lib/components/ItemHeader.svelte";
   import Time from "#lib/components/Time.svelte";
-  import { control, heading } from "#lib/styles.ts";
+  import { control } from "#lib/styles.ts";
   import { Submission } from "#lib/submit.svelte.ts";
   import type { ApprovalPage } from "#lib/types.ts";
 
@@ -25,6 +25,11 @@
   const p = $derived(item.p);
   const decisions = $derived(p.status.decisions ?? []);
   const uses = $derived(p.status.uses ?? []);
+  const rows = $derived([
+    ...(p.action?.type === "lines" ? p.action.lines : []),
+    ...p.facts,
+    ...(p.claims ?? []).map((c) => ({ ...c, unverified: item.claims_note })),
+  ]);
 
   const deciding = new Submission();
   const revoking = new Submission();
@@ -45,9 +50,9 @@
 
       <div {...style("flex flex-col gap-5")}>
         {#if p.status.tone === "waiting"}
-          <Grant grant={p.grant} />
+          <Grant grant={p.grant} tone="waiting" />
         {:else if p.status.tone === "good"}
-          <Grant grant={p.grant} label="Allowed" />
+          <Grant grant={p.grant} label="Allowed" tone="good" />
         {/if}
 
         {#if item.sensitive}
@@ -57,43 +62,18 @@
         {/if}
 
         {#if p.action?.type === "command"}
-          <div>
-            <h2 {...style(heading)}>Command</h2>
-            <pre
-              {...style(
-                "overflow-x-auto px-4 py-3 font-mono text-[0.8125rem]/relaxed text-foreground wrap-break-word whitespace-pre-wrap bg-code rounded-control border border-border",
-              )}><span {...style("text-muted select-none")}>$ </span>{p.action.line}</pre>
-          </div>
-        {:else if p.action?.type === "lines"}
-          <div>
-            <h2 {...style(heading)}>{p.action.title}</h2>
-            <Details items={p.action.lines} />
-          </div>
+          <pre
+            {...style(
+              "overflow-x-auto px-4 py-3.5 font-mono text-[0.8125rem]/relaxed text-foreground wrap-break-word whitespace-pre-wrap bg-code rounded-control border border-border",
+            )}><span {...style("text-muted select-none")}>$ </span>{p.action.line}</pre>
         {/if}
 
-        {#if p.facts.length > 0}
-          <div>
-            <h2 {...style(heading)}>Facts</h2>
-            <Details items={p.facts} />
-          </div>
-        {/if}
-
-        {#if p.claims && p.claims.length > 0}
-          <div>
-            <h2 {...style(heading, "flex items-center gap-2")}>
-              Stated by the requester
-              <span
-                {...style(
-                  "px-1.5 py-0.5 text-[0.625rem] text-waiting font-semibold tracking-wide normal-case bg-waiting-soft rounded",
-                )}>{item.claims_note}</span
-              >
-            </h2>
-            <Details items={p.claims} />
-          </div>
+        {#if rows.length > 0}
+          <Details items={rows} />
         {/if}
 
         {#if p.status.needs}
-          <p {...style("text-muted text-sm")}>
+          <p {...style("text-muted text-xs")}>
             Needs <span {...style("text-foreground-secondary font-medium")}>{p.status.needs}</span>.
           </p>
         {/if}
@@ -103,12 +83,18 @@
         {/each}
 
         {#if p.audit && p.audit.length > 0}
-          <details {...style("pt-4 border-border border-t")}>
+          <details {...style("group pt-4 border-border border-t")}>
             <summary
               {...style(
                 "flex items-center gap-1.5 text-muted text-xs font-medium cursor-pointer select-none hover:text-foreground",
               )}
             >
+              <span
+                aria-hidden="true"
+                {...style(
+                  "icon-sm icon-lucide--chevron-right transition-transform group-open:rotate-90",
+                )}
+              ></span>
               <span aria-hidden="true" {...style("icon-sm icon-lucide--fingerprint")}></span>
               Identifiers and policy match
             </summary>
@@ -184,8 +170,8 @@
 
   <aside {...style("flex flex-col gap-4 lg:sticky lg:top-20")}>
     {#if item.can_decide}
-      <section {...style("p-5 bg-surface rounded-panel border border-border-strong shadow-sm")}>
-        <h2 {...style("mb-3 text-foreground text-sm font-semibold")}>Your decision</h2>
+      <section {...style("p-5 bg-surface rounded-panel border border-border-strong shadow-xs")}>
+        <h2 {...style("mb-3.5 text-foreground text-sm font-semibold")}>Your decision</h2>
         {#if failure?.form === "decide"}
           <div {...style("mb-3")}><Banner>{failure.error}</Banner></div>
         {/if}
@@ -204,11 +190,7 @@
               placeholder="Why, for the record"
               {...style(control, "resize-y")}></textarea>
           </Field>
-          <p {...style("text-muted text-xs leading-relaxed")}>
-            <strong {...style("text-foreground-secondary font-medium")}>If you approve:</strong>
-            {p.grant}
-          </p>
-          <div {...style("grid grid-cols-2 gap-2")}>
+          <div {...style("grid grid-cols-2 gap-2.5")}>
             <Button
               variant="approve"
               size="lg"
@@ -216,26 +198,34 @@
               value="approve"
               disabled={deciding.busy}
             >
-              <span aria-hidden="true" {...style("icon-md icon-lucide--check")}></span>
+              <span aria-hidden="true" {...style("icon-sm icon-lucide--check")}></span>
               Approve
             </Button>
             <Button variant="deny" size="lg" name="verdict" value="deny" disabled={deciding.busy}>
-              <span aria-hidden="true" {...style("icon-md icon-lucide--x")}></span>
+              <span aria-hidden="true" {...style("icon-sm icon-lucide--x")}></span>
               Deny
             </Button>
           </div>
           {#if item.approve_needs_reauth}
-            <p {...style("flex gap-1.5 text-muted text-xs leading-relaxed")}>
-              <span aria-hidden="true" {...style("icon-sm icon-lucide--lock mt-px shrink-0")}
+            <p
+              {...style(
+                "flex pt-3 gap-2 text-muted text-xs leading-relaxed border-border border-t",
+              )}
+            >
+              <span aria-hidden="true" {...style("icon-sm icon-lucide--lock mt-0.5 shrink-0")}
               ></span>
               Approving needs a fresh sign-in: you will sign in again and come back here. Denying does
               not.
             </p>
           {:else if item.fresh_until}
-            <p {...style("flex gap-1.5 text-muted text-xs leading-relaxed")}>
+            <p
+              {...style(
+                "flex pt-3 gap-2 text-muted text-xs leading-relaxed border-border border-t",
+              )}
+            >
               <span
                 aria-hidden="true"
-                {...style("icon-sm icon-lucide--shield-check mt-px shrink-0")}
+                {...style("icon-sm icon-lucide--shield-check mt-0.5 shrink-0 text-good")}
               ></span>
               <span>Freshly signed in: you can approve until <Time at={item.fresh_until} />.</span>
             </p>

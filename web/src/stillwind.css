@@ -2,47 +2,47 @@
 @plugin "@stillwind/plugin-iconify";
 
 @theme {
-  /* Surfaces and text */
-  --color-background: light-dark(#f6f6f4, #0c0d10);
-  --color-surface: light-dark(#ffffff, #15171b);
-  --color-surface-subtle: light-dark(#f9f9f7, #111316);
-  --color-surface-hover: light-dark(#f1f1ee, #1c1f24);
-  --color-code: light-dark(#f4f4f1, #0f1114);
+  /* Surfaces and text — warm paper (light) & deep ink (dark) */
+  --color-background: light-dark(#f7f6f2, #0b0b0d);
+  --color-surface: light-dark(#ffffff, #131316);
+  --color-surface-subtle: light-dark(#f2f1ec, #18181c);
+  --color-surface-hover: light-dark(#eae8e1, #202026);
+  --color-code: light-dark(#f4f3ee, #0e0e11);
 
-  --color-foreground: light-dark(#16171a, #ececee);
-  --color-foreground-secondary: light-dark(#3a3d44, #c4c6cc);
-  --color-muted: light-dark(#6b6e76, #8d9099);
+  --color-foreground: light-dark(#17171a, #f1f0ec);
+  --color-foreground-secondary: light-dark(#44444b, #b6b6be);
+  --color-muted: light-dark(#71717a, #7d7d87);
 
-  --color-border: light-dark(#e3e3de, #262930);
-  --color-border-strong: light-dark(#cdcdc6, #353943);
+  --color-border: light-dark(#e5e3dc, #23232a);
+  --color-border-strong: light-dark(#cfcdc4, #34343e);
 
-  /* Interactive */
-  --color-action: light-dark(#1f4fd1, #6b95ff);
-  --color-action-hover: light-dark(#173fb0, #8eaeff);
-  --color-action-foreground: light-dark(#ffffff, #0c0d10);
-  --color-action-soft: light-dark(#eef2fd, #17213b);
+  /* Interactive — vermilion seal accent echoing the Countersign mark */
+  --color-action: light-dark(#d44b14, #df5c26);
+  --color-action-hover: light-dark(#b93f0e, #ec6c37);
+  --color-action-foreground: light-dark(#ffffff, #ffffff);
+  --color-action-soft: light-dark(#fdf0ea, #261610);
 
   /* Tones of a request's state */
-  --color-waiting: light-dark(#a15c00, #f0b44c);
-  --color-waiting-soft: light-dark(#fdf5e6, #2d2210);
-  --color-asking: light-dark(#6a3fc2, #b195f5);
-  --color-asking-soft: light-dark(#f4effd, #241b39);
-  --color-good: light-dark(#17803d, #5fd38a);
-  --color-good-soft: light-dark(#ebf7ef, #10281a);
-  --color-done: light-dark(#3f6f52, #8fbfa1);
-  --color-done-soft: light-dark(#eef4f0, #16221b);
-  --color-bad: light-dark(#c0271b, #f6786d);
-  --color-bad-soft: light-dark(#fdeeec, #33150f);
-  --color-quiet: light-dark(#6b6e76, #8d9099);
-  --color-quiet-soft: light-dark(#f1f1ee, #1c1f24);
+  --color-waiting: light-dark(#9a5508, #e6aa4d);
+  --color-waiting-soft: light-dark(#fcf3e4, #261d10);
+  --color-asking: light-dark(#6741b8, #ab92e8);
+  --color-asking-soft: light-dark(#f3eefc, #1f192e);
+  --color-good: light-dark(#157347, #4ec082);
+  --color-good-soft: light-dark(#eaf6ef, #102419);
+  --color-done: light-dark(#3b6b50, #84b498);
+  --color-done-soft: light-dark(#edf3ef, #152019);
+  --color-bad: light-dark(#b92b22, #e8726a);
+  --color-bad-soft: light-dark(#fcecea, #2b1514);
+  --color-quiet: light-dark(#6c6c75, #8a8a94);
+  --color-quiet-soft: light-dark(#efeee8, #1c1c22);
 
   /* Decisions */
-  --color-approve: light-dark(#17803d, #3fbf6f);
-  --color-approve-hover: light-dark(#126832, #5fd38a);
-  --color-approve-foreground: light-dark(#ffffff, #07140c);
-  --color-deny: light-dark(#c0271b, #f0645a);
-  --color-deny-hover: light-dark(#a01f15, #f6867d);
-  --color-deny-foreground: light-dark(#ffffff, #1c0806);
+  --color-approve: light-dark(#157347, #1c7c4d);
+  --color-approve-hover: light-dark(#115e3a, #22925b);
+  --color-approve-foreground: light-dark(#ffffff, #ffffff);
+  --color-deny: light-dark(#b92b22, #b8322a);
+  --color-deny-hover: light-dark(#9a221b, #cf3c33);
+  --color-deny-foreground: light-dark(#ffffff, #ffffff);
 
   --font-mono:
     ui-monospace, "SFMono-Regular", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
@@ -61,9 +61,25 @@
   color-scheme: light dark;
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root:not([data-theme]) [data-theme-choice="system"],
+:root[data-theme="light"] [data-theme-choice="light"],
+:root[data-theme="dark"] [data-theme-choice="dark"] {
+  color: var(--color-foreground);
+  background-color: var(--color-surface);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.08);
+}
+
 @layer base {
   body {
-    @apply font-sans text-foreground text-sm antialiased bg-background;
+    @apply font-sans text-foreground text-sm antialiased bg-background selection:text-foreground selection:bg-action/20;
   }
 
   summary::-webkit-details-marker {

@@ -35,22 +35,13 @@
     <a
       href="/requests/{r.id}"
       {...style(
-        "relative flex overflow-hidden py-4 pr-4 pl-5 flex-col gap-3 bg-surface rounded-panel border border-border transition-colors sm:flex-row sm:items-center sm:gap-5",
+        "group flex px-5 py-4 flex-col gap-3 bg-surface rounded-panel border border-border transition-colors sm:flex-row sm:items-center sm:gap-5",
         {
-          "hover:": "bg-surface-subtle border-border-strong",
+          "hover:": "bg-surface-subtle/60 border-border-strong",
           "focus-visible:": "outline-2 outline-action outline-offset-2",
         },
       )}
     >
-      <span
-        aria-hidden="true"
-        data-tone={r.tone}
-        {...style("absolute inset-y-0 left-0 w-1", {
-          "data-[tone=waiting]:": "bg-waiting",
-          "data-[tone=asking]:": "bg-asking",
-          "data-[tone=good]:": "bg-good",
-        })}
-      ></span>
       <div {...style("min-w-0 flex-1")}>
         <div {...style("flex mb-1.5 items-center gap-2")}>
           <KindBadge kind={r.kind} />
@@ -58,27 +49,43 @@
             <Time at={r.created_at} mode="relative" />
           </span>
         </div>
-        <p {...style("text-[0.9375rem]/snug text-foreground font-medium")}>
+        <p {...style("text-[0.9375rem]/snug text-foreground font-semibold tracking-[-0.01em]")}>
           {r.headline}
         </p>
         {#if r.summary}
-          <p
-            {...style(
-              "truncate mt-1.5 px-2 py-1 font-mono text-foreground-secondary text-xs bg-code rounded",
-            )}
-          >
-            {r.summary}
-          </p>
+          {#if r.kind === "question"}
+            <p {...style("truncate mt-1.5 text-foreground-secondary text-sm")}>
+              {r.summary}
+            </p>
+          {:else}
+            <p
+              {...style(
+                "inline-block truncate mt-2 max-w-full px-2.5 py-1 font-mono text-foreground-secondary text-xs bg-code rounded-md border border-border/70",
+              )}
+            >
+              {r.summary}
+            </p>
+          {/if}
         {/if}
       </div>
-      <div {...style("flex shrink-0 items-center gap-3 sm:flex-col sm:items-end sm:gap-1.5")}>
-        <StatePill tone={r.tone} label={r.label} />
-        {#if r.time}
-          <span {...style("text-muted text-xs whitespace-nowrap")}>
-            {r.time.label}
-            <Time at={r.time.at} mode="short" />
-          </span>
-        {/if}
+      <div {...style("flex shrink-0 items-center justify-between gap-3 sm:justify-end")}>
+        <div {...style("flex items-center gap-3 sm:flex-col sm:items-end sm:gap-1")}>
+          <StatePill tone={r.tone} label={r.label} />
+          {#if r.time}
+            <span {...style("text-muted text-xs whitespace-nowrap")}>
+              {r.time.label}
+              <Time at={r.time.at} mode="short" />
+            </span>
+          {/if}
+        </div>
+        <span
+          aria-hidden="true"
+          {...style(
+            "hidden items-center text-muted/60 transition-colors group-hover:text-foreground sm:inline-flex",
+          )}
+        >
+          <span {...style("icon-sm icon-lucide--chevron-right")}></span>
+        </span>
       </div>
     </a>
   </li>
@@ -90,7 +97,7 @@
     {#if waiting.length > 0}
       <span
         {...style(
-          "inline-flex h-5 min-w-5 px-1.5 items-center justify-center text-[0.6875rem] text-waiting tabular-nums bg-waiting-soft rounded-full",
+          "inline-flex h-5 min-w-5 px-1.5 items-center justify-center text-[0.6875rem] text-waiting tabular-nums bg-waiting-soft rounded-full border border-waiting/20",
         )}>{waiting.length}</span
       >
     {/if}
@@ -102,7 +109,7 @@
       description="New requests appear here on their own."
     />
   {:else}
-    <ul {...style("flex flex-col gap-3")}>
+    <ul {...style("flex flex-col gap-2.5")}>
       {#each waiting as r (r.id)}
         {@render card(r)}
       {/each}
@@ -113,7 +120,7 @@
 {#if active.length > 0}
   <section {...style("mb-10")} aria-labelledby="active">
     <h2 id="active" {...style(heading)}>Active now</h2>
-    <ul {...style("flex flex-col gap-3")}>
+    <ul {...style("flex flex-col gap-2.5")}>
       {#each active as r (r.id)}
         {@render card(r)}
       {/each}
@@ -124,7 +131,13 @@
 <section aria-labelledby="recent">
   <h2 id="recent" {...style(heading)}>Recent</h2>
   {#if recent.length === 0}
-    <p {...style("text-muted text-sm")}>Nothing has finished yet.</p>
+    <div
+      {...style(
+        "px-5 py-6 text-center text-muted text-sm bg-surface rounded-panel border border-border",
+      )}
+    >
+      Nothing has finished yet.
+    </div>
   {:else}
     <ul
       {...style(
@@ -138,7 +151,7 @@
             {...style(
               "flex px-4 py-3 flex-col gap-2 transition-colors sm:flex-row sm:items-center sm:gap-4",
               {
-                "hover:": "bg-surface-subtle",
+                "hover:": "bg-surface-subtle/60",
                 "focus-visible:": "outline-2 outline-action -outline-offset-2",
               },
             )}
@@ -146,9 +159,17 @@
             <div {...style("flex min-w-0 flex-1 items-center gap-3")}>
               <KindBadge kind={r.kind} />
               <div {...style("min-w-0")}>
-                <p {...style("truncate text-foreground text-sm")}>{r.headline}</p>
+                <p {...style("truncate text-foreground text-sm font-medium")}>{r.headline}</p>
                 {#if r.summary}
-                  <p {...style("truncate font-mono text-muted text-xs")}>{r.summary}</p>
+                  <p
+                    {...style(
+                      r.kind === "question"
+                        ? "truncate text-muted text-xs"
+                        : "truncate font-mono text-muted text-xs",
+                    )}
+                  >
+                    {r.summary}
+                  </p>
                 {/if}
               </div>
             </div>

@@ -32,18 +32,19 @@
     {
       "data-[size=sm]:": "h-8 px-2.5 text-xs",
       "data-[size=md]:": "h-9 px-3.5 text-sm",
-      "data-[size=lg]:": "h-11 px-5 text-sm font-semibold",
+      "data-[size=lg]:": "h-10 px-4 text-sm font-semibold",
       "data-[variant=primary]:":
-        "text-action-foreground bg-action border-transparent hover:bg-action-hover",
+        "text-action-foreground bg-action border-transparent shadow-xs hover:bg-action-hover",
       "data-[variant=secondary]:":
-        "text-foreground bg-surface border-border hover:bg-surface-hover hover:border-border-strong",
+        "text-foreground bg-surface-subtle border-border hover:bg-surface-hover hover:border-border-strong",
       "data-[variant=ghost]:":
         "text-foreground-secondary bg-transparent border-transparent hover:text-foreground hover:bg-surface-hover",
       "data-[variant=approve]:":
-        "text-approve-foreground bg-approve border-transparent hover:bg-approve-hover",
-      "data-[variant=deny]:": "text-deny-foreground bg-deny border-transparent hover:bg-deny-hover",
+        "text-approve-foreground bg-approve border-transparent shadow-xs hover:bg-approve-hover",
+      "data-[variant=deny]:":
+        "text-bad bg-bad-soft border-bad/30 hover:text-deny-foreground hover:bg-deny hover:border-transparent",
       "data-[variant=danger]:":
-        "text-bad bg-surface border-border hover:bg-bad-soft hover:border-bad",
+        "text-bad bg-surface-subtle border-border hover:bg-bad-soft hover:border-bad/40",
       "focus-visible:": "outline-2 outline-action outline-offset-2",
       "disabled:": "opacity-50 pointer-events-none cursor-not-allowed",
     },
