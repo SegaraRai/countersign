@@ -47,6 +47,22 @@ pub fn build_authenticator(config: &Config) -> Result<Option<Arc<dyn countersign
     Ok(None)
 }
 
+/// Refuse secret files that are accessible to "others" (`o+rwx`). Group read
+/// (`0640`) is permitted so files owned by root can be read by the daemon's group.
+fn check_secret_permissions(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?.permissions().mode();
+        if mode & 0o007 != 0 {
+            return Err(format!("{} must not be accessible by others (mode {:04o})", path.display(), mode & 0o777));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// The cookie key: from `session_key_file`, or random (sessions end on restart).
 pub fn session_key(config: &Config) -> Result<axum_extra::extract::cookie::Key, BuildError> {
     use axum_extra::extract::cookie::Key;
@@ -54,6 +70,7 @@ pub fn session_key(config: &Config) -> Result<axum_extra::extract::cookie::Key, 
         tracing::warn!("server.session_key_file is not set; using a random key (web sessions end on restart)");
         return Ok(Key::generate());
     };
+    check_secret_permissions(path).map_err(BuildError::SessionKey)?;
     let bytes = std::fs::read(path).map_err(|e| BuildError::SessionKey(format!("{}: {e}", path.display())))?;
     if bytes.len() < 32 {
         return Err(BuildError::SessionKey(format!("{} must hold at least 32 bytes", path.display())));
@@ -63,6 +80,7 @@ pub fn session_key(config: &Config) -> Result<axum_extra::extract::cookie::Key, 
 
 /// Read countersign's approval signing key (`intake.signing_key_file`).
 pub fn signing_key(path: &std::path::Path) -> Result<countersign_core::approval_signing::ServerKey, BuildError> {
+    check_secret_permissions(path).map_err(BuildError::SigningKey)?;
     let text = std::fs::read_to_string(path).map_err(|e| BuildError::SigningKey(format!("{}: {e}", path.display())))?;
     countersign_core::approval_signing::ServerKey::parse(&text).ok_or_else(|| {
         BuildError::SigningKey(format!(
