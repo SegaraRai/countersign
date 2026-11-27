@@ -390,7 +390,8 @@ impl Request {
     }
 
     /// Whether this request, as an active window, covers `pending`: same
-    /// source, backend, kind, requester and target. The caller checks that
+    /// source, backend, kind, requester and target, and matching the
+    /// attribute globs frozen in `requirements.scope`. The caller checks that
     /// the same policy matches.
     pub fn window_covers(&self, pending: &PendingSubject, now: Timestamp) -> bool {
         let RequestState::Active { until } = self.state else { return false };
@@ -403,6 +404,11 @@ impl Request {
             && self.facts.requester.identity == pending.facts.requester.identity
             && self.facts.target.is_some()
             && self.facts.target == pending.facts.target
+            && self
+                .requirements
+                .scope
+                .iter()
+                .all(|(k, pat)| pending.facts.attributes.get(k).is_some_and(|v| crate::glob::matches(pat, v)))
     }
 
     /// Record a subject approved under this active window. Emits no events.
@@ -763,8 +769,15 @@ mod tests {
     #[test]
     fn window_covers_same_requester_and_target_until_it_ends() {
         let mut r = active(GrantMode::Window);
+        r.requirements.scope.insert("command".into(), "apt*".into());
         let same = another("s2", "unix:web-1#agent", "host-1");
         assert!(r.window_covers(&same, t(100)));
+        let mut outside_scope = same.clone();
+        outside_scope.facts.attributes.insert("command".into(), "rm -rf /".into());
+        assert!(!r.window_covers(&outside_scope, t(100)), "frozen scope must be enforced");
+        let mut missing_attr = same.clone();
+        missing_attr.facts.attributes.clear();
+        assert!(!r.window_covers(&missing_attr, t(100)), "missing scoped attribute must not match");
         assert!(!r.window_covers(&another("s3", "unix:web-1#bob", "host-1"), t(100)));
         assert!(!r.window_covers(&another("s4", "unix:web-1#agent", "host-2"), t(100)));
         let mut other_source = same.clone();
